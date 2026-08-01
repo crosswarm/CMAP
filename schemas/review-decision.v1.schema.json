@@ -88,7 +88,11 @@
               "artifact_refs": { "type": "array", "items": { "type": "string" } }
             }
           },
-          "parameters": { "type": "object" },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "后继任务的参数，形状由 capability 决定，此处刻意保持自由"
+          },
           "focus": {
             "type": "array",
             "items": { "type": "string" },

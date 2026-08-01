@@ -126,7 +126,11 @@
             }
           }
         },
-        "parameters": { "type": "object" },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "任务特定参数，形状由 task_type 决定，此处刻意保持自由"
+        },
         "context_summary": { "type": "string" }
       }
     },
