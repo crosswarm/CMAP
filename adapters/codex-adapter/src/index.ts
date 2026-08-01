@@ -13,8 +13,9 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, isAbsolute } from 'node:path'
 
 import type {
   TaskEnvelopeV1,
@@ -47,16 +48,24 @@ const ADAPTER_VERSION = '0.1.0'
 type CodexSandbox = 'read-only' | 'workspace-write'
 
 /**
- * 风险 → 沙箱映射。
- * 只读类任务不得获得写权限；写类任务在派发前必须已通过审批闸口
- * （闸口在控制面，Adapter 只负责不越权执行）。
+ * 沙箱档位的选择依据是「是否需要写工作区」，与风险级别正交。
+ *
+ * 容易混淆的一点：低风险不等于只读沙箱。任何任务只要声明了证据产物，
+ * 就必须能写文件——result 里的 artifact 需要真实 sha256，read-only
+ * 沙箱下根本产不出证据。
+ *
+ * 两个维度各司其职：
+ *   risk    → 是否需要人工审批、能访问哪些外部资源（permissions/forbidden）
+ *   sandbox → 能否写自己的工作区
+ *
+ * 真正的隔离来自工作区位置（低风险用临时目录，mutating 用专用 worktree）
+ * 与 permissions.forbidden，而非禁止写入。审批闸口在控制面，
+ * Adapter 只负责不越权执行。
  */
-const SANDBOX_BY_RISK: Record<RiskLevel, CodexSandbox> = {
-  'read-meta': 'read-only',
-  'read-sensitive': 'read-only',
-  controlled: 'workspace-write',
-  mutating: 'workspace-write',
-}
+const chooseSandbox = (envelope: TaskEnvelopeV1): CodexSandbox =>
+  envelope.evidence_requirements.required_artifact_roles.length > 0
+    ? 'workspace-write'
+    : 'read-only'
 
 interface RunState {
   readonly child: ChildProcess
@@ -73,9 +82,38 @@ interface RunState {
 
 export interface CodexAdapterOptions {
   readonly bin?: string
-  readonly resultSchemaPath: string
+  /**
+   * 传给 codex --output-schema 的 schema 路径。
+   *
+   * 必须是 codex-output.v1（OpenAI structured outputs 兼容子集），
+   * 不能直接用 task-result.v1——后者含裸 const、pattern、可选字段，
+   * 会被 OpenAI 拒绝：「schema must have a 'type' key」。
+   */
+  readonly outputSchemaPath: string
   /** 同一 idempotency_key 只执行一次，重复派发直接复用已有 binding。 */
   readonly idempotencyStore?: Map<string, RemoteTaskBinding>
+}
+
+/** codex 按 codex-output.v1 产出的原始结构。 */
+interface CodexOutput {
+  status: 'completed' | 'failed' | 'input_required' | 'auth_required'
+  summary: string
+  criterion_results: {
+    criterion_id: string
+    actual: string
+    passed: boolean
+    evidence_artifact_ids: string[]
+  }[]
+  artifacts: {
+    artifact_id: string
+    role: string
+    uri: string
+    media_type: string
+    size_bytes: number
+    sha256: string
+  }[]
+  findings: { severity: string; code: string; description: string }[]
+  error: { code: string; message: string; retryable: boolean } | null
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -83,13 +121,13 @@ export class CodexAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID
 
   readonly #bin: string
-  readonly #resultSchemaPath: string
+  readonly #outputSchemaPath: string
   readonly #runs = new Map<string, RunState>()
   readonly #idempotency: Map<string, RemoteTaskBinding>
 
   constructor(opts: CodexAdapterOptions) {
     this.#bin = opts.bin ?? process.env['CODEX_BIN'] ?? 'codex'
-    this.#resultSchemaPath = opts.resultSchemaPath
+    this.#outputSchemaPath = opts.outputSchemaPath
     this.#idempotency = opts.idempotencyStore ?? new Map()
   }
 
@@ -140,10 +178,10 @@ export class CodexAdapter implements AgentAdapter {
     const args = [
       'exec',
       '--json',
-      '-s', SANDBOX_BY_RISK[risk],
+      '-s', chooseSandbox(envelope),
       '-C', workDir,
       '--skip-git-repo-check',
-      '--output-schema', this.#resultSchemaPath,
+      '--output-schema', this.#outputSchemaPath,
       '-o', resultFile,
       await readFile(promptFile, 'utf8'),
     ]
@@ -310,10 +348,10 @@ export class CodexAdapter implements AgentAdapter {
       [
         'exec', 'resume', session.provider_session_id,
         '--json',
-        '-s', SANDBOX_BY_RISK[risk],
+        '-s', chooseSandbox(envelope),
         '-C', workDir,
         '--skip-git-repo-check',
-        '--output-schema', this.#resultSchemaPath,
+        '--output-schema', this.#outputSchemaPath,
         '-o', resultFile,
         renderPrompt(envelope),
       ],
@@ -347,10 +385,14 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   /**
-   * 收取结果并校验证据完整性。
+   * 收取 codex 输出，合成完整 TaskResultV1。
    *
-   * 关键：不得凭 rc=0 判定成功。信封 evidence_requirements 声明的
-   * artifact role 若缺失，一律 failed——这是「无证据即失败」的落点。
+   * 三条不可放松的规则：
+   *  1. 不得凭 rc=0 判定成功——evidence_requirements 声明的 artifact role
+   *     缺失即 failed，这是「无证据即失败」的落点。
+   *  2. 不采信 Agent 自报的 sha256——独立复算文件哈希，对不上即失败。
+   *     Agent 可能在没真正写文件的情况下编出一个哈希。
+   *  3. 身份字段由控制面填充，不取 Agent 自述——账本归控制面所有。
    */
   async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
     const state = this.#require(binding)
@@ -371,9 +413,9 @@ export class CodexAdapter implements AgentAdapter {
       )
     }
 
-    let result: TaskResultV1
+    let out: CodexOutput
     try {
-      result = JSON.parse(raw) as TaskResultV1
+      out = JSON.parse(raw) as CodexOutput
     } catch (e) {
       throw new AdapterError(
         'RESULT_UNPARSABLE',
@@ -383,11 +425,82 @@ export class CodexAdapter implements AgentAdapter {
       )
     }
 
+    // 证据角色完整性
     const required = state.envelope.evidence_requirements.required_artifact_roles
-    const produced = new Set((result.artifacts ?? []).map((a) => a.role))
+    const produced = new Set((out.artifacts ?? []).map((a) => a.role))
     const missing = required.filter((r) => !produced.has(r))
     if (missing.length > 0) {
       throw new EvidenceMissingError(missing, state.envelope.identity.task_id)
+    }
+
+    // 证据真实性：文件必须存在，且哈希由控制面独立复算
+    const artifacts: TaskResultV1['artifacts'] = []
+    for (const a of out.artifacts ?? []) {
+      const path = isAbsolute(a.uri) ? a.uri : join(state.workDir, a.uri)
+      let bytes: Buffer
+      try {
+        bytes = await readFile(path)
+      } catch {
+        throw new AdapterError(
+          'EVIDENCE_FILE_MISSING',
+          `声明的证据文件不存在：${a.uri}（角色 ${a.role}）`,
+          false,
+          `evidence-file-missing:${a.role}`,
+        )
+      }
+      const actual = createHash('sha256').update(bytes).digest('hex')
+      if (actual !== a.sha256.toLowerCase()) {
+        throw new AdapterError(
+          'EVIDENCE_HASH_MISMATCH',
+          `证据 ${a.role} 哈希不符：Agent 声明 ${a.sha256}，实际 ${actual}`,
+          false,
+          `evidence-hash-mismatch:${a.role}`,
+        )
+      }
+      artifacts.push({
+        artifact_id: a.artifact_id,
+        role: a.role,
+        uri: a.uri,
+        media_type: a.media_type,
+        size_bytes: bytes.byteLength,
+        sha256: actual,
+      })
+    }
+
+    const result: TaskResultV1 = {
+      schema: 'cmap/task-result/v1',
+      mission_id: state.envelope.identity.mission_id,
+      task_id: state.envelope.identity.task_id,
+      attempt: state.envelope.identity.revision,
+      status: out.status,
+      summary: out.summary,
+      criterion_results: (out.criterion_results ?? []).map((c) => ({
+        criterion_id: c.criterion_id,
+        actual: c.actual,
+        passed: c.passed,
+        evidence_artifact_ids: c.evidence_artifact_ids ?? [],
+      })),
+      artifacts,
+      ...(out.findings?.length
+        ? {
+            findings: out.findings.map((f) => ({
+              severity: f.severity as 'info' | 'low' | 'medium' | 'high' | 'critical',
+              code: f.code,
+              description: f.description,
+            })),
+          }
+        : {}),
+      ...(out.error
+        ? {
+            error: {
+              code: out.error.code,
+              message: out.error.message,
+              retryable: out.error.retryable,
+              fingerprint: `${out.error.code}:${state.envelope.classification.task_type}`,
+            },
+          }
+        : {}),
+      ...(state.sessionId ? { session: { provider_session_id: state.sessionId } } : {}),
     }
 
     return result
@@ -502,10 +615,16 @@ ${evidence}
 ${forbidden}
 ## 输出要求
 
-最终响应必须是符合 task-result v1 Schema 的 JSON：
-- criterion_results 逐条对应上面每个 criterion_id，含 actual 与 passed
-- artifacts 逐个声明证据产物，每个必须带真实的 sha256
-- 无法完成时 status 填 failed 并在 error 中说明，不要伪造通过
+最终响应必须是符合给定 Schema 的 JSON（身份字段由控制面填充，你不需要提供）：
+
+- \`criterion_results\` 逐条对应上面每个 criterion_id，一条都不能少；
+  \`actual\` 一律写成字符串，数值也用字符串表达
+- \`artifacts\` 逐个声明证据产物：
+  - **必须真正把文件写到磁盘**，路径用相对于当前工作目录的形式（如 \`evidence/report.json\`）
+  - \`sha256\` 必须是该文件内容的真实哈希（可用 \`shasum -a 256 <file>\` 取得）
+  - 控制面会独立复算哈希并比对，**编造哈希会被直接判定失败**
+- \`findings\` 无内容时填空数组，\`error\` 在成功时填 null
+- 无法完成时 \`status\` 填 failed 并在 \`error\` 中说明，不要伪造通过
 
 任务风险级别：${e.classification.risk_level}
 ${e.inputs?.context_summary ? `\n## 背景\n\n${e.inputs.context_summary}\n` : ''}`

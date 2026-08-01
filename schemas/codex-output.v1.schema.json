@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/codex-output/v1",
+  "title": "Codex Output v1",
+  "description": "传给 codex exec --output-schema 的输出契约。这不是账本格式，而是「Agent 只报告它知道的事实」——mission_id/task_id/attempt 等身份字段由控制面补全，因为账本归控制面所有，Agent 无权自述身份。Adapter 收到本结构后合成完整 TaskResultV1，再经严格 Schema 校验入账本。",
+
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "criterion_results", "artifacts", "findings", "error"],
+
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["completed", "failed", "input_required", "auth_required"],
+      "description": "无法完成时填 failed 并在 error 中说明，不要伪造通过"
+    },
+    "summary": {
+      "type": "string",
+      "description": "一句话结论"
+    },
+
+    "criterion_results": {
+      "type": "array",
+      "description": "逐条回应信封中每个 criterion_id，一条都不能少",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion_id", "actual", "passed", "evidence_artifact_ids"],
+        "properties": {
+          "criterion_id": { "type": "string" },
+          "actual": {
+            "type": "string",
+            "description": "实测值，统一以字符串表达，数值也写成字符串"
+          },
+          "passed": { "type": "boolean" },
+          "evidence_artifact_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "支撑该判定的 artifact_id，必须能在 artifacts 中找到"
+          }
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "description": "证据产物。必须是真实写入磁盘的文件，sha256 必须是文件内容的真实哈希——控制面会独立复算，对不上即判失败。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["artifact_id", "role", "uri", "media_type", "size_bytes", "sha256"],
+        "properties": {
+          "artifact_id": { "type": "string" },
+          "role": {
+            "type": "string",
+            "description": "必须与信封 evidence_requirements 声明的角色一致"
+          },
+          "uri": {
+            "type": "string",
+            "description": "相对于工作目录的路径，例如 evidence/report.json"
+          },
+          "media_type": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": {
+            "type": "string",
+            "description": "文件内容的 sha256 十六进制小写，64 位"
+          }
+        }
+      }
+    },
+
+    "findings": {
+      "type": "array",
+      "description": "过程中发现的问题；无则空数组",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "code", "description"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["info", "low", "medium", "high", "critical"]
+          },
+          "code": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+
+    "error": {
+      "type": ["object", "null"],
+      "description": "status 非 completed 时必填，否则填 null",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}
