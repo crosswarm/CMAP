@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/task-envelope/v1",
+  "title": "Task Envelope v1",
+  "description": "控制面派发给 Agent 的任务契约。必须自洽——被派发的 worker 不继承任何上下文，信封本身要包含执行所需的全部信息。",
+  "type": "object",
+  "required": ["schema", "identity", "classification", "goal", "environment", "execution_policy", "permissions", "evidence_requirements", "output_contract"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "cmap/task-envelope/v1" },
+
+    "identity": {
+      "type": "object",
+      "required": ["mission_id", "task_id", "idempotency_key", "revision"],
+      "additionalProperties": false,
+      "properties": {
+        "mission_id": { "type": "string", "minLength": 1 },
+        "task_id": { "type": "string", "minLength": 1 },
+        "parent_task_id": { "type": ["string", "null"] },
+        "supersedes_task_id": {
+          "type": ["string", "null"],
+          "description": "返工时指向被取代的前一轮 Task。返工创建新 Task 而非复用，以保留证据历史与因果链。"
+        },
+        "correlation_id": { "type": "string" },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "外部副作用去重键。即使引擎声称 exactly-once，超时后也无法确认副作用是否已发生。"
+        },
+        "revision": { "type": "integer", "minimum": 1 },
+        "lamport": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "逻辑时钟。跨主机排序一律不依赖各机器 wall clock。"
+        },
+        "tenant": { "type": "string" },
+        "owner": { "type": "string", "description": "发起人，用于审计与授权归属" }
+      }
+    },
+
+    "classification": {
+      "type": "object",
+      "required": ["task_type", "requested_capability", "risk_level"],
+      "additionalProperties": false,
+      "properties": {
+        "task_type": { "type": "string", "minLength": 1 },
+        "requested_capability": {
+          "type": "string",
+          "minLength": 1,
+          "description": "按能力路由，而非硬编码 Agent 名，以支持替补与降级"
+        },
+        "risk_level": {
+          "enum": ["read-meta", "read-sensitive", "controlled", "mutating"],
+          "description": "与 yonwork-cli-adapter 既有风险模型对齐。controlled 与 mutating 的授权互不蕴含，不得合并为单一批准。"
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "confidentiality": { "enum": ["public", "internal", "restricted"] }
+      }
+    },
+
+    "goal": {
+      "type": "object",
+      "required": ["statement", "success_definition"],
+      "additionalProperties": false,
+      "properties": {
+        "statement": { "type": "string", "minLength": 1 },
+        "success_definition": {
+          "type": "array",
+          "minItems": 1,
+          "description": "机读验收断言。这是自主闭环的命门：验收标准可机读，Reviewer 才能自主判定通过或打回，否则闭环退化为人工判读。",
+          "items": {
+            "type": "object",
+            "required": ["criterion_id", "metric", "operator", "expected"],
+            "additionalProperties": false,
+            "properties": {
+              "criterion_id": { "type": "string", "minLength": 1 },
+              "metric": { "type": "string", "minLength": 1 },
+              "operator": { "enum": ["lt", "lte", "gt", "gte", "eq", "neq", "contains", "not_contains"] },
+              "expected": {},
+              "unit": { "type": "string" },
+              "hard_gate": {
+                "type": "boolean",
+                "default": true,
+                "description": "true 表示由确定性程序判定。软判断不得覆盖硬指标。"
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "type": "object",
+          "description": "上下文寻址。跨主机执行禁用本机绝对路径——runner 侧自行 checkout。",
+          "required": ["repo", "ref"],
+          "additionalProperties": false,
+          "properties": {
+            "repo": { "type": "string", "minLength": 1 },
+            "ref": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$",
+              "description": "钉死 commit SHA，保证跨主机可复现。不接受分支名或 tag。"
+            },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^(?!/)(?!.*\\.\\.).*$" },
+              "description": "仓库内相对路径。禁止绝对路径与 .. 逃逸。"
+            }
+          }
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["artifact_id", "role"],
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": { "type": "string", "minLength": 1 },
+              "uri": { "type": "string" },
+              "role": { "type": "string", "minLength": 1 },
+              "sha256": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{64}$" }
+            }
+          }
+        },
+        "parameters": { "type": "object" },
+        "context_summary": { "type": "string" }
+      }
+    },
+
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "application_version": { "type": "string" },
+        "device_selector": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "profile": { "type": "string" },
+            "preferred_device_id": { "type": "string" }
+          }
+        },
+        "tenant": { "type": "string" },
+        "account_ref": {
+          "type": "string",
+          "pattern": "^secretref://",
+          "description": "只允许凭据引用，绝不内联凭据明文"
+        },
+        "network_profile": { "type": "string" },
+        "cache_mode": { "enum": ["cold", "warm"] },
+        "locale": { "type": "string" }
+      }
+    },
+
+    "execution_policy": {
+      "type": "object",
+      "required": ["timeout_seconds", "max_attempts"],
+      "additionalProperties": false,
+      "properties": {
+        "assigned_role": { "type": "string" },
+        "preferred_agent": { "type": "string" },
+        "fallback_agents": { "type": "array", "items": { "type": "string" } },
+        "affinity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "host": { "type": "string" } },
+          "description": "真机、computer-use 等资源只在特定主机上可用"
+        },
+        "timeout_seconds": { "type": "integer", "minimum": 1 },
+        "max_attempts": { "type": "integer", "minimum": 1 },
+        "heartbeat_seconds": { "type": "integer", "minimum": 1 },
+        "max_cost_units": { "type": "number", "minimum": 0 },
+        "required_resource_locks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["resource", "ttl_seconds"],
+            "additionalProperties": false,
+            "properties": {
+              "resource": { "type": "string", "minLength": 1 },
+              "ttl_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "锁必须带 TTL 且可抢占——runner 崩溃不得永久占住真机"
+              }
+            }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "retryable_error_codes": { "type": "array", "items": { "type": "string" } },
+            "initial_interval_seconds": { "type": "integer", "minimum": 1 },
+            "backoff_coefficient": { "type": "number", "minimum": 1 },
+            "max_interval_seconds": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+
+    "permissions": {
+      "type": "object",
+      "required": ["forbidden"],
+      "additionalProperties": false,
+      "properties": {
+        "filesystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": { "type": "array", "items": { "type": "string" } },
+            "write": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "repository": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": { "type": "boolean" },
+            "write": { "type": "boolean" },
+            "allow_push_branches": { "type": "array", "items": { "type": "string" } },
+            "deny_push": { "type": "array", "items": { "type": "string" }, "default": ["main", "release/*"] }
+          }
+        },
+        "yonwork": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "launch_app": { "type": "boolean" },
+            "clear_test_data": { "type": "boolean" },
+            "query_monitor": { "type": "boolean" },
+            "capture_trace": { "type": "boolean" },
+            "chat_send": { "type": "boolean" },
+            "gateway_control": { "type": "boolean" }
+          },
+          "description": "只暴露 yonwork-cli-adapter 已封装的能力。不得绕过 adapter 直调 yonworkctl 裸命令。"
+        },
+        "forbidden": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "显式禁止项，例如 production_access、delete_non_test_data、modify_access_control"
+        }
+      }
+    },
+
+    "evidence_requirements": {
+      "type": "object",
+      "required": ["required_artifact_roles"],
+      "additionalProperties": false,
+      "properties": {
+        "required_artifact_roles": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "声明的产物缺失即判 failed。不得仅凭进程 rc=0 标记成功。"
+        },
+        "minimum_trace_coverage_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "artifact_retention_days": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "output_contract": {
+      "type": "object",
+      "required": ["schema_uri"],
+      "additionalProperties": false,
+      "properties": {
+        "schema_uri": { "const": "https://cmap.local/schemas/task-result/v1" },
+        "final_statuses": {
+          "type": "array",
+          "items": { "enum": ["completed", "failed", "input_required", "auth_required", "canceled", "rejected"] }
+        }
+      }
+    },
+
+    "callbacks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status_event_endpoint": { "type": "string", "format": "uri" },
+        "artifact_endpoint": { "type": "string", "format": "uri" },
+        "approval_endpoint": { "type": "string", "format": "uri" }
+      }
+    }
+  }
+}

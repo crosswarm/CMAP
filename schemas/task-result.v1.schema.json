@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/task-result/v1",
+  "title": "Task Result v1",
+  "description": "Agent 回报给控制面的结果契约。Adapter 必须把厂商输出归一化为本结构——Workflow 不得直接解析 Agent 的自然语言终端输出。",
+  "type": "object",
+  "required": ["schema", "mission_id", "task_id", "attempt", "status", "summary", "criterion_results", "artifacts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "cmap/task-result/v1" },
+
+    "mission_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": "string", "minLength": 1 },
+    "attempt": { "type": "integer", "minimum": 1 },
+
+    "status": {
+      "enum": ["completed", "failed", "input_required", "auth_required", "canceled", "rejected"]
+    },
+
+    "summary": { "type": "string", "minLength": 1 },
+
+    "confidence": {
+      "type": "object",
+      "required": ["level"],
+      "additionalProperties": false,
+      "properties": {
+        "level": { "enum": ["low", "medium", "high"] },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "如实声明覆盖边界，例如仅覆盖单一网络环境"
+        }
+      }
+    },
+
+    "criterion_results": {
+      "type": "array",
+      "description": "逐条回应信封中的 success_definition。缺失任一 criterion_id 视为结果不完整。",
+      "items": {
+        "type": "object",
+        "required": ["criterion_id", "passed"],
+        "additionalProperties": false,
+        "properties": {
+          "criterion_id": { "type": "string", "minLength": 1 },
+          "expected": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operator": { "type": "string" },
+              "value": {}
+            }
+          },
+          "actual": {},
+          "unit": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "evidence_artifact_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "结论必须可追溯到原始 Artifact"
+          }
+        }
+      }
+    },
+
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "code", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "enum": ["info", "low", "medium", "high", "critical"] },
+          "code": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 },
+          "evidence_artifact_ids": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "description": "证据产物。evidence_requirements 声明的 role 若缺失，控制面判 failed，不接受 rc=0 作为成功依据。",
+      "items": {
+        "type": "object",
+        "required": ["artifact_id", "role", "uri", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": { "type": "string", "minLength": 1 },
+          "role": { "type": "string", "minLength": 1 },
+          "uri": { "type": "string", "minLength": 1 },
+          "media_type": { "type": "string" },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$",
+            "description": "内容寻址。防止证据被覆盖导致结论不可验证。"
+          }
+        }
+      }
+    },
+
+    "session": {
+      "type": "object",
+      "description": "供 resumeSession 续跑使用：codex exec resume / kimi -S / claude --resume",
+      "additionalProperties": false,
+      "properties": {
+        "provider_session_id": { "type": "string" },
+        "worktree": { "type": "string" },
+        "commit_sha": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40}$" }
+      }
+    },
+
+    "sse_observations": {
+      "type": "object",
+      "description": "YonWork chat send 专用。SSE 连接建立或心跳不能证明消息完成——必须观测到终态才可标记 success。这是最容易误判成功的一处。",
+      "additionalProperties": false,
+      "properties": {
+        "accepted": { "type": "boolean" },
+        "delta_observed": { "type": "boolean" },
+        "complete_observed": { "type": "boolean" },
+        "history_observed": { "type": "boolean" },
+        "run_id": { "type": "string" },
+        "request_id": { "type": "string" }
+      }
+    },
+
+    "degradation": {
+      "type": "object",
+      "description": "执行能力降级须如实标注，不得以低等级冒充高等级。等级定义见 execution-portability.md。",
+      "additionalProperties": false,
+      "properties": {
+        "level": { "enum": ["A", "B", "C", "D"] },
+        "reason": { "type": "string" },
+        "capability_gaps": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "fingerprint": {
+          "type": "string",
+          "description": "错误指纹，供无进展检测比对相邻两轮是否同一错误"
+        }
+      }
+    },
+
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens": { "type": "integer", "minimum": 0 },
+        "duration_seconds": { "type": "number", "minimum": 0 },
+        "cost_units": { "type": "number", "minimum": 0 }
+      }
+    },
+
+    "recommended_followups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["capability", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "capability": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

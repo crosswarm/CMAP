@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/review-decision/v1",
+  "title": "Review Decision v1",
+  "description": "Reviewer（Claude）的评审契约。这是整个系统最初要解决的痛点的正解：把「不满意」从一句自然语言评论，变成控制面可直接据以创建后继 Task 的结构化返工指令。控制面只接受符合本 Schema 的评审。",
+  "type": "object",
+  "required": ["schema", "mission_id", "reviewed_task_ids", "decision", "hard_gate_summary", "review_confidence"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "cmap/review-decision/v1" },
+
+    "mission_id": { "type": "string", "minLength": 1 },
+    "review_round": { "type": "integer", "minimum": 1 },
+
+    "reviewed_task_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "decision": {
+      "enum": ["accept", "rework", "escalate"],
+      "description": "accept 仍须通过程序化硬门槛才算最终通过——软判断不得覆盖硬指标。"
+    },
+
+    "hard_gate_summary": {
+      "type": "object",
+      "required": ["total", "passed", "failed"],
+      "additionalProperties": false,
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "failed_criteria": {
+      "type": "array",
+      "description": "decision 为 rework 时必须非空，且每条都要指向具体证据。",
+      "items": {
+        "type": "object",
+        "required": ["criterion_id", "expected", "actual", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "criterion_id": { "type": "string", "minLength": 1 },
+          "expected": { "type": "string", "minLength": 1 },
+          "actual": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "支撑该判定的 artifact_id"
+          }
+        }
+      }
+    },
+
+    "evidence_gaps": {
+      "type": "array",
+      "description": "证据不足以支撑判定时的缺口说明。缺证据本身就是打回理由，不得靠推测补齐。",
+      "items": {
+        "type": "object",
+        "required": ["gap_code", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "gap_code": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 },
+          "required_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+          "actual_coverage": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+
+    "required_followups": {
+      "type": "array",
+      "description": "控制面据此自动创建后继 Task。返工一律创建新 Task 并以 supersedes_task_id 关联旧结果，不复用已完成 Task，以保留证据历史与因果链。",
+      "items": {
+        "type": "object",
+        "required": ["capability", "task_type"],
+        "additionalProperties": false,
+        "properties": {
+          "capability": { "type": "string", "minLength": 1 },
+          "task_type": { "type": "string", "minLength": 1 },
+          "inputs": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "artifact_refs": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "parameters": { "type": "object" },
+          "focus": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "指明下一轮要收敛的具体方向，避免重复上一轮的无效尝试"
+          }
+        }
+      }
+    },
+
+    "no_progress": {
+      "type": "object",
+      "description": "无进展检测。不靠自然语言判断，由确定性程序比对相邻两轮。四项中多项同时成立即判定无进展，触发 Challenger 介入或升级。",
+      "additionalProperties": false,
+      "properties": {
+        "detected": { "type": "boolean" },
+        "consecutive_rounds": { "type": "integer", "minimum": 0 },
+        "patch_hash_unchanged": { "type": "boolean" },
+        "failed_criteria_unchanged": { "type": "boolean" },
+        "metric_improvement_ratio": { "type": "number" },
+        "same_error_fingerprint": { "type": "boolean" }
+      }
+    },
+
+    "stop_conditions": {
+      "type": "object",
+      "required": ["max_additional_cycles"],
+      "additionalProperties": false,
+      "properties": {
+        "max_additional_cycles": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "预算硬止损。耗尽即升级，绝不无限重试。"
+        }
+      }
+    },
+
+    "escalation": {
+      "type": "object",
+      "description": "decision 为 escalate 时必填：交回人类需要什么信息才能决策。",
+      "additionalProperties": false,
+      "properties": {
+        "reason": { "type": "string", "minLength": 1 },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["label", "tradeoff"],
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "tradeoff": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "blocking_question": { "type": "string" }
+      }
+    },
+
+    "review_confidence": {
+      "type": "object",
+      "required": ["level"],
+      "additionalProperties": false,
+      "properties": {
+        "level": { "enum": ["low", "medium", "high"] },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "limitations": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+
+    "reviewer": {
+      "type": "object",
+      "description": "评审者身份。Agent 不得自批授权，也不得把自身判断伪装成人工授权。",
+      "additionalProperties": false,
+      "properties": {
+        "actor_type": { "enum": ["agent", "human"] },
+        "actor_id": { "type": "string" },
+        "model": { "type": "string" },
+        "prompt_version": { "type": "string" }
+      }
+    }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "decision": { "const": "rework" } }, "required": ["decision"] },
+      "then": {
+        "required": ["failed_criteria", "required_followups", "stop_conditions"],
+        "properties": {
+          "failed_criteria": { "type": "array", "minItems": 1 },
+          "required_followups": { "type": "array", "minItems": 1 },
+          "stop_conditions": { "type": "object" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "decision": { "const": "escalate" } }, "required": ["decision"] },
+      "then": {
+        "required": ["escalation"],
+        "properties": { "escalation": { "type": "object" } }
+      }
+    }
+  ]
+}
