@@ -1,0 +1,76 @@
+# CMAP 本地开发栈：Temporal + PostgreSQL
+#
+# 端口选择说明（本机实测占用情况）：
+#   7233 Temporal gRPC   —— 空闲
+#   8088 Temporal Web UI —— 8080 易被抢，8233 已被 Surge 占用，故用 8088
+#   5433 PostgreSQL      —— 避开本机可能存在的 5432
+#
+# 启动：docker compose -f infra/docker-compose/docker-compose.yml up -d
+# 停止：docker compose -f infra/docker-compose/docker-compose.yml down
+# 清库：加 -v（会丢弃任务账本，仅限本地开发）
+
+name: cmap-dev
+
+services:
+  postgresql:
+    image: postgres:16-alpine
+    container_name: cmap-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:${TEMPORAL_VERSION:-latest}
+    container_name: cmap-temporal
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      # 不要设 DYNAMIC_CONFIG_FILE_PATH：1.29 镜像内已无
+      # config/dynamicconfig/development-sql.yaml，指过去会导致启动崩溃并无限重启。
+    ports:
+      - "127.0.0.1:7233:7233"
+    # 不要用 `temporal operator cluster health` 做健康检查：该 CLI 版本会忽略
+    # --address 而固定去连 127.0.0.1:8234（server 实际绑定容器 IP 的 7233，
+    # 且根本没有 8234 监听），结果是服务明明可用却永远判定不健康。
+    # 直接探测 gRPC 端口监听，判据与实际使用路径一致。
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -tln | grep -q ':7233' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-latest}
+    container_name: cmap-temporal-ui
+    depends_on:
+      temporal:
+        condition: service_started
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:8088
+    ports:
+      - "127.0.0.1:8088:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+    name: cmap-postgres-data
