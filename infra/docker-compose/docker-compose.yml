@@ -1,21 +1,41 @@
 # CMAP 本地开发栈：Temporal + PostgreSQL
 #
-# 端口选择说明（本机实测占用情况）：
+# 端口选择（本机实测占用情况）：
 #   7233 Temporal gRPC   —— 空闲
 #   8088 Temporal Web UI —— 8080 易被抢，8233 已被 Surge 占用，故用 8088
 #   5433 PostgreSQL      —— 避开本机可能存在的 5432
 #
 # 启动：docker compose -f infra/docker-compose/docker-compose.yml up -d
+# 就绪判定：node scripts/verify-temporal.mjs（不要以容器 Up 或端口 LISTEN 为准）
 # 停止：docker compose -f infra/docker-compose/docker-compose.yml down
 # 清库：加 -v（会丢弃任务账本，仅限本地开发）
 
 name: cmap-dev
+
+# 所有服务都必须清空代理变量。
+#
+# ~/.docker/config.json 配了 proxies.default = http://127.0.0.1:8234，
+# Docker CLI 会把它注入每一个容器。但容器内的 127.0.0.1 指向容器自身，
+# 那里并没有代理监听，于是容器内所有出站连接都 connection refused。
+#
+# 对 Temporal 尤其致命：server 的 worker service 要连 frontend、CLI 要连
+# server，全部被这个不存在的代理劫持。表现为「server 明明在监听 7233，
+# 内部组件却一直连不上 127.0.0.1:8234」，极具误导性——8234 不是任何
+# Temporal 端口，而是那个代理地址。容器间通信本就不需要代理。
+x-no-proxy: &no-proxy
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  NO_PROXY: "*"
+  no_proxy: "*"
 
 services:
   postgresql:
     image: postgres:16-alpine
     container_name: cmap-postgres
     environment:
+      <<: *no-proxy
       POSTGRES_USER: temporal
       POSTGRES_PASSWORD: temporal
       POSTGRES_DB: temporal
@@ -33,23 +53,33 @@ services:
   temporal:
     image: temporalio/auto-setup:${TEMPORAL_VERSION:-latest}
     container_name: cmap-temporal
+    # 跳过镜像默认的 `autosetup` 参数，直接走 start-temporal.sh
+    # （其内容就是 `exec temporal-server --env docker start`）。
+    #
+    # autosetup 会同步执行 auto-setup.sh 建 schema 并创建 default namespace。
+    # 在代理变量被清空后它本可正常工作，但本栈的 schema 与 namespace 已建好，
+    # 每次重启都重跑一遍属于无谓开销。新环境初始化见 README。
+    #
+    # 注意不能写 `command: []`——Compose 把空数组当作「未指定」，镜像默认的
+    # CMD ["autosetup"] 依然生效。必须给一个非空的无害值；entrypoint 只识别
+    # autosetup / develop / bash 三个关键字，其余一律落到 start-temporal.sh。
+    command: ["start"]
     depends_on:
       postgresql:
         condition: service_healthy
     environment:
-      - DB=postgres12
-      - DB_PORT=5432
-      - POSTGRES_USER=temporal
-      - POSTGRES_PWD=temporal
-      - POSTGRES_SEEDS=postgresql
+      <<: *no-proxy
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgresql
       # 不要设 DYNAMIC_CONFIG_FILE_PATH：1.29 镜像内已无
-      # config/dynamicconfig/development-sql.yaml，指过去会导致启动崩溃并无限重启。
+      # config/dynamicconfig/development-sql.yaml，指过去会导致启动崩溃。
     ports:
       - "127.0.0.1:7233:7233"
-    # 不要用 `temporal operator cluster health` 做健康检查：该 CLI 版本会忽略
-    # --address 而固定去连 127.0.0.1:8234（server 实际绑定容器 IP 的 7233，
-    # 且根本没有 8234 监听），结果是服务明明可用却永远判定不健康。
-    # 直接探测 gRPC 端口监听，判据与实际使用路径一致。
+    # 不用 `temporal operator cluster health` 做健康检查：该 CLI 同样受代理
+    # 注入影响，且判据应与实际使用路径一致。这里直接探测 gRPC 端口监听。
     healthcheck:
       test: ["CMD-SHELL", "netstat -tln | grep -q ':7233' || exit 1"]
       interval: 10s
@@ -65,8 +95,9 @@ services:
       temporal:
         condition: service_started
     environment:
-      - TEMPORAL_ADDRESS=temporal:7233
-      - TEMPORAL_CORS_ORIGINS=http://localhost:8088
+      <<: *no-proxy
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8088
     ports:
       - "127.0.0.1:8088:8080"
     restart: unless-stopped
