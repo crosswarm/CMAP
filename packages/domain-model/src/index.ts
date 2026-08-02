@@ -42,6 +42,8 @@ export type {
 } from './store.ts'
 
 export { MemoryStore } from './memory-store.ts'
+export { PgStore } from './pg-store.ts'
+export type { PgStoreOptions } from './pg-store.ts'
 
 export {
   RISK_LEVELS,

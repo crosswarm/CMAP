@@ -14,10 +14,11 @@
   "scripts": {
     "codegen": "node scripts/codegen.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/**/*.test.mjs tests/**/*.test.ts",
+    "test": "node --test tests/contract/*.test.mjs tests/tooling/*.test.mjs tests/domain/memory-store.test.ts tests/domain/task-state.test.ts",
     "test:contract": "node --test tests/contract/*.test.mjs",
-    "test:domain": "node --test tests/domain/*.test.ts",
-    "check": "npm run typecheck && npm test"
+    "test:domain": "node --test tests/domain/memory-store.test.ts tests/domain/task-state.test.ts",
+    "check": "npm run typecheck && npm test",
+    "test:pg": "node --test --test-concurrency=1 tests/domain/pg-store.test.ts"
   },
   "devDependencies": {
     "@temporalio/activity": "^1.21.1",
@@ -25,9 +26,13 @@
     "@temporalio/worker": "^1.21.1",
     "@temporalio/workflow": "^1.21.1",
     "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.3",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
     "json-schema-to-typescript": "^15.0.4",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "pg": "^8.22.0"
   }
 }

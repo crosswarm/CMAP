@@ -92,13 +92,20 @@ const task = (
   ...overrides,
 })
 
+/**
+ * acquired_at 自动取 expires_at 前一小时。
+ *
+ * 不能固定成"现在"：那样构造"已过期的锁"时会得到 acquired_at 晚于
+ * expires_at 的记录，现实中不可能发生。真实的过期锁是获取与过期
+ * 都在过去。PG 的 CHECK 约束抓出过这个问题。
+ */
 const lock = (id: string, resource: string, taskId: string, expiresAt: string): ResourceLock => ({
   lock_id: id,
   resource,
   task_id: taskId,
   mission_id: 'mis-1',
   holder_runner_id: 'runner-1',
-  acquired_at: T0,
+  acquired_at: new Date(Date.parse(expiresAt) - 3600_000).toISOString(),
   expires_at: expiresAt,
   released_at: null,
 })
@@ -400,6 +407,24 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
 
         const again = await s.acquireLock(lock('lk-2', 'device:x', 'tsk-2', future))
         assert.equal(again.task_id, 'tsk-2')
+      })
+
+      test('拒绝 TTL 非正的锁——过期不早于获取才有意义', async () => {
+        const s = await createStore()
+        const bad: ResourceLock = {
+          lock_id: 'lk-bad',
+          resource: 'device:x',
+          task_id: 'tsk-1',
+          mission_id: 'mis-1',
+          holder_runner_id: 'runner-1',
+          acquired_at: '2026-08-02T10:00:00.000Z',
+          expires_at: '2026-08-02T09:00:00.000Z', // 早于获取时间
+          released_at: null,
+        }
+        await assert.rejects(
+          () => s.acquireLock(bad),
+          '获取时间晚于过期时间的锁不应被接受：它一诞生就是过期的，等于无锁',
+        )
       })
 
       test('活跃锁列表按时间点过滤过期项', async () => {

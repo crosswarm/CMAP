@@ -19,6 +19,8 @@
 - monorepo 内部引用走 `#domain-model` / `#adapter-sdk`（package.json `imports`），因为 Node 的 type stripping 不处理 `node_modules` 下的 `.ts`。
 - TypeScript 走 Node 24 原生 type stripping，**零构建**；`tsc` 只做类型检查。tsconfig 开了 `erasableSyntaxOnly`，禁用 `enum`/`namespace`/参数属性。
 - 本地栈：`docker compose -f infra/docker-compose/docker-compose.yml up -d`。**就绪判定一律用 `node scripts/verify-temporal.mjs`**，不看容器状态或端口监听。
+- Task Ledger 复用 Temporal 的 PostgreSQL 实例，独立库 `cmap`。`npm test` 不依赖数据库；`npm run test:pg` 需要本地栈运行中。
+- `Store` 有内存与 PostgreSQL 两个实现，跑**同一套契约断言**（`tests/domain/store-contract.ts`）。新增实现只需再写几行 test 文件调用该套件——契约由测试定义，不由某个实现定义。
 
 ## 安全边界
 
@@ -63,7 +65,7 @@
 | 目录 | 职责 |
 |---|---|
 | `tests/contract/` | Schema 正反样例、供应商兼容性约束 |
-| `tests/domain/` | 状态机、领域规则 |
+| `tests/domain/` | 状态机、领域规则、Store 契约 |
 | `tests/tooling/` | 工程脚本（pre-commit 规则等） |
 | `scripts/e2e-*.mjs` | 真实链路，会实际调用 Agent 与外部服务 |
 

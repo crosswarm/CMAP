@@ -311,6 +311,14 @@ export class MemoryStore implements Store {
   // ----------------------------------------------------- Resource Lock
 
   async acquireLock(lock: ResourceLock): Promise<ResourceLock> {
+    // 与 PG 的 locks_ttl_positive CHECK 约束保持一致：
+    // 一诞生就过期的锁等于无锁，接受它会让调用方误以为拿到了独占。
+    if (Date.parse(lock.expires_at) <= Date.parse(lock.acquired_at)) {
+      throw new RangeError(
+        `锁 ${lock.lock_id} 的 TTL 非正：expires_at(${lock.expires_at}) 不晚于 acquired_at(${lock.acquired_at})`,
+      )
+    }
+
     const now = Date.now()
     const holder = [...this.#locks.values()].find(
       (l) =>
