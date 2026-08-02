@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+
+# 空白错误与冲突标记
+git diff --cached --check
+
+# 凭据泄漏、禁止入库路径、契约一致性
+node scripts/git-precommit.mjs --staged
