@@ -27,6 +27,23 @@ export {
 export type { TaskState, A2AState, TerminalState, WaitingState } from './task-state.ts'
 
 export {
+  ConcurrentModificationError,
+  NotFoundError,
+  WriteVerificationError,
+  LockUnavailableError,
+} from './store.ts'
+export type {
+  Store,
+  CreateMissionInput,
+  CreateTaskInput,
+  TransitionTaskInput,
+  AppendEventInput,
+  TaskQuery,
+} from './store.ts'
+
+export { MemoryStore } from './memory-store.ts'
+
+export {
   RISK_LEVELS,
   APPROVAL_REQUIRED_RISKS,
   needsApproval,
