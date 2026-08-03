@@ -273,7 +273,11 @@ export class MemoryStore implements Store {
   }
 
   async listReviews(missionId: string): Promise<readonly Review[]> {
-    return this.#reviews.filter((r) => r.mission_id === missionId)
+    // 必须按 round 排序，与 PG 版的 ORDER BY round 保持一致。
+    // 返工追踪依赖轮次顺序：按插入顺序返回会让「第几轮卡在哪」失真。
+    return this.#reviews
+      .filter((r) => r.mission_id === missionId)
+      .sort((a, b) => a.round - b.round)
   }
 
   // --------------------------------------------------------- Approval

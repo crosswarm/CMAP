@@ -18,6 +18,8 @@ import type {
   TaskState,
   Approval,
   ResourceLock,
+  Artifact,
+  Review,
 } from '#domain-model'
 import {
   ConcurrentModificationError,
@@ -108,6 +110,59 @@ const lock = (id: string, resource: string, taskId: string, expiresAt: string): 
   acquired_at: new Date(Date.parse(expiresAt) - 3600_000).toISOString(),
   expires_at: expiresAt,
   released_at: null,
+})
+
+const artifact = (id: string, taskId: string, role: string): Artifact => ({
+  artifact_id: id,
+  mission_id: 'mis-1',
+  task_id: taskId,
+  role,
+  uri: `artifact://mis-1/${taskId}/${role}.json`,
+  media_type: 'application/json',
+  size_bytes: 128,
+  sha256: 'a'.repeat(64),
+  version: 1,
+  state: 'AVAILABLE',
+  producer: { agent_id: 'codex', adapter_version: '0.1.0', execution_session_id: 'sess-1' },
+  provenance: {},
+  retention: { retain_until: '2027-01-01T00:00:00.000Z', immutable: true },
+  security: {
+    classification: 'internal',
+    contains_secrets: false,
+    contains_pii: false,
+    allowed_roles: ['engineer'],
+  },
+  created_at: T0,
+})
+
+const review = (
+  id: string,
+  missionId: string,
+  round: number,
+  decision: 'accept' | 'rework' | 'escalate',
+): Review => ({
+  id,
+  mission_id: missionId,
+  reviewed_task_ids: ['tsk-1'],
+  round,
+  decision: {
+    schema: 'cmap/review-decision/v1',
+    mission_id: missionId,
+    reviewed_task_ids: ['tsk-1'],
+    decision,
+    hard_gate_summary: { total: 1, passed: decision === 'accept' ? 1 : 0, failed: decision === 'accept' ? 0 : 1 },
+    ...(decision === 'rework'
+      ? {
+          failed_criteria: [
+            { criterion_id: 'C1', expected: '= 1', actual: '2', reason: '未达标' },
+          ],
+          required_followups: [{ capability: 'code.analyze', task_type: 'analyze' }],
+          stop_conditions: { max_additional_cycles: 1 },
+        }
+      : {}),
+    review_confidence: { level: 'high' },
+  } as Review['decision'],
+  created_at: T0,
 })
 
 const approval = (id: string, scope: 'controlled' | 'mutating'): Approval => ({
@@ -475,6 +530,200 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         const decided = await s.decideApproval('apr-1', 'approved', 'user:crosswarm', T0)
         assert.equal(decided.decided_by, 'user:crosswarm')
         assert.equal(decided.decided_at, T0)
+      })
+    })
+
+    describe('Artifact', () => {
+      test('写入后可按 task 读回', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.putArtifact(artifact('art-1', 'tsk-1', 'report'))
+
+        const got = await s.listArtifacts('tsk-1')
+        assert.equal(got.length, 1)
+        assert.equal(got[0]!.role, 'report')
+        assert.equal(got[0]!.sha256.length, 64, 'sha256 必须完整保存，不得被截断')
+      })
+
+      test('按 task 隔离，不串号', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-2', 'mis-1'), actor: ACTOR })
+        await s.putArtifact(artifact('art-1', 'tsk-1', 'report'))
+        await s.putArtifact(artifact('art-2', 'tsk-2', 'trace'))
+
+        assert.deepEqual((await s.listArtifacts('tsk-1')).map((a) => a.artifact_id), ['art-1'])
+        assert.deepEqual((await s.listArtifacts('tsk-2')).map((a) => a.artifact_id), ['art-2'])
+      })
+
+      test('无产物时返回空数组而非报错', async () => {
+        const s = await createStore()
+        assert.deepEqual(await s.listArtifacts('nobody'), [])
+      })
+    })
+
+    describe('Review', () => {
+      test('写入后可按 mission 读回，且按轮次有序', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.putReview(review('rev-2', 'mis-1', 2, 'rework'))
+        await s.putReview(review('rev-1', 'mis-1', 1, 'rework'))
+
+        const got = await s.listReviews('mis-1')
+        assert.deepEqual(got.map((r) => r.round), [1, 2], '返工追踪依赖轮次顺序')
+      })
+
+      test('decision 完整保留，不丢失返工指令', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.putReview(review('rev-1', 'mis-1', 1, 'rework'))
+
+        const got = await s.listReviews('mis-1')
+        assert.equal(got[0]!.decision.decision, 'rework')
+        assert.equal(
+          got[0]!.decision.failed_criteria?.[0]?.criterion_id,
+          'C1',
+          'failed_criteria 丢失会导致无法据以创建后继 Task',
+        )
+      })
+    })
+
+    describe('任务查询', () => {
+      test('按 mission 过滤', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createMission({ mission: mission('mis-2'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-2', 'mis-2'), actor: ACTOR })
+
+        assert.deepEqual(
+          (await s.queryTasks({ missionId: 'mis-1' })).map((t) => t.id),
+          ['tsk-1'],
+        )
+      })
+
+      test('按状态过滤', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-2', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY'])
+
+        assert.deepEqual(
+          (await s.queryTasks({ missionId: 'mis-1', states: ['READY'] })).map((t) => t.id),
+          ['tsk-1'],
+        )
+      })
+
+      test('按能力过滤', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.createTask({
+          task: task('tsk-2', 'mis-1', { capability: 'realdevice-validation' }),
+          actor: ACTOR,
+        })
+
+        assert.deepEqual(
+          (await s.queryTasks({ capability: 'realdevice-validation' })).map((t) => t.id),
+          ['tsk-2'],
+        )
+      })
+
+      test('limit 生效', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-2', 'mis-1'), actor: ACTOR })
+
+        assert.equal((await s.queryTasks({ missionId: 'mis-1', limit: 1 })).length, 1)
+      })
+    })
+
+    describe('直接追加事件', () => {
+      test('写入后出现在事件流中', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+
+        await s.appendEvent({
+          event: {
+            event_type: 'AGENT_MESSAGE_RECEIVED',
+            event_version: 1,
+            occurred_at: T0,
+            mission_id: 'mis-1',
+            task_id: null,
+            attempt: null,
+            actor: ACTOR,
+            causation_id: null,
+            correlation_id: 'mis-1',
+            trace_id: null,
+            idempotency_key: 'append-1',
+            payload: { note: 'hello' },
+          },
+        })
+
+        const events = await s.listEvents('mis-1')
+        assert.ok(events.some((e) => e.event_type === 'AGENT_MESSAGE_RECEIVED'))
+      })
+
+      test('相同 idempotency_key 重复追加只留一条', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+
+        const mk = () => ({
+          event: {
+            event_type: 'TASK_HEARTBEAT' as const,
+            event_version: 1,
+            occurred_at: T0,
+            mission_id: 'mis-1',
+            task_id: null,
+            attempt: null,
+            actor: ACTOR,
+            causation_id: null,
+            correlation_id: 'mis-1',
+            trace_id: null,
+            idempotency_key: 'dup-append',
+            payload: {},
+          },
+        })
+
+        const first = await s.appendEvent(mk())
+        const second = await s.appendEvent(mk())
+
+        assert.equal(second.event_id, first.event_id, '重复投递应返回已有事件而非新建')
+        assert.equal(
+          (await s.listEvents('mis-1')).filter((e) => e.idempotency_key === 'dup-append').length,
+          1,
+        )
+      })
+
+      test('追加的事件同样进入未投递队列', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const e = await s.appendEvent({
+          event: {
+            event_type: 'TASK_HEARTBEAT',
+            event_version: 1,
+            occurred_at: T0,
+            mission_id: 'mis-1',
+            task_id: null,
+            attempt: null,
+            actor: ACTOR,
+            causation_id: null,
+            correlation_id: 'mis-1',
+            trace_id: null,
+            idempotency_key: 'append-outbox',
+            payload: {},
+          },
+        })
+
+        const pending = await s.listUndeliveredEvents(50)
+        assert.ok(
+          pending.some((p) => p.event_id === e.event_id),
+          '经 appendEvent 写入的事件也必须能被投递器发现，否则会静默丢失',
+        )
       })
     })
 

@@ -32,3 +32,6 @@ coverage/
 .vscode/
 .idea/
 *.swp
+
+# 流程中间产物
+conclusion/temp/
