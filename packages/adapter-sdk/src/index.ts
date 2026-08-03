@@ -113,12 +113,6 @@ export interface SubscriptionHandle {
   readonly unsubscribe: () => Promise<void>
 }
 
-export interface ProviderSession {
-  readonly provider_session_id: string
-  readonly worktree?: string
-  readonly commit_sha?: string
-}
-
 // -------------------------------------------------------------------- SPI
 
 export interface AgentAdapter {
@@ -144,12 +138,6 @@ export interface AgentAdapter {
   ): Promise<SubscriptionHandle>
 
   cancel(binding: RemoteTaskBinding, reason: string): Promise<void>
-
-  /**
-   * 续跑已有会话，避免返工时丢失上下文。
-   * codex exec resume --last ｜ kimi -S <id> ｜ claude --resume
-   */
-  resumeSession?(session: ProviderSession, envelope: TaskEnvelopeV1): Promise<RemoteTaskBinding>
 
   /**
    * 收取归一化结果。

@@ -186,7 +186,8 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | codex-adapter | ✅ P0 |
 | Temporal 本地栈（docker-compose） | ✅ P0 |
 | Claude→Codex 单跳闭环 | ✅ P0，实测 68s 通过 |
-| Mission Workflow / Task Ledger 持久化 | ⬜ P1 |
+| Task Ledger（内存 + PG 双实现，同一套契约） | ✅ P1 |
+| Mission Workflow | ⬜ P1 |
 | Evidence Pack、资源锁、自动返工 | ⬜ P1 |
 | Web UI（Mission/审批/证据/返工追踪） | ⬜ P2 |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |
@@ -229,6 +230,15 @@ P4 迁移时**调度器与 Adapter 代码不应改动**。若需大改，说明�
 根因是 `~/.docker/config.json` 的代理配置被注入每个容器，而容器内 `127.0.0.1` 无代理监听。详见 [infra/docker-compose/README.md](../infra/docker-compose/README.md)。
 
 结论：**就绪判定一律以 SDK 实连为准**（`scripts/verify-temporal.mjs`），不以容器状态、健康检查或端口监听为准。
+
+## 经评审修正的设计
+
+2026-08-03 的架构评审（`pdf-cmap-arch-review`）推翻或修正了几处，记录以免重蹈：
+
+- **fencing token 不适用于哑资源**。真机、YonWork、worktree 都无法校验并拒绝过期持有者，加该字段只会制造已防住脑裂的错觉。改为锁续租 + runner 失锁自停，见 [ADR-0004](adr/0004-brain-split-on-dumb-resources.md)。
+- **幂等不能只存在进程内存**。Activity 重试可能落到另一个 Worker 进程，内存 `Map` 届时为空会导致重复 spawn Agent。binding 必须落库，见 [ADR-0005](adr/0005-workflow-ledger-boundary.md) 规则一。
+- **删除投机性预留**：`resumeSession`（为尚未实现的返工预留，形状取决于实际实现）、A2A 状态映射（对应一个已决定不实现的协议栈）、`ArtifactRelation` 从 8 种收到 2 种（其余无使用场景，只制造选择负担）。
+- **`runner_id` 进入 `RemoteTaskBinding`**：原先只有「任务在哪」没有「谁在执行」。
 
 ## 相关文档
 

@@ -94,7 +94,12 @@ export interface RemoteTaskBinding {
   readonly remote_context_id?: string
   readonly protocol: string
   readonly protocol_version: string
-  /** 供 resumeSession 续跑：codex exec resume / kimi -S / claude --resume */
+  /**
+   * 执行方标识。没有它，控制面只知道「任务在哪」而不知道「谁在执行」，
+   * P4 时无法定位执行方以做取消、超时判定与故障转移。
+   */
+  readonly runner_id: string
+  /** 供续跑使用：codex exec resume / kimi -S / claude --resume */
   readonly provider_session_id?: string
 }
 
@@ -166,15 +171,19 @@ export interface EventActor {
 export const ARTIFACT_STATES = ['UPLOADING', 'AVAILABLE', 'EXPIRED', 'REVOKED'] as const
 export type ArtifactState = (typeof ARTIFACT_STATES)[number]
 
+/**
+ * 只保留有实际使用场景的两种关系。
+ *
+ * 原本从研究报告照搬了 8 种（VALIDATES/INVALIDATES/IMPLEMENTS/REFERENCES/
+ * GENERATED_FROM/SUMMARIZES），但它们不是从 CMAP 的需求推导出来的，
+ * 其存在只会制造「该用哪个关系」的决策负担。加一个枚举值的成本，
+ * 远低于用错关系类型后的数据清理。
+ */
 export const ARTIFACT_RELATIONS = [
+  /** 派生：指标对比派生自前后两份原始测量 */
   'DERIVED_FROM',
+  /** 取代：返工后第二轮的 trace 取代第一轮 */
   'SUPERSEDES',
-  'VALIDATES',
-  'INVALIDATES',
-  'IMPLEMENTS',
-  'REFERENCES',
-  'GENERATED_FROM',
-  'SUMMARIZES',
 ] as const
 export type ArtifactRelation = (typeof ARTIFACT_RELATIONS)[number]
 

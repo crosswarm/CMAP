@@ -29,6 +29,7 @@ import type {
   TaskEvent,
   EventActor,
   EventType,
+  RemoteTaskBinding,
   Approval,
   ApprovalDecision,
   ResourceLock,
@@ -413,6 +414,20 @@ export class PgStore implements Store {
     })
   }
 
+  async setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord> {
+    const { rows, rowCount } = await this.#pool.query(
+      'UPDATE tasks SET binding = $2, updated_at = now() WHERE id = $1 RETURNING *',
+      [taskId, JSON.stringify(binding)],
+    )
+    if (rowCount === 0) throw new NotFoundError('Task', taskId)
+
+    const back = toTask(rows[0] as Record<string, unknown>)
+    if (back.binding?.remote_task_id !== binding.remote_task_id) {
+      throw new WriteVerificationError('Task', taskId, 'binding 回读不符')
+    }
+    return back
+  }
+
   async queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]> {
     const where: string[] = []
     const args: unknown[] = []
@@ -613,6 +628,34 @@ export class PgStore implements Store {
         ],
       )
       return toLock(rows[0] as Record<string, unknown>)
+    })
+  }
+
+  async renewLock(lockId: string, newExpiresAt: string): Promise<boolean> {
+    return this.#tx(async (c) => {
+      const cur = await c.query('SELECT * FROM resource_locks WHERE lock_id = $1 FOR UPDATE', [lockId])
+      if (!cur.rows.length) return false
+
+      const l = toLock(cur.rows[0] as Record<string, unknown>)
+      if (l.released_at !== null) return false
+
+      // 与抢占竞争：同一 resource 上锁的判定必须串行，
+      // 否则可能出现「抢占成功」与「续租成功」同时返回真。
+      await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [l.resource])
+
+      const taken = await c.query(
+        `SELECT 1 FROM resource_locks
+         WHERE resource = $1 AND lock_id <> $2
+           AND released_at IS NULL AND expires_at > now()`,
+        [l.resource, lockId],
+      )
+      if (taken.rowCount && taken.rowCount > 0) return false
+
+      const upd = await c.query(
+        'UPDATE resource_locks SET expires_at = $2 WHERE lock_id = $1 AND released_at IS NULL',
+        [lockId, newExpiresAt],
+      )
+      return upd.rowCount === 1
     })
   }
 

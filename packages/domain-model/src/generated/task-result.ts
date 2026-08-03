@@ -60,7 +60,7 @@ export interface TaskResultV1 {
     sha256: string
   }[]
   /**
-   * 供 resumeSession 续跑使用：codex exec resume / kimi -S / claude --resume
+   * Agent 侧的会话标识，供事后诊断与追溯。控制面不走续跑路线——返工一律派生新 Task 以保留证据历史。
    */
   session?: {
     provider_session_id?: string

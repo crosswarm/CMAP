@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   TASK_STATES,
   ALLOWED_TRANSITIONS,
-  A2A_MAPPING,
   TERMINAL_STATES,
   WAITING_STATES,
   canTransition,
@@ -32,11 +31,6 @@ describe('状态机结构完整性', () => {
     }
   })
 
-  test('每个状态都有 A2A 映射条目', () => {
-    for (const s of TASK_STATES) {
-      assert.ok(s in A2A_MAPPING, `${s} 缺少 A2A 映射`)
-    }
-  })
 
   test('终态没有出口', () => {
     for (const s of TERMINAL_STATES) {
@@ -173,24 +167,5 @@ describe('迁移守卫必须抛错而非静默', () => {
 
   test('合法迁移不抛错', () => {
     assert.doesNotThrow(() => assertTransition('QUEUED', 'RUNNING'))
-  })
-})
-
-describe('A2A 映射语义', () => {
-  test('多个内部状态映射到 working 是有意的（A2A 不区分等资源与执行中）', () => {
-    assert.equal(A2A_MAPPING['RUNNING'], 'working')
-    assert.equal(A2A_MAPPING['WAITING_RESOURCE'], 'working')
-    assert.equal(A2A_MAPPING['VERIFYING'], 'working')
-    assert.equal(A2A_MAPPING['REVIEWING'], 'working')
-  })
-
-  test('控制面独有的状态没有 A2A 对应', () => {
-    assert.equal(A2A_MAPPING['DRAFT'], null)
-    assert.equal(A2A_MAPPING['READY'], null)
-    assert.equal(A2A_MAPPING['REWORK'], null)
-  })
-
-  test('审批被建模为 input-required（A2A 无审批语义）', () => {
-    assert.equal(A2A_MAPPING['APPROVAL_REQUIRED'], 'input-required')
   })
 })

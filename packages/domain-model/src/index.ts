@@ -14,7 +14,6 @@ export type { ReviewDecisionV1 } from './generated/review-decision.ts'
 
 export {
   TASK_STATES,
-  A2A_MAPPING,
   TERMINAL_STATES,
   WAITING_STATES,
   ALLOWED_TRANSITIONS,
@@ -24,7 +23,7 @@ export {
   assertTransition,
   IllegalTransitionError,
 } from './task-state.ts'
-export type { TaskState, A2AState, TerminalState, WaitingState } from './task-state.ts'
+export type { TaskState, TerminalState, WaitingState } from './task-state.ts'
 
 export {
   ConcurrentModificationError,

@@ -29,41 +29,6 @@ export const TASK_STATES = [
 
 export type TaskState = (typeof TASK_STATES)[number]
 
-/** A2A 1.0 任务状态。保留映射以便将来与外部 Agent 互操作，当前不实现协议栈。 */
-export type A2AState =
-  | 'submitted'
-  | 'working'
-  | 'input-required'
-  | 'auth-required'
-  | 'completed'
-  | 'failed'
-  | 'canceled'
-  | 'rejected'
-
-/**
- * 控制面状态 → A2A 状态。
- * 多个内部状态映射到同一个 A2A 状态是有意的：A2A 不区分「等资源」和
- * 「正在跑」，但我们必须区分。
- */
-export const A2A_MAPPING: Record<TaskState, A2AState | null> = {
-  DRAFT: null,
-  READY: null,
-  QUEUED: 'submitted',
-  RUNNING: 'working',
-  WAITING_RESOURCE: 'working',
-  INPUT_REQUIRED: 'input-required',
-  AUTH_REQUIRED: 'auth-required',
-  APPROVAL_REQUIRED: 'input-required',
-  VERIFYING: 'working',
-  REVIEWING: 'working',
-  REWORK: null,
-  COMPLETED: 'completed',
-  FAILED_RETRYABLE: 'failed',
-  FAILED_TERMINAL: 'failed',
-  CANCELED: 'canceled',
-  REJECTED: 'rejected',
-}
-
 /** 终态：不再迁移。REWORK 不是终态——它会派生新 Task。 */
 export const TERMINAL_STATES = [
   'COMPLETED',

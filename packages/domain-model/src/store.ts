@@ -18,6 +18,7 @@ import type {
   MissionState,
   TaskRecord,
   TaskEvent,
+  RemoteTaskBinding,
   EventType,
   EventActor,
   Approval,
@@ -131,6 +132,15 @@ export interface Store {
    * → 回读校验。任一环节失败则整体回滚。
    */
   transitionTask(input: TransitionTaskInput): Promise<TaskRecord>
+  /**
+   * 持久化派发绑定。
+   *
+   * 这是跨进程幂等的基础：Adapter 的内存缓存在 Worker 重启后失效，
+   * 只有落库的 binding 才能让重试的 Activity 认出「已经派发过了」。
+   * 没有它，Temporal 重试会重复 spawn Agent 进程。
+   */
+  setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord>
+
   queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]>
   /**
    * 就绪任务：状态为 READY 且所有 deps 均已 COMPLETED。
@@ -167,6 +177,17 @@ export interface Store {
   // Resource Lock
   /** 已被他人持有且未过期时抛 LockUnavailableError；已过期的锁可被抢占。 */
   acquireLock(lock: ResourceLock): Promise<ResourceLock>
+  /**
+   * 续租。返回 false 表示锁已释放、已过期被抢占或不存在。
+   *
+   * 这是哑资源（真机、YonWork、worktree）唯一可行的脑裂防线：它们无法
+   * 校验 fencing token 并拒绝过期持有者，所以防线只能放在 runner 自己
+   * 身上——续租失败即认定失锁，主动终止正在进行的操作。
+   *
+   * 因此本方法**必须如实返回失败**，静默成功会让 runner 误以为仍持有独占。
+   */
+  renewLock(lockId: string, newExpiresAt: string): Promise<boolean>
+
   releaseLock(lockId: string, at: string): Promise<void>
   listActiveLocks(now: string): Promise<readonly ResourceLock[]>
 

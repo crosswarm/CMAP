@@ -17,6 +17,7 @@ import type {
   TaskRecord,
   TaskEvent,
   EventActor,
+  RemoteTaskBinding,
   Approval,
   ApprovalDecision,
   ResourceLock,
@@ -198,6 +199,20 @@ export class MemoryStore implements Store {
     return back
   }
 
+  async setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord> {
+    const t = this.#tasks.get(taskId)
+    if (!t) throw new NotFoundError('Task', taskId)
+
+    const next: TaskRecord = { ...t, binding, updated_at: new Date().toISOString() }
+    this.#tasks.set(taskId, next)
+
+    const back = this.#tasks.get(taskId)
+    if (back?.binding?.remote_task_id !== binding.remote_task_id) {
+      throw new WriteVerificationError('Task', taskId, 'binding 回读不符')
+    }
+    return back
+  }
+
   async queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]> {
     let out = [...this.#tasks.values()]
     if (q.missionId) out = out.filter((t) => t.mission_id === q.missionId)
@@ -335,6 +350,28 @@ export class MemoryStore implements Store {
 
     this.#locks.set(lock.lock_id, { ...lock })
     return lock
+  }
+
+  async renewLock(lockId: string, newExpiresAt: string): Promise<boolean> {
+    const l = this.#locks.get(lockId)
+    if (!l || l.released_at !== null) return false
+
+    // 已过期且资源已被他人持有 → 续租失败。
+    // 这是 runner 必须终止操作的信号，不能静默成功。
+    const now = Date.now()
+    if (Date.parse(l.expires_at) <= now) {
+      const taken = [...this.#locks.values()].some(
+        (o) =>
+          o.lock_id !== lockId &&
+          o.resource === l.resource &&
+          o.released_at === null &&
+          Date.parse(o.expires_at) > now,
+      )
+      if (taken) return false
+    }
+
+    this.#locks.set(lockId, { ...l, expires_at: newExpiresAt })
+    return true
   }
 
   async releaseLock(lockId: string, at: string): Promise<void> {

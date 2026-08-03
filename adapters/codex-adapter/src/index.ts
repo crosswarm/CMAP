@@ -1,10 +1,9 @@
 /**
  * Codex Adapter — 把 codex CLI 归一化为 AgentAdapter。
  *
- * 依赖的三个实测能力：
+ * 依赖的两个实测能力：
  *   codex exec --output-schema <FILE>   强制最终响应符合 JSON Schema
  *   codex exec --json                   事件以 JSONL 输出，供 subscribe 消费
- *   codex exec resume --last            续跑上一会话，返工时不丢上下文
  *
  * 安全基线：本机 codex 默认 sandbox_mode=danger-full-access +
  * approval_policy=never。那是单机自用的设置，一旦接入多人总线等于把机器
@@ -32,7 +31,6 @@ import type {
   NormalizedAgentEvent,
   NormalizedAgentStatus,
   SubscriptionHandle,
-  ProviderSession,
 } from '#adapter-sdk'
 import {
   AdapterError,
@@ -145,7 +143,9 @@ export class CodexAdapter implements AgentAdapter {
         'realdevice-validation',
       ],
       risk_ceiling: 'mutating',
-      supports_session_resume: true,
+      // codex exec resume 本身可用，但控制面不走续跑路线：返工一律派生
+      // 新 Task 以保留证据历史，因此此处如实报告为不支持。
+      supports_session_resume: false,
       supports_worktree_isolation: true,
       // computer-use 插件在本机可用，故为 A 级；不可用时须降级并如实标注
       execution_level: 'A',
@@ -219,6 +219,7 @@ export class CodexAdapter implements AgentAdapter {
       remote_task_id: `codex:${envelope.identity.task_id}:${envelope.identity.revision}`,
       protocol: 'codex-exec',
       protocol_version: ADAPTER_VERSION,
+      runner_id: ctx.runner_id,
     }
 
     this.#runs.set(binding.remote_task_id, state)
@@ -282,10 +283,11 @@ export class CodexAdapter implements AgentAdapter {
     if (state.settled) {
       throw new AdapterError('TASK_ALREADY_SETTLED', '任务已结束，无法补充输入', false, 'settled')
     }
-    // codex exec 是单轮非交互模式，补充输入须经 resumeSession 走新一轮
+    // codex exec 是单轮非交互模式。需要补充上下文时应创建新任务，
+    // 而非向已结束的会话追加——这也与「返工派生新 Task」的设计一致。
     throw new AdapterError(
       'INPUT_NOT_SUPPORTED',
-      `codex exec 为非交互模式，补充输入请改用 resumeSession（kind=${input.kind}）`,
+      `codex exec 为非交互模式，补充上下文请创建新任务（kind=${input.kind}）`,
       false,
       'codex-exec-no-stdin',
     )
@@ -335,54 +337,6 @@ export class CodexAdapter implements AgentAdapter {
     })
   }
 
-  async resumeSession(
-    session: ProviderSession,
-    envelope: TaskEnvelopeV1,
-  ): Promise<RemoteTaskBinding> {
-    const risk = envelope.classification.risk_level as RiskLevel
-    const workDir = session.worktree ?? (await mkdtemp(join(tmpdir(), 'cmap-codex-')))
-    const resultFile = join(workDir, `.cmap-result-${envelope.identity.task_id}.json`)
-
-    const child = spawn(
-      this.#bin,
-      [
-        'exec', 'resume', session.provider_session_id,
-        '--json',
-        '-s', chooseSandbox(envelope),
-        '-C', workDir,
-        '--skip-git-repo-check',
-        '--output-schema', this.#outputSchemaPath,
-        '-o', resultFile,
-        renderPrompt(envelope),
-      ],
-      {
-        env: {
-          ...process.env,
-          NO_PROXY: 'localhost,127.0.0.1,::1',
-          no_proxy: 'localhost,127.0.0.1,::1',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    )
-
-    const state: RunState = {
-      child, resultFile, workDir, envelope,
-      events: [], listeners: new Set(),
-      sessionId: session.provider_session_id,
-      exitCode: null, stderr: '', settled: false,
-    }
-    this.#wire(state)
-
-    const binding: RemoteTaskBinding = {
-      adapter: ADAPTER_ID,
-      remote_task_id: `codex:${envelope.identity.task_id}:${envelope.identity.revision}:resume`,
-      protocol: 'codex-exec-resume',
-      protocol_version: ADAPTER_VERSION,
-      provider_session_id: session.provider_session_id,
-    }
-    this.#runs.set(binding.remote_task_id, state)
-    return binding
-  }
 
   /**
    * 收取 codex 输出，合成完整 TaskResultV1。

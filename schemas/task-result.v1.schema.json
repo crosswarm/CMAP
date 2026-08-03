@@ -102,7 +102,7 @@
 
     "session": {
       "type": "object",
-      "description": "供 resumeSession 续跑使用：codex exec resume / kimi -S / claude --resume",
+      "description": "Agent 侧的会话标识，供事后诊断与追溯。控制面不走续跑路线——返工一律派生新 Task 以保留证据历史。",
       "additionalProperties": false,
       "properties": {
         "provider_session_id": { "type": "string" },

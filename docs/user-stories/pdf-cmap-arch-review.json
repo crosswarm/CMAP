@@ -1,0 +1,97 @@
+{
+  "run_id": "pdf-cmap-arch-review",
+  "source": "架构评审裁决（conclusion/temp/pdf-cmap-arch-review/）",
+  "note": "验收标准必须可机器判定。每条都要有对应的自动化测试或可复现命令。",
+  "stories": [
+    {
+      "id": "S1",
+      "priority": "P0",
+      "title": "幂等记录落 Ledger，跨进程有效",
+      "problem": "codex-adapter 的幂等记录是进程内存 Map，Worker 重启或 Activity 重试落到另一进程时失效，会重复 spawn codex。对 mutating 任务等于同一份改动被应用两次。",
+      "acceptance": [
+        "新建 Adapter 实例（模拟新进程）后，用相同 idempotency_key 派发同一任务，不得产生新的执行，必须复用已有 binding",
+        "binding 持久化在 TaskRecord.binding 中，可从 Store 读回",
+        "Adapter 内存缓存仅作快速路径，缺失时能从 Store 恢复判断",
+        "原 e2e 的同进程幂等断言仍通过"
+      ],
+      "verify": "npm test && npm run test:pg"
+    },
+    {
+      "id": "S2",
+      "priority": "P0",
+      "title": "契约测试同时跑两个 Store 实现",
+      "problem": "npm test 只跑内存版，PG 版需单独 npm run test:pg。双实现的价值在互相检查，分开跑等于放弃该价值——listReviews 缺排序的 bug 就是分开跑时才漏掉的。",
+      "acceptance": [
+        "存在一个命令能同时运行两个实现的契约测试并在任一失败时非零退出",
+        "AGENTS.md 的验证矩阵中明确该命令为 Store 改动的最小验证",
+        "数据库不可用时明确失败，不得跳过或静默通过"
+      ],
+      "verify": "npm run test:store"
+    },
+    {
+      "id": "S3",
+      "priority": "P1",
+      "title": "RemoteTaskBinding 携带 runner_id",
+      "problem": "binding 五个字段全是「任务在哪」，没有「谁在执行」。P4 时控制面无法定位执行方以做取消、超时、故障转移。",
+      "acceptance": [
+        "RemoteTaskBinding 含 runner_id 字段",
+        "codex-adapter 从 DispatchContext.runner_id 写入",
+        "契约测试断言 binding 往返 Store 后 runner_id 不丢失"
+      ],
+      "verify": "npm run test:store && npm run typecheck"
+    },
+    {
+      "id": "S4",
+      "priority": "P1",
+      "title": "Store 租户绑定构造，安全成为默认值",
+      "problem": "tenant 字段存在但从不参与过滤。逐方法加参数意味着新方法默认不带租户过滤——不安全是默认状态。查询方法只会随 P2 WebUI 增多，该默认值会持续扩散。",
+      "acceptance": [
+        "Store 构造时绑定 tenant 上下文",
+        "所有查询方法自动按 tenant 过滤，调用方无需传参",
+        "跨租户读取用例必须失败：A 租户的 Store 读不到 B 租户的 Mission/Task/Approval",
+        "两个实现均满足，由共享契约测试验证"
+      ],
+      "verify": "npm run test:store"
+    },
+    {
+      "id": "S5",
+      "priority": "P1",
+      "title": "锁续租与 runner 失锁自停",
+      "problem": "fencing token 不适用——真机、YonWork、worktree 均为哑资源，无法校验并拒绝低 token 操作。加该字段只会制造已防住脑裂的错觉。",
+      "acceptance": [
+        "Store 提供 renewLock，续租延长 expires_at 并返回是否成功",
+        "锁已被他人抢占或已释放时，续租必须返回失败而非静默成功",
+        "续租失败是 runner 终止操作的信号，该语义写入文档",
+        "两个实现均满足"
+      ],
+      "verify": "npm run test:store"
+    },
+    {
+      "id": "S6",
+      "priority": "P2",
+      "title": "删除投机性预留",
+      "problem": "resumeSession 48 行为尚未实现的返工闭环预留，形状取决于返工的实际实现；A2A_MAPPING/A2AState 对应一个已决定不实现的协议栈；ArtifactRelation 8 种关系中 6 种无使用场景。",
+      "acceptance": [
+        "resumeSession 从 SPI 与 codex-adapter 移除",
+        "A2A_MAPPING 与 A2AState 移除，相关测试同步删除",
+        "ArtifactRelation 保留 SUPERSEDES 与 DERIVED_FROM 两种",
+        "全量测试与类型检查通过"
+      ],
+      "verify": "npm run check && npm run test:pg"
+    },
+    {
+      "id": "S7",
+      "priority": "P2",
+      "title": "评审结论沉淀为 ADR 与架构文档",
+      "problem": "推翻 fencing token、确立 Workflow/Store 划分这类决策过程若不记录，后来者会重新提出并重新踩坑。",
+      "acceptance": [
+        "ADR-0004 记录哑资源的脑裂防护决策，含 fencing 为何不适用",
+        "ADR-0005 记录 Workflow 与 Store 的职责划分及三条约束",
+        "architecture.md 的实现状态表与本次改动一致",
+        "threat-model.md 记录哑资源独占的残余风险",
+        "文档中所有内部链接指向真实存在的文件"
+      ],
+      "verify": "手工核对链接 + git diff --check"
+    }
+  ]
+}

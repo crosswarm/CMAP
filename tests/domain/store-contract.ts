@@ -533,6 +533,101 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
       })
     })
 
+    describe('任务绑定持久化（跨进程幂等的基础）', () => {
+      test('binding 写入后可读回，runner_id 不丢失', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        await s.setTaskBinding('tsk-1', {
+          adapter: 'codex-adapter',
+          remote_task_id: 'codex:tsk-1:1',
+          protocol: 'codex-exec',
+          protocol_version: '0.1.0',
+          runner_id: 'runner-mac-a',
+          provider_session_id: 'sess-9',
+        })
+
+        const back = await s.getTask('tsk-1')
+        assert.equal(back?.binding?.remote_task_id, 'codex:tsk-1:1')
+        assert.equal(
+          back?.binding?.runner_id,
+          'runner-mac-a',
+          'runner_id 丢失会导致 P4 时无法定位任务在哪台机器执行',
+        )
+        assert.equal(back?.binding?.provider_session_id, 'sess-9')
+      })
+
+      test('未派发的任务 binding 为 null', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        assert.equal((await s.getTask('tsk-1'))?.binding, null)
+      })
+
+      test('对不存在的任务设置 binding 抛错', async () => {
+        const s = await createStore()
+        await assert.rejects(
+          () =>
+            s.setTaskBinding('ghost', {
+              adapter: 'a', remote_task_id: 'r', protocol: 'p',
+              protocol_version: '1', runner_id: 'runner-1',
+            }),
+          /不存在/,
+        )
+      })
+    })
+
+    describe('锁续租（哑资源的脑裂防线）', () => {
+      test('持有者可续租，延长过期时间', async () => {
+        const s = await createStore()
+        const soon = new Date(Date.now() + 60_000).toISOString()
+        await s.acquireLock(lock('lk-1', 'device:x', 'tsk-1', soon))
+
+        const later = new Date(Date.now() + 600_000).toISOString()
+        const ok = await s.renewLock('lk-1', later)
+
+        assert.equal(ok, true)
+        const active = await s.listActiveLocks(new Date(Date.now() + 120_000).toISOString())
+        assert.ok(
+          active.some((l) => l.lock_id === 'lk-1'),
+          '续租后应在原过期时间点之后仍然活跃',
+        )
+      })
+
+      test('已释放的锁续租失败——这是 runner 应终止操作的信号', async () => {
+        const s = await createStore()
+        const soon = new Date(Date.now() + 60_000).toISOString()
+        await s.acquireLock(lock('lk-1', 'device:x', 'tsk-1', soon))
+        await s.releaseLock('lk-1', new Date().toISOString())
+
+        assert.equal(
+          await s.renewLock('lk-1', new Date(Date.now() + 600_000).toISOString()),
+          false,
+          '续租必须返回失败而非静默成功，否则 runner 会以为自己仍持有独占',
+        )
+      })
+
+      test('已被他人抢占后续租失败', async () => {
+        const s = await createStore()
+        const past = new Date(Date.now() - 1000).toISOString()
+        await s.acquireLock(lock('lk-1', 'device:x', 'tsk-1', past))
+        // 过期后被抢占
+        await s.acquireLock(lock('lk-2', 'device:x', 'tsk-2', new Date(Date.now() + 600_000).toISOString()))
+
+        assert.equal(
+          await s.renewLock('lk-1', new Date(Date.now() + 600_000).toISOString()),
+          false,
+          '资源已易主，原持有者续租必须失败',
+        )
+      })
+
+      test('续租不存在的锁返回 false 而非抛错', async () => {
+        const s = await createStore()
+        assert.equal(await s.renewLock('nope', new Date(Date.now() + 1000).toISOString()), false)
+      })
+    })
+
     describe('Artifact', () => {
       test('写入后可按 task 读回', async () => {
         const s = await createStore()
