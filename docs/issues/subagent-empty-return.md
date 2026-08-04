@@ -36,6 +36,37 @@ a2a2dc47700c18f57.jsonl  含「裁决/逐项/总判」 3 处
 
 **最可能的假设：agent 在中间某条 assistant 消息里产出了完整内容，但 harness 只把最后一条消息作为返回值传回主 agent。**
 
+## 决定性新证据（2026-08-04 第 5 次复现）
+
+第 5 次复现（`a2fdc915094ec9b08`，critic 审查返工闭环，128,875 tokens / 20 tool_uses / 466s，返回 `Ready for next task.`）时做了逐条结构分析，得到**明确结论**：
+
+**内容确实产出了，但被切成多条短消息，从未汇总成一条最终交付。**
+
+```
+assistant 消息数：33
+最长 assistant 文本消息：652 字符
+最后一条 assistant 文本消息：1 字符
+```
+
+652 字符装不下要求的 13 条逐条裁定 + 缺陷列表 + 测试评价 + 结论。但把这些短消息拼起来，能看到**实质且正确**的审查结果——本次即从中提取出两项真实发现：
+
+1. `putReview` 与 `createTaskInternal` 无幂等防护（经验证是真缺陷，已修，见 commit `9d29e87`）
+2. 升级路径测试只断言返回值不查存储状态（属实，已补断言）
+
+**修正一个此前的误判**：早先看到 transcript 含 `REJECTED` 11 次，曾推测「产出了完整裁定但没传回」。逐行核查后发现那些 `REJECTED` 全部来自 `role: user` 的 `tool_result`（agent 读取文件的返回内容），**不是** agent 自己的裁定。
+
+### 由此收窄的假设
+
+问题不是"输出丢失"，而是 **agent 把结论分散在多条短消息里，最后以一句收尾语结束**。调用方只取最后一条，于是拿到空白。
+
+这解释了为什么强化 prompt 无效——agent 认为自己已经"说过了"（第 4 次那句 `Full review stands as written` 正是此意）。
+
+### 优先排查方向（据此更新）
+
+1. **能否让 harness 返回全部 assistant 文本消息的拼接**，而非仅最后一条？这是最小改动且能立即止血。
+2. 若不能，是否可在 agent prompt 中要求「最后一条消息必须重述完整结论」——但第 2、3 次尝试已表明这类指令会被忽略。
+3. agent 的 `<Output_Format>` 要求详细结构，而实际输出是碎片化短消息——是否与 omc 4.11.2 的某种流式/分段输出行为有关？`v4.15.7` 是否修复？
+
 ## 已排除的原因
 
 **不是 agent 定义要求简短输出。** 检查 `~/.claude/plugins/cache/omc/oh-my-claudecode/4.11.2/agents/architect.md`（122 行），其 `<Output_Format>` 段要求非常详细的结构化输出：
@@ -83,6 +114,22 @@ jq -r 'select(.message.role=="assistant") | [.message.content[]? | select(.type=
 # 确认最后一条 assistant 消息的内容（应该就是那句空话）
 jq -r 'select(.message.role=="assistant") | [.message.content[]? | select(.type=="text") | .text] | join("")' a48ed542d64c464c3.jsonl | tail -c 500
 ```
+
+**恢复结论的正确方式**（本次即用它挖出了两项真实发现）：
+
+```bash
+# 拼出全部 assistant 文本消息中较长的那些——结论就分散在这里
+jq -r 'select(.message.role=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join("")' \
+  a2fdc915094ec9b08.jsonl | awk 'length($0) > 300'
+
+# 长度分布：若最长仅数百字符，即为本问题的典型特征
+jq -r 'select(.message.role=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join("") | length' \
+  a2fdc915094ec9b08.jsonl | sort -rn | head -5
+```
+
+⚠️ 排查时注意区分消息角色：`REJECTED` 等关键词可能出现在 `role: "user"` 的
+`tool_result` 里（agent 读取文件的返回内容），那**不是** agent 的裁定。
+本问题排查中曾因此误判过一次。
 
 ## 需要回答的问题
 
