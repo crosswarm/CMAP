@@ -55,8 +55,8 @@ Claude 出方案 → 人肉转交 → Codex 跑真机 → 写结果 → 人肉�
 | Agent | 角色 | 冷唤起（主力） | 热唤起（仅通知） |
 |---|---|---|---|
 | Claude | Planner / Reviewer / Judge | `claude -p --session-id --output-format stream-json` | agent-bridge `notifications/claude/channel` |
-| Codex | Primary Engineer / Lab Operator | `codex exec --output-schema --json`；续跑 `exec resume` | `codex remote-control` + app-server socket |
-| Kimi | Fallback / Challenger | `kimi -p --output-format stream-json -S <id>` | `kimi acp`（stdio ACP） |
+| Codex | Primary Engineer / Lab Operator | `codex exec --output-schema --json` | `codex remote-control` + app-server socket |
+| Kimi | Fallback / Challenger | `kimi -p --output-format stream-json` | `kimi acp`（stdio ACP） |
 | YonWork | Validation Agent | `yonworkctl`：`chat send` / `events tail` / `gateway health` | `watch-events --request-id` |
 
 YonWork 是**半对等 worker**，不是纯资源：监控、通信、会话触发全走 CLI，无需 UI；只有能力中心绑定、WebView 切换这类 **UI-only 动作**才需经 codex 的 computer-use 代理。
@@ -115,7 +115,7 @@ Schema 层强制：`decision: rework` 时 `failed_criteria` 与 `required_follow
 
 ### Task 状态机
 
-16 个状态，比 A2A 更细，因为要区分几种**正常但非活跃**的停顿：
+16 个状态。之所以比多数任务系统细，是因为要区分几种**正常但非活跃**的停顿：
 
 ```
 DRAFT → READY → QUEUED → RUNNING → VERIFYING → REVIEWING → COMPLETED
@@ -147,9 +147,9 @@ DRAFT → READY → QUEUED → RUNNING → VERIFYING → REVIEWING → COMPLETED
 
 ## Adapter 层
 
-统一 SPI（`packages/adapter-sdk`）：`discover` / `startTask` / `sendInput` / `getStatus` / `subscribe` / `cancel` / `resumeSession` / `collectResult` / `health`。
+统一 SPI（`packages/adapter-sdk`）：`discover` / `startTask` / `sendInput` / `getStatus` / `subscribe` / `cancel` / `collectResult` / `health`。
 
-`resumeSession` 对应各 Agent 的续跑能力（`codex exec resume` / `kimi -S` / `claude --resume`），返工时不丢上下文。
+**不提供续跑（`resumeSession`）**：返工一律派生新 Task 以保留证据历史与因果链，不向已结束的会话追加。这与状态机中「`REWORK` 不允许回到 `RUNNING`」是同一条设计。
 
 ### 沙箱档位与风险级别是正交的
 
@@ -187,7 +187,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | Temporal 本地栈（docker-compose） | ✅ P0 |
 | Claude→Codex 单跳闭环 | ✅ P0，实测 68s 通过 |
 | Task Ledger（内存 + PG 双实现，同一套契约） | ✅ P1 |
-| Mission Workflow | ⬜ P1 |
+| Mission Workflow（骨架 + ADR-0005 三规则验证） | ✅ P1 |
 | Evidence Pack、资源锁、自动返工 | ⬜ P1 |
 | Web UI（Mission/审批/证据/返工追踪） | ⬜ P2 |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |

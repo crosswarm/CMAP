@@ -19,7 +19,8 @@
     "test:domain": "node --test tests/domain/memory-store.test.ts tests/domain/task-state.test.ts",
     "check": "npm run typecheck && npm test",
     "test:pg": "node --test --test-concurrency=1 tests/domain/pg-store.test.ts",
-    "test:store": "node --test --test-concurrency=1 tests/domain/memory-store.test.ts tests/domain/pg-store.test.ts"
+    "test:store": "node --test --test-concurrency=1 tests/domain/memory-store.test.ts tests/domain/pg-store.test.ts",
+    "test:workflow": "node --test --test-concurrency=1 tests/workflow/*.test.ts"
   },
   "devDependencies": {
     "@temporalio/activity": "^1.21.1",

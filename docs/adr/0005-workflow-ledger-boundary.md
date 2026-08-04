@@ -74,6 +74,15 @@ B 成功而后续失败时，Ledger 停在 `QUEUED` 而 Agent 已在运行。跨
 
 接受它，因为两者语义不同——前者是流程事实，后者是业务事实。**只要依赖是单向的，就不会漂移到无法判定**：Ledger 永远是权威。
 
-## 待验证
+## 验证结果（2026-08-04）
 
-Temporal 目前是「装好了但从未用过」的状态。**P1 内必须写出第一个可运行的 Mission Workflow**，验证上述三条规则可落地。若两周内跑不通，说明学习成本被低估，应重新评估 ADR-0001。
+三条规则已由 `tests/workflow/mission.test.ts` 的 6 条断言验证可落地，跑在真实 Temporal 上而非模拟环境。
+
+同时解除了两个不确定性：
+
+- **Temporal 与零构建 TS 兼容**。Worker 能直接 bundle 原生 `.ts` workflow 文件（`Workflow bundle created, size: 1.35MB`），无需额外构建步骤。
+- **Temporal 真的能跑**。此前它是「装好了但从未用过」的状态，与那个 `default` namespace 从未被创建的坑同属一类风险。现已端到端验证。
+
+因此 ADR-0001 的 Temporal 选型不再需要重新评估。
+
+测试中有一条断言值得留意：「全新 Adapter 实例（模拟新进程）同样能识别已派发」——它显式覆盖了此前 e2e 掩盖的那个缺陷（两次调用在同一进程内）。
