@@ -131,6 +131,19 @@ describe('返工闭环', () => {
     assert.equal(out.outcome, 'escalated')
     assert.deepEqual(out.followupTaskIds, [], '预算耗尽后不得再建后继任务')
     assert.ok(out.escalationReason?.includes('轮次'), '升级原因需说明是预算耗尽')
+
+    // 只断言返回值不够：若 escalate 漏掉状态落库，返回值照样正确，
+    // 而账本里任务仍停在 REVIEWING、Mission 仍是 RUNNING，无人知晓。
+    assert.equal(
+      (await store.getTask(taskId))?.state,
+      'FAILED_TERMINAL',
+      '升级后任务必须落终态，否则会被当作仍在进行',
+    )
+    assert.equal(
+      (await store.getMission('mis-rw4'))?.state,
+      'ESCALATED',
+      'Mission 必须标记为已升级，否则不会出现在待人工处理的列表里',
+    )
   })
 
   test('检测到无进展时停止返工并升级', async () => {
@@ -153,6 +166,40 @@ describe('返工闭环', () => {
 
     assert.equal(out.outcome, 'escalated', '无进展时即便预算充足也应停止')
     assert.ok(out.escalationReason?.includes('无进展'))
+
+    assert.equal((await store.getTask(taskId))?.state, 'FAILED_TERMINAL')
+    assert.equal((await store.getMission('mis-rw5'))?.state, 'ESCALATED')
+  })
+
+  test('重复调用 applyReviewDecision 不产生重复 review 与孤儿后继任务', async () => {
+    const acts = createActivities({ store })
+    await store.createMission({ mission: mission('mis-idem'), actor: ACTOR })
+
+    const taskId = await toReviewable(acts, 'mis-idem')
+    const decision = reworkDecision(taskId, 3)
+
+    const first = await acts.applyReviewDecision({ taskId, decision, round: 1 })
+    const tasksAfterFirst = (await store.queryTasks({ missionId: 'mis-idem' })).length
+    const reviewsAfterFirst = (await store.listReviews('mis-idem')).length
+
+    // Activity 重试：Temporal 超时后会真正重跑，且可能落到另一个 Worker 进程
+    const second = await acts.applyReviewDecision({ taskId, decision, round: 1 })
+
+    assert.deepEqual(
+      second.followupTaskIds,
+      first.followupTaskIds,
+      '重试必须复用已建的后继任务，而非再建一批',
+    )
+    assert.equal(
+      (await store.queryTasks({ missionId: 'mis-idem' })).length,
+      tasksAfterFirst,
+      '重复调用产生孤儿任务会让「第几轮」的计数失真',
+    )
+    assert.equal(
+      (await store.listReviews('mis-idem')).length,
+      reviewsAfterFirst,
+      '重复的评审记录会污染返工轮次追溯',
+    )
   })
 
   test('端到端：执行 → 评审 rework → 后继任务 → 再评审 accept → 完成', async () => {

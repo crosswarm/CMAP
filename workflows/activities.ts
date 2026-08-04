@@ -304,6 +304,16 @@ export const createActivities = (deps: ActivityDeps) => {
       const t = await store.getTask(taskId)
       if (!t) throw new Error(`任务不存在：${taskId}`)
 
+      // 幂等：Activity 超时后会真正重跑，且可能落到另一个 Worker 进程。
+      // 状态迁移有幂等键保护，但 putReview 与建后继任务每次都生成新 ID——
+      // 不拦住就会产生重复评审记录和孤儿任务，让「第几轮」的计数失真。
+      const priorReview = (await store.listReviews(t.mission_id)).find(
+        (r) => r.round === round && r.reviewed_task_ids.includes(taskId),
+      )
+      if (priorReview) {
+        return replayOutcome(t.mission_id, taskId, round, decision)
+      }
+
       await store.putReview({
         id: nextId('rev'),
         mission_id: t.mission_id,
@@ -381,6 +391,40 @@ export const createActivities = (deps: ActivityDeps) => {
   }
 
   // ------------------------------------------------------------ 内部
+
+  /**
+   * 重放已处理过的评审：从账本还原上次的结果，而不是重新执行。
+   *
+   * 后继任务通过 supersedes_task_id 反查，因此不依赖任何进程内状态——
+   * 换个 Worker 进程重试同样能还原。
+   */
+  async function replayOutcome(
+    missionId: string,
+    taskId: string,
+    round: number,
+    decision: ReviewDecisionV1,
+  ): Promise<ApplyReviewOutput> {
+    const followups = (await store.queryTasks({ missionId }))
+      .filter((x) => x.supersedes_task_id === taskId)
+      .map((x) => x.id)
+
+    if (decision.decision === 'accept') {
+      return { outcome: 'accept', followupTaskIds: [] }
+    }
+    if (followups.length > 0) {
+      return { outcome: 'rework', followupTaskIds: followups }
+    }
+    // 无后继任务说明上次走的是升级分支
+    const maxCycles = decision.stop_conditions?.max_additional_cycles ?? 0
+    return {
+      outcome: 'escalated',
+      followupTaskIds: [],
+      escalationReason:
+        round >= maxCycles
+          ? `返工轮次已达上限（${round}/${maxCycles}），停止返工并升级`
+          : '检测到无进展，停止返工并升级',
+    }
+  }
 
   async function finishTask(taskId: string, eventType: EventType): Promise<void> {
     const t = await store.getTask(taskId)
