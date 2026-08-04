@@ -34,6 +34,7 @@ import type {
   ApprovalDecision,
   ResourceLock,
   Artifact,
+  ArtifactEdge,
   Review,
   RiskLevel,
 } from './entities.ts'
@@ -56,6 +57,7 @@ const { Pool } = pg
 type PoolClient = pg.PoolClient
 
 const UNIQUE_VIOLATION = '23505'
+const FOREIGN_KEY_VIOLATION = '23503'
 
 const iso = (v: unknown): string =>
   v instanceof Date ? v.toISOString() : String(v)
@@ -538,6 +540,37 @@ export class PgStore implements Store {
       [taskId],
     )
     return rows.map((r) => toArtifact(r as Record<string, unknown>))
+  }
+
+  async linkArtifacts(edge: ArtifactEdge): Promise<void> {
+    try {
+      await this.#pool.query(
+        `INSERT INTO artifact_edges (source_artifact_id, target_artifact_id, relation)
+         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+        [edge.source_artifact_id, edge.target_artifact_id, edge.relation],
+      )
+    } catch (e) {
+      // 外键冲突说明某一端不存在。转成领域错误，与内存版行为一致。
+      if ((e as { code?: string }).code === FOREIGN_KEY_VIOLATION) {
+        throw new NotFoundError(
+          'Artifact',
+          `${edge.source_artifact_id} 或 ${edge.target_artifact_id}`,
+        )
+      }
+      throw e
+    }
+  }
+
+  async listLineage(artifactId: string): Promise<readonly ArtifactEdge[]> {
+    const { rows } = await this.#pool.query(
+      'SELECT * FROM artifact_edges WHERE source_artifact_id = $1 ORDER BY target_artifact_id',
+      [artifactId],
+    )
+    return rows.map((r) => ({
+      source_artifact_id: (r as Record<string, unknown>)['source_artifact_id'] as string,
+      target_artifact_id: (r as Record<string, unknown>)['target_artifact_id'] as string,
+      relation: (r as Record<string, unknown>)['relation'] as ArtifactEdge['relation'],
+    }))
   }
 
   // ----------------------------------------------------------- Review

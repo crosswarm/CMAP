@@ -14,9 +14,9 @@
   "scripts": {
     "codegen": "node scripts/codegen.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/contract/*.test.mjs tests/tooling/*.test.mjs tests/domain/memory-store.test.ts tests/domain/task-state.test.ts",
+    "test": "node --test tests/contract/*.test.mjs tests/tooling/*.test.mjs tests/domain/memory-store.test.ts tests/domain/task-state.test.ts tests/domain/evidence-pack.test.ts tests/domain/no-progress.test.ts",
     "test:contract": "node --test tests/contract/*.test.mjs",
-    "test:domain": "node --test tests/domain/memory-store.test.ts tests/domain/task-state.test.ts",
+    "test:domain": "node --test tests/domain/memory-store.test.ts tests/domain/task-state.test.ts tests/domain/evidence-pack.test.ts tests/domain/no-progress.test.ts",
     "check": "npm run typecheck && npm test",
     "test:pg": "node --test --test-concurrency=1 tests/domain/pg-store.test.ts",
     "test:store": "node --test --test-concurrency=1 tests/domain/memory-store.test.ts tests/domain/pg-store.test.ts",

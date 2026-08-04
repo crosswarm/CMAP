@@ -40,6 +40,12 @@ export type {
   TaskQuery,
 } from './store.ts'
 
+export { buildEvidencePack } from './evidence-pack.ts'
+export type { EvidencePack, EvidencePackTask } from './evidence-pack.ts'
+
+export { detectNoProgress, NO_PROGRESS_REASONS } from './no-progress.ts'
+export type { ProgressSnapshot, NoProgressResult, NoProgressReason } from './no-progress.ts'
+
 export { MemoryStore } from './memory-store.ts'
 export { PgStore } from './pg-store.ts'
 export type { PgStoreOptions } from './pg-store.ts'

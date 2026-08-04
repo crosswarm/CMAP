@@ -25,6 +25,7 @@ import type {
   ApprovalDecision,
   ResourceLock,
   Artifact,
+  ArtifactEdge,
   Review,
 } from './entities.ts'
 
@@ -159,6 +160,13 @@ export interface Store {
   // Artifact
   putArtifact(a: Artifact): Promise<Artifact>
   listArtifacts(taskId: string): Promise<readonly Artifact[]>
+  /**
+   * 建立血缘边。两端 artifact 都必须已存在——悬空边会让追溯链断裂，
+   * 且断在哪里无从发现，因此宁可建边失败也不留半条链。
+   */
+  linkArtifacts(edge: ArtifactEdge): Promise<void>
+  /** 某 artifact 的全部出边。无血缘时返回空数组。 */
+  listLineage(artifactId: string): Promise<readonly ArtifactEdge[]>
 
   // Review
   putReview(r: Review): Promise<Review>

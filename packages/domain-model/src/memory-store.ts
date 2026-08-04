@@ -22,6 +22,7 @@ import type {
   ApprovalDecision,
   ResourceLock,
   Artifact,
+  ArtifactEdge,
   Review,
 } from './entities.ts'
 import type {
@@ -44,6 +45,7 @@ export class MemoryStore implements Store {
   readonly #tasks = new Map<string, TaskRecord>()
   readonly #events: TaskEvent[] = []
   readonly #artifacts = new Map<string, Artifact>()
+  readonly #edges: ArtifactEdge[] = []
   readonly #reviews: Review[] = []
   readonly #approvals = new Map<string, Approval>()
   readonly #locks = new Map<string, ResourceLock>()
@@ -278,6 +280,19 @@ export class MemoryStore implements Store {
 
   async listArtifacts(taskId: string): Promise<readonly Artifact[]> {
     return [...this.#artifacts.values()].filter((a) => a.task_id === taskId)
+  }
+
+  async linkArtifacts(edge: ArtifactEdge): Promise<void> {
+    // PG 靠外键约束保证两端存在，内存版必须显式校验，否则两个实现
+    // 行为不一致：一边拒绝悬空边，另一边默默写入。
+    for (const id of [edge.source_artifact_id, edge.target_artifact_id]) {
+      if (!this.#artifacts.has(id)) throw new NotFoundError('Artifact', id)
+    }
+    this.#edges.push({ ...edge })
+  }
+
+  async listLineage(artifactId: string): Promise<readonly ArtifactEdge[]> {
+    return this.#edges.filter((e) => e.source_artifact_id === artifactId)
   }
 
   // ----------------------------------------------------------- Review

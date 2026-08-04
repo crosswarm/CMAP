@@ -191,6 +191,120 @@ describe('Mission Workflow', () => {
     )
   })
 
+  test('锁被他人持有时进入 WAITING_RESOURCE，而非失败重试', async () => {
+    await store.createMission({
+      mission: mission('mis-lock-1'),
+      actor: { type: 'system', id: 'test' },
+    })
+
+    // 先由别人占住资源
+    await store.acquireLock({
+      lock_id: 'lk-other',
+      resource: 'device:shared',
+      task_id: 'other-task',
+      mission_id: 'other-mission',
+      holder_runner_id: 'runner-other',
+      acquired_at: new Date(Date.now() - 1000).toISOString(),
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+      released_at: null,
+    })
+
+    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const { taskId } = await acts.createTask({
+      missionId: 'mis-lock-1',
+      capability: 'realdevice-validation',
+      goal: '需要独占真机',
+    })
+    await acts.markReady(taskId)
+
+    const got = await acts.acquireTaskLock({ taskId, resource: 'device:shared' })
+    assert.equal(got.acquired, false, '资源被占时不应拿到锁')
+
+    const rec = await store.getTask(taskId)
+    assert.equal(
+      rec?.state,
+      'WAITING_RESOURCE',
+      '等资源是正常停顿，不是失败——按失败重试会浪费预算且掩盖真实原因',
+    )
+  })
+
+  test('锁释放后能从 WAITING_RESOURCE 回到 RUNNING 并完成', async () => {
+    await store.createMission({
+      mission: mission('mis-lock-2'),
+      actor: { type: 'system', id: 'test' },
+    })
+
+    await store.acquireLock({
+      lock_id: 'lk-hold',
+      resource: 'device:exclusive',
+      task_id: 'holder',
+      mission_id: 'other',
+      holder_runner_id: 'runner-x',
+      acquired_at: new Date(Date.now() - 1000).toISOString(),
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+      released_at: null,
+    })
+
+    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const { taskId } = await acts.createTask({
+      missionId: 'mis-lock-2',
+      capability: 'realdevice-validation',
+      goal: '等待真机释放',
+    })
+    await acts.markReady(taskId)
+
+    const first = await acts.acquireTaskLock({ taskId, resource: 'device:exclusive' })
+    assert.equal(first.acquired, false)
+    assert.equal((await store.getTask(taskId))?.state, 'WAITING_RESOURCE')
+
+    // 持有者释放
+    await store.releaseLock('lk-hold', new Date().toISOString())
+
+    const second = await acts.acquireTaskLock({ taskId, resource: 'device:exclusive' })
+    assert.equal(second.acquired, true, '资源释放后应能获取')
+    assert.equal(
+      (await store.getTask(taskId))?.state,
+      'RUNNING',
+      '等待解除后必须能回到运行态，否则任务永久卡死',
+    )
+
+    await acts.releaseTaskLock(second.lockId!)
+    assert.equal(
+      (await store.listActiveLocks(new Date().toISOString())).some(
+        (l) => l.lock_id === second.lockId,
+      ),
+      false,
+      '释放后不应仍在活跃锁列表中',
+    )
+  })
+
+  test('续租失败返回 false 而非抛错（runner 据此自停）', async () => {
+    await store.createMission({
+      mission: mission('mis-lock-3'),
+      actor: { type: 'system', id: 'test' },
+    })
+
+    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const { taskId } = await acts.createTask({
+      missionId: 'mis-lock-3',
+      capability: 'realdevice-validation',
+      goal: '续租测试',
+    })
+    await acts.markReady(taskId)
+
+    const got = await acts.acquireTaskLock({ taskId, resource: 'device:renew' })
+    assert.equal(got.acquired, true)
+
+    assert.equal(await acts.renewTaskLock(got.lockId!), true, '持有中应能续租')
+
+    await acts.releaseTaskLock(got.lockId!)
+    assert.equal(
+      await acts.renewTaskLock(got.lockId!),
+      false,
+      '已释放的锁续租必须返回 false——抛错会让 Activity 进入重试而非让 runner 自停',
+    )
+  })
+
   test('事件流完整记录了状态推进', async () => {
     await store.createMission({
       mission: mission('mis-wf-5'),

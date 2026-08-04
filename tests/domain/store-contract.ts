@@ -659,6 +659,83 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
       })
     })
 
+    describe('Artifact 血缘', () => {
+      const seed = async (s: Store) => {
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.putArtifact(artifact('art-before', 'tsk-1', 'measure_before'))
+        await s.putArtifact(artifact('art-after', 'tsk-1', 'measure_after'))
+        await s.putArtifact(artifact('art-diff', 'tsk-1', 'metric_diff'))
+      }
+
+      test('SUPERSEDES 边写入后可读回，relation 正确', async () => {
+        const s = await createStore()
+        await seed(s)
+
+        await s.linkArtifacts({
+          source_artifact_id: 'art-after',
+          target_artifact_id: 'art-before',
+          relation: 'SUPERSEDES',
+        })
+
+        const edges = await s.listLineage('art-after')
+        assert.equal(edges.length, 1)
+        assert.equal(edges[0]!.target_artifact_id, 'art-before')
+        assert.equal(edges[0]!.relation, 'SUPERSEDES')
+      })
+
+      test('同一 artifact 可有多条出边', async () => {
+        const s = await createStore()
+        await seed(s)
+
+        // 指标对比派生自前后两份原始测量
+        await s.linkArtifacts({
+          source_artifact_id: 'art-diff',
+          target_artifact_id: 'art-before',
+          relation: 'DERIVED_FROM',
+        })
+        await s.linkArtifacts({
+          source_artifact_id: 'art-diff',
+          target_artifact_id: 'art-after',
+          relation: 'DERIVED_FROM',
+        })
+
+        const edges = await s.listLineage('art-diff')
+        assert.equal(edges.length, 2)
+        assert.deepEqual(
+          edges.map((e) => e.target_artifact_id).sort(),
+          ['art-after', 'art-before'],
+        )
+      })
+
+      test('对不存在的 artifact 建边必须抛错，不得留下悬空边', async () => {
+        const s = await createStore()
+        await seed(s)
+
+        await assert.rejects(
+          () =>
+            s.linkArtifacts({
+              source_artifact_id: 'art-after',
+              target_artifact_id: 'ghost',
+              relation: 'SUPERSEDES',
+            }),
+          '悬空边会让血缘链在追溯时断裂，且无法被发现',
+        )
+
+        assert.equal(
+          (await s.listLineage('art-after')).length,
+          0,
+          '失败的建边不得留下任何痕迹',
+        )
+      })
+
+      test('无血缘的 artifact 返回空数组', async () => {
+        const s = await createStore()
+        await seed(s)
+        assert.deepEqual(await s.listLineage('art-before'), [])
+      })
+    })
+
     describe('Review', () => {
       test('写入后可按 mission 读回，且按轮次有序', async () => {
         const s = await createStore()

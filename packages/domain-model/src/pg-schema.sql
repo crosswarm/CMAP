@@ -98,6 +98,17 @@ CREATE TABLE IF NOT EXISTS artifacts (
 
 CREATE INDEX IF NOT EXISTS artifacts_task_idx ON artifacts (task_id);
 
+-- 证据血缘。外键保证两端 artifact 都存在——悬空边会让追溯链断裂，
+-- 且断在哪里无从发现。
+CREATE TABLE IF NOT EXISTS artifact_edges (
+  source_artifact_id TEXT NOT NULL REFERENCES artifacts (artifact_id) ON DELETE CASCADE,
+  target_artifact_id TEXT NOT NULL REFERENCES artifacts (artifact_id) ON DELETE CASCADE,
+  relation           TEXT NOT NULL CHECK (relation IN ('DERIVED_FROM','SUPERSEDES')),
+  PRIMARY KEY (source_artifact_id, target_artifact_id, relation)
+);
+
+CREATE INDEX IF NOT EXISTS artifact_edges_source_idx ON artifact_edges (source_artifact_id);
+
 CREATE TABLE IF NOT EXISTS reviews (
   id                TEXT PRIMARY KEY,
   mission_id        TEXT NOT NULL,
