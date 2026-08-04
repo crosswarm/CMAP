@@ -10,7 +10,6 @@
  */
 
 import { assertTransition } from './task-state.ts'
-import type { TaskState } from './task-state.ts'
 import type {
   Mission,
   MissionState,

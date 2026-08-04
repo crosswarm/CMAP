@@ -12,7 +12,6 @@
 
 import type {
   Store,
-  TaskRecord,
   RemoteTaskBinding,
   EventActor,
   EventType,
@@ -50,6 +49,8 @@ export interface CreateTaskInput {
   readonly missionId: string
   readonly capability: string
   readonly goal: string
+  /** 返工时指向被取代的原任务，用于重建因果链。 */
+  readonly supersedesTaskId?: string
 }
 
 export interface CreateTaskOutput {
@@ -106,56 +107,7 @@ export const createActivities = (deps: ActivityDeps) => {
   return {
     /** 创建任务并返回其 id。id 在此生成，Workflow 只负责传递。 */
     async createTask(input: CreateTaskInput): Promise<CreateTaskOutput> {
-      const taskId = nextId('tsk')
-      const now = new Date().toISOString()
-
-      const envelope = {
-        schema: 'cmap/task-envelope/v1',
-        identity: {
-          mission_id: input.missionId,
-          task_id: taskId,
-          idempotency_key: `${input.missionId}:${taskId}`,
-          revision: 1,
-        },
-        classification: {
-          task_type: 'inspect',
-          requested_capability: input.capability,
-          risk_level: 'read-meta',
-        },
-        goal: {
-          statement: input.goal,
-          success_definition: [
-            { criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: 1 },
-          ],
-        },
-        environment: {},
-        execution_policy: { timeout_seconds: 300, max_attempts: 1 },
-        permissions: { forbidden: [] },
-        evidence_requirements: { required_artifact_roles: ['report'] },
-        output_contract: { schema_uri: 'https://cmap.local/schemas/task-result/v1' },
-      } as TaskEnvelopeV1
-
-      const task: TaskRecord = {
-        id: taskId,
-        mission_id: input.missionId,
-        parent_task_id: null,
-        supersedes_task_id: null,
-        capability: input.capability,
-        risk: 'read-meta',
-        state: 'DRAFT',
-        attempt: 1,
-        max_attempts: 1,
-        lamport: 0,
-        envelope,
-        result: null,
-        binding: null,
-        deps: [],
-        created_at: now,
-        updated_at: now,
-      }
-
-      await store.createTask({ task, actor: ACTOR })
-      return { taskId }
+      return createTaskInternal(input)
     },
 
     async markReady(taskId: string): Promise<void> {
@@ -455,12 +407,7 @@ export const createActivities = (deps: ActivityDeps) => {
     await store.setMissionState(missionId, 'ESCALATED', ACTOR)
   }
 
-  async function createTaskInternal(input: {
-    missionId: string
-    capability: string
-    goal: string
-    supersedesTaskId?: string
-  }): Promise<{ taskId: string }> {
+  async function createTaskInternal(input: CreateTaskInput): Promise<CreateTaskOutput> {
     const taskId = nextId('tsk')
     const now = new Date().toISOString()
 

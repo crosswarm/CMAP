@@ -188,7 +188,9 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | Claude→Codex 单跳闭环 | ✅ P0，实测 68s 通过 |
 | Task Ledger（内存 + PG 双实现，同一套契约） | ✅ P1 |
 | Mission Workflow（骨架 + ADR-0005 三规则验证） | ✅ P1 |
-| Evidence Pack、资源锁、自动返工 | ⬜ P1 |
+| Evidence Pack（聚合 + 血缘） | ✅ P1 |
+| 资源锁接入 Workflow（含续租与失锁自停） | ✅ P1 |
+| 自动返工闭环（两道刹车 + 端到端验证） | ✅ P1 |
 | Web UI（Mission/审批/证据/返工追踪） | ⬜ P2 |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
