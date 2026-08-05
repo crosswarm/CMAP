@@ -1,10 +1,19 @@
 # 问题报告：omc subagent 消耗大量 token 但返回空内容
 
 - 记录日期：2026-08-04
-- 状态：**未解决**，需专项排查
-- 影响：`product-dev-flow` 的 design/critique 阶段无法依赖 subagent，只能由主 Claude 自行完成，削弱了对抗评审的独立性
+- 状态：**已定位并修复** —— omc 升级 `4.11.2 → 4.15.7`（上游 issue #3209 / #3233）
+- 影响：修复前 `product-dev-flow` 的 design/critique 阶段无法依赖 subagent
 
 > 本文件自包含，可在新会话中直接阅读处理，无需上下文。
+
+## 结论（TL;DR）
+
+不是 harness 提取 bug，也不是 agent 定义问题。**omc 4.11.2 的 `SubagentStop` hook 返回了
+`hookSpecificOutput.additionalContext`，这段文本被重新注入到正在结束的 subagent，把它从"已结束"
+状态又拽回来生成一轮**。agent 说"我已经交付了" → 又停 → hook 又注入 → 循环 6-8 次。
+Claude Code 取最后一条 assistant 文本作返回值，主 agent 于是只看到最后那句垃圾话。
+
+完整报告一直都在，就在最后一次 `tool_use` 之后的第一条长文本消息里。
 
 ## 现象
 
@@ -21,51 +30,64 @@
 
 累计约 **74.8 万 token**，零可用产出。
 
-## 关键线索
+最早的线索是第 4 个的返回值 `Full review stands as written`——它认为自己已经写过完整 review 了。事实证明确实写过。
 
-**第 4 个的返回值 "Full review stands as written" 暗示它认为自己已经写过完整 review 了。**
+## 根因（已由源码确认）
 
-保全的 transcript 中确实含有我在 prompt 里要求的输出结构关键词：
+omc 4.11.2 的 `SubagentStop` hook 挂了两个脚本，**都返回 `hookSpecificOutput.additionalContext`**：
 
-```
-a48ed542d64c464c3.jsonl  含「裁决/逐项/总判」 8 处
-a2a2dc47700c18f57.jsonl  含「裁决/逐项/总判」 3 处
-```
-
-（注意：部分命中可能来自 prompt 自身的回显，需要在排查时区分。）
-
-**最可能的假设：agent 在中间某条 assistant 消息里产出了完整内容，但 harness 只把最后一条消息作为返回值传回主 agent。**
-
-## 决定性新证据（2026-08-04 第 5 次复现）
-
-第 5 次复现（`a2fdc915094ec9b08`，critic 审查返工闭环，128,875 tokens / 20 tool_uses / 466s，返回 `Ready for next task.`）时做了逐条结构分析，得到**明确结论**：
-
-**内容确实产出了，但被切成多条短消息，从未汇总成一条最终交付。**
-
-```
-assistant 消息数：33
-最长 assistant 文本消息：652 字符
-最后一条 assistant 文本消息：1 字符
+`dist/hooks/subagent-tracker/index.js:553`（4.11.2）
+```js
+return { continue: true, hookSpecificOutput: {
+  hookEventName: "SubagentStop",
+  additionalContext: `Agent ${input.agent_type} ${succeeded ? "completed" : "failed"} (${input.agent_id})`,
+}}
 ```
 
-652 字符装不下要求的 13 条逐条裁定 + 缺陷列表 + 测试评价 + 结论。但把这些短消息拼起来，能看到**实质且正确**的审查结果——本次即从中提取出两项真实发现：
+`SubagentStop` 上的 `additionalContext` 会被**重新注入到正在结束的 subagent**，把它从"已结束"拽回来再生成一轮。
+于是：agent 交付完整报告 → 试图停止 → hook 注入 → agent 说"我已经交付了" → 又停 → hook 又注入 → 循环 6-8 次。
+Claude Code 取最后一条 assistant 文本作返回值，主 agent 只看到最后那句垃圾话。
 
-1. `putReview` 与 `createTaskInternal` 无幂等防护（经验证是真缺陷，已修，见 commit `9d29e87`）
-2. 升级路径测试只断言返回值不查存储状态（属实，已补断言）
+4.15.7 的源码注释直接点名了这个 bug：
 
-**修正一个此前的误判**：早先看到 transcript 含 `REJECTED` 11 次，曾推测「产出了完整裁定但没传回」。逐行核查后发现那些 `REJECTED` 全部来自 `role: user` 的 `tool_result`（agent 读取文件的返回内容），**不是** agent 自己的裁定。
+```
+* Because it runs on SubagentStop, it does NOT emit
+* hookSpecificOutput.additionalContext: that context would be reinjected into
+* the finishing subagent (the regression fixed in #3209 / #3233).
+```
 
-### 由此收窄的假设
+agent 自己也识破了（`a2a2dc47`、`acdbc98c` 的收尾消息）：
 
-问题不是"输出丢失"，而是 **agent 把结论分散在多条短消息里，最后以一句收尾语结束**。调用方只取最后一条，于是拿到空白。
+```
+01:47:39  重复的系统通知，忽略即可。评审结论已在上面完整呈现
+01:48:06  Duplicate system notification. Review was fully delivered above
+01:48:10  Already delivered. These are duplicate lifecycle notifications.
+```
 
-这解释了为什么强化 prompt 无效——agent 认为自己已经"说过了"（第 4 次那句 `Full review stands as written` 正是此意）。
+### 五次复现的实测数据
 
-### 优先排查方向（据此更新）
+完整报告**每次都存在**，位于最后一次 `tool_use` 之后：
 
-1. **能否让 harness 返回全部 assistant 文本消息的拼接**，而非仅最后一条？这是最小改动且能立即止血。
-2. 若不能，是否可在 agent prompt 中要求「最后一条消息必须重述完整结论」——但第 2、3 次尝试已表明这类指令会被忽略。
-3. agent 的 `<Output_Format>` 要求详细结构，而实际输出是碎片化短消息——是否与 omc 4.11.2 的某种流式/分段输出行为有关？`v4.15.7` 是否修复？
+| transcript | 完整报告长度 | 之后被唤醒 | 最后一条 |
+|---|---|---|---|
+| `a48ed542` | 12,695 | 7 次 | `Standing by.` |
+| `a64d08ba` | 9,652 | 7 次 | `已完成。` |
+| `acdbc98c` | 7,020 | 6 次 | `.` |
+| `a2a2dc47` | 7,113 | 8 次 | `Nothing new. Full review stands as written.` |
+| `a2fdc915` | 12,722 + 4,828 | 6 次 | `Ready for next task.` |
+
+`a2fdc915` 的 4,828 字符那条**就是主动汇总的最终交付**，开头是「审查完成。以下是完整结论。」，
+含 `VERDICT: ACCEPT-WITH-RESERVATIONS` 与 13 条逐条裁定。它被后续 6 次唤醒挤出了返回值位置。
+
+这解释了为什么强化 prompt 无效——agent 确实已经完整交付过，它只是不肯把同一份东西说第七遍。
+
+### 两次误判记录（排查时引以为戒）
+
+1. 早先看到 transcript 含 `REJECTED` 11 次，推测「产出了完整裁定但没传回」。核查后发现那些
+   `REJECTED` 全部来自 `role: user` 的 `tool_result`（agent 读文件的返回），**不是** agent 的裁定。
+2. 随后测得「最长 assistant 消息仅 652 字符」，据此推断「内容被切碎、从未汇总」，并把方向收窄为
+   「让 harness 拼接全部 assistant 消息」。该数字是取值路径漏了 content block 所致，
+   实测为 12,722 / 4,828。**harness 无需改动，方向是错的。**
 
 ## 已排除的原因
 
@@ -93,7 +115,8 @@ assistant 消息数：33
 ├── a48ed542d64c464c3.jsonl   677K  architect 精简视角
 ├── a64d08ba43849b710.jsonl   602K  architect 扩展性视角
 ├── acdbc98cd8dd35a1e.jsonl   434K  critic 必改项
-└── a2a2dc47700c18f57.jsonl   486K  critic 保留决定
+├── a2a2dc47700c18f57.jsonl   486K  critic 保留决定
+└── a2fdc915094ec9b08.jsonl   569K  critic 审查返工闭环（第 5 次复现）
 ```
 
 该目录已被 `.gitignore` 排除，不会入库。
@@ -115,38 +138,69 @@ jq -r 'select(.message.role=="assistant") | [.message.content[]? | select(.type=
 jq -r 'select(.message.role=="assistant") | [.message.content[]? | select(.type=="text") | .text] | join("")' a48ed542d64c464c3.jsonl | tail -c 500
 ```
 
-**恢复结论的正确方式**（本次即用它挖出了两项真实发现）：
+**一眼看清全貌**（时间戳 + 长度 + 开头，收尾被唤醒的次数直接可数）：
 
 ```bash
-# 拼出全部 assistant 文本消息中较长的那些——结论就分散在这里
-jq -r 'select(.message.role=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join("")' \
-  a2fdc915094ec9b08.jsonl | awk 'length($0) > 300'
-
-# 长度分布：若最长仅数百字符，即为本问题的典型特征
-jq -r 'select(.message.role=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join("") | length' \
-  a2fdc915094ec9b08.jsonl | sort -rn | head -5
+jq -r 'select(.type=="assistant") | [(.timestamp//"-")[11:19],
+  (([.message.content[]?|select(.type=="text")|.text]|join(""))|length),
+  (([.message.content[]?|select(.type=="text")|.text]|join(""))|gsub("\n";"⏎")|.[0:80])] | @tsv' \
+  a2fdc915094ec9b08.jsonl | awk -F'\t' '$2>0'
 ```
 
-⚠️ 排查时注意区分消息角色：`REJECTED` 等关键词可能出现在 `role: "user"` 的
-`tool_result` 里（agent 读取文件的返回内容），那**不是** agent 的裁定。
-本问题排查中曾因此误判过一次。
+**恢复被埋掉的完整报告**：
 
-## 需要回答的问题
+```bash
+# 长度分布，最长的那条就是完整报告
+jq -r 'select(.message.role=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join("") | length' \
+  a2fdc915094ec9b08.jsonl | sort -rn | head -5
 
-1. **完整 review 是否真的存在于某条中间 assistant 消息里？** 若是，则问题在返回值提取，而非 agent 本身。
-2. 若内容确实存在，是哪一条消息、位于什么位置？是否紧接着又被一条收尾消息覆盖？
-3. 是否与 **上下文压缩（compact）** 有关？这些 agent 都消耗了 10 万+ token，接近或超过某个阈值时可能触发压缩，导致最终消息退化为摘要式的收尾语。
-4. 是否与 `oh-my-claudecode` 的版本有关？当前 `4.11.2`，而系统提示过有 `v4.15.7` 可用（`omc update`）。升级是否修复？
-5. 其他 subagent 类型（如内置 `Explore` / `Plan`，或 `oh-my-claudecode:executor`）是否有同样问题？还是仅 READ-ONLY 类型（architect/critic 的 `disallowedTools: Write, Edit`）受影响？
+# 把超过 3000 字符的都捞出来
+jq -r 'select(.message.role=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join("")' \
+  a2fdc915094ec9b08.jsonl | awk 'length($0) > 3000'
+```
 
-第 5 点值得优先验证——如果只有 READ-ONLY 类型受影响，可能与「agent 想写文件但被阻止，于是把结果放在别处」有关。
+⚠️ 两个取值陷阱（本问题排查中各踩过一次）：
+
+- **必须拼接全部 content block**（`[.message.content[]?|select(.type=="text")|.text]|join("")`）。
+  只取 `content[0].text` 会漏掉长文本，得出「最长仅数百字符」的错误结论。
+- **必须区分消息角色**。`REJECTED` 等关键词常出现在 `role: "user"` 的 `tool_result` 里
+  （agent 读文件的返回内容），那**不是** agent 的裁定。
+
+## 原「需要回答的问题」及答案
+
+1. **完整 review 是否存在于中间 assistant 消息里？** 是。位于最后一次 `tool_use` 之后，长度见上表。
+2. **在哪一条？是否被覆盖？** 在收尾语之前，被 6-8 条 hook 唤醒产生的短消息挤出返回值位置。
+3. **是否与上下文压缩（compact）有关？** 无关，可排除。
+4. **升级是否修复？** 是。`4.15.7` 已移除两处 `SubagentStop` 的 `additionalContext`。
+5. **是否仅 READ-ONLY 类型受影响？** 不是。hook 的 matcher 是 `*`，**所有 subagent 类型都受影响**，
+   只是短任务因唤醒时最后一句仍有内容而不易察觉。
 
 ## 相关文件
 
-- agent 定义：`~/.claude/plugins/cache/omc/oh-my-claudecode/4.11.2/agents/{architect,critic}.md`
-- marketplace 副本：`~/.claude/plugins/marketplaces/omc/agents/`
+- 病灶（旧版）：`~/.claude/plugins/cache/omc/oh-my-claudecode/4.11.2/dist/hooks/subagent-tracker/index.js:553`
+- 修复版对照：`~/.claude/plugins/cache/omc/oh-my-claudecode/4.15.7/scripts/verify-deliverables.mjs`（注释说明了 #3209 / #3233）
+- hook 挂载点：`.../hooks/hooks.json` 的 `SubagentStop`（matcher `*`）
+- agent 定义：`.../agents/{architect,critic}.md`
 - 受影响的流程：`~/.claude/skills/product-dev-flow/SKILL.md`（其 design/critique 阶段依赖 architect/critic）
 
-## 临时绕行方案
+## 修复
 
-在问题解决前，`product-dev-flow` 的 design 与 critique 阶段由主 Claude 自行完成。**代价是失去了对抗的独立性**——评审者与被评审者是同一个，容易偏袒。本次评审已在 `conclusion/temp/pdf-cmap-arch-review/critique.md` 中显式标注了可能存在偏袒的判断。
+```
+omc update    # 4.11.2 → 4.15.7，需重启 Claude Code 会话生效
+```
+
+若某天必须停留在旧版，本地 patch 是把 `dist/hooks/subagent-tracker/index.js` 的 stop 分支
+改成 `{ continue: true, suppressOutput: true }`（会被下次 `omc update` 覆盖）。
+
+**通用教训**：任何 `SubagentStop` / `Stop` hook 都不应返回 `hookSpecificOutput.additionalContext`，
+那等于把已完成的 agent 重新唤醒。自建 hook 时同理。
+
+### 修复前的绕行（已不需要，存档）
+
+`product-dev-flow` 的 design 与 critique 阶段曾改由主 Claude 自行完成，代价是失去对抗的独立性——
+评审者与被评审者是同一个，容易偏袒。`conclusion/temp/pdf-cmap-arch-review/critique.md`
+中已显式标注了可能存在偏袒的判断。
+
+另一种事后补救：从保全的 transcript 里把完整报告捞回来（见上方命令），内容是完好的。
+第 5 次复现即用此法提取出两项真实发现——`putReview` / `createTaskInternal` 无幂等防护
+（已修，commit `9d29e87`）、升级路径测试只断言返回值不查存储状态（已补断言）。

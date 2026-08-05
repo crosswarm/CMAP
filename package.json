@@ -17,10 +17,11 @@
     "test": "node --test tests/contract/*.test.mjs tests/tooling/*.test.mjs tests/domain/memory-store.test.ts tests/domain/task-state.test.ts tests/domain/evidence-pack.test.ts tests/domain/no-progress.test.ts",
     "test:contract": "node --test tests/contract/*.test.mjs",
     "test:domain": "node --test tests/domain/memory-store.test.ts tests/domain/task-state.test.ts tests/domain/evidence-pack.test.ts tests/domain/no-progress.test.ts",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test && npm run test:api",
     "test:pg": "node --test --test-concurrency=1 tests/domain/pg-store.test.ts",
     "test:store": "node --test --test-concurrency=1 tests/domain/memory-store.test.ts tests/domain/pg-store.test.ts",
-    "test:workflow": "node --test --test-concurrency=1 tests/workflow/*.test.ts"
+    "test:workflow": "node --test --test-concurrency=1 tests/workflow/*.test.ts",
+    "test:api": "node --test --test-concurrency=1 tests/api/*.test.ts"
   },
   "devDependencies": {
     "@temporalio/activity": "^1.21.1",
