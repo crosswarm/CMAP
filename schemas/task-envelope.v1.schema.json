@@ -168,6 +168,23 @@
         "assigned_role": { "type": "string" },
         "preferred_agent": { "type": "string" },
         "fallback_agents": { "type": "array", "items": { "type": "string" } },
+        "model_policy": {
+          "type": "object",
+          "required": ["model", "effort", "source"],
+          "additionalProperties": false,
+          "description": "派发时解析出的模型与努力度快照。信封必须自洽——runner 不回查 Agent 注册表，因此携带的是解析后的最终值。",
+          "properties": {
+            "model": { "type": "string", "minLength": 1 },
+            "effort": {
+              "enum": ["low", "medium", "high", "xhigh"],
+              "description": "统一抽象档位，各家取值不同（codex 走 model_reasoning_effort），由 Adapter 负责映射。不支持的档位须降级并如实标注，不得静默套用默认值。"
+            },
+            "source": {
+              "enum": ["agent_default", "task_override"],
+              "description": "取值来源，UI 据此显示「继承 Agent 默认」或「本 Task 覆盖」。派发时快照而非读取时回算——Agent 默认值可能在派发后被改，回算会得出错误结论。"
+            }
+          }
+        },
         "affinity": {
           "type": "object",
           "additionalProperties": false,

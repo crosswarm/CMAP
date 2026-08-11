@@ -249,6 +249,50 @@ describe('资源锁必须带 TTL', () => {
   })
 })
 
+// ------------------------------------------------------ 模型与努力度快照
+
+describe('模型与努力度', () => {
+  const withPolicy = (policy) =>
+    mutate(validEnvelope, (e) => { e.execution_policy.model_policy = policy })
+
+  test('完整的 model_policy 通过', () => {
+    assert.equal(
+      validateEnvelope(withPolicy({ model: 'gpt-5.6-sol', effort: 'xhigh', source: 'task_override' })),
+      true,
+    )
+  })
+
+  test('不带 model_policy 仍然合法——沿用 Agent 自身默认', () => {
+    assert.equal(validateEnvelope(validEnvelope), true)
+  })
+
+  test('effort 在四档之外时拒绝', () => {
+    assert.equal(
+      validateEnvelope(withPolicy({ model: 'gpt-5.6-sol', effort: 'ultra', source: 'agent_default' })),
+      false,
+      'codex 对非法 effort 静默接受并套用默认值，契约层必须拦住，否则任务会用错误档位跑完且无人知晓',
+    )
+  })
+
+  test('三个字段都必填——缺 source 时 UI 无法区分继承与覆盖', () => {
+    assert.equal(validateEnvelope(withPolicy({ model: 'gpt-5.6-sol', effort: 'high' })), false)
+  })
+
+  test('model 为空串时拒绝', () => {
+    assert.equal(
+      validateEnvelope(withPolicy({ model: '', effort: 'high', source: 'agent_default' })),
+      false,
+    )
+  })
+
+  test('source 只接受 agent_default 与 task_override', () => {
+    assert.equal(
+      validateEnvelope(withPolicy({ model: 'gpt-5.6-sol', effort: 'high', source: 'runner_default' })),
+      false,
+    )
+  })
+})
+
 // -------------------------------------------------------- 证据完整性约束
 
 describe('证据完整性', () => {

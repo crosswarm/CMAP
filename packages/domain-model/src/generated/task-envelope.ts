@@ -127,6 +127,20 @@ export interface TaskEnvelopeV1 {
     preferred_agent?: string
     fallback_agents?: string[]
     /**
+     * 派发时解析出的模型与努力度快照。信封必须自洽——runner 不回查 Agent 注册表，因此携带的是解析后的最终值。
+     */
+    model_policy?: {
+      model: string
+      /**
+       * 统一抽象档位，各家取值不同（codex 走 model_reasoning_effort），由 Adapter 负责映射。不支持的档位须降级并如实标注，不得静默套用默认值。
+       */
+      effort: 'low' | 'medium' | 'high' | 'xhigh'
+      /**
+       * 取值来源，UI 据此显示「继承 Agent 默认」或「本 Task 覆盖」。派发时快照而非读取时回算——Agent 默认值可能在派发后被改，回算会得出错误结论。
+       */
+      source: 'agent_default' | 'task_override'
+    }
+    /**
      * 真机、computer-use 等资源只在特定主机上可用
      */
     affinity?: {

@@ -65,6 +65,77 @@ const chooseSandbox = (envelope: TaskEnvelopeV1): CodexSandbox =>
     ? 'workspace-write'
     : 'read-only'
 
+/** 契约允许的四档。codex 恰好原生支持全部，无需降级映射。 */
+const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
+
+/**
+ * 努力度档位非法。
+ *
+ * 实测：codex 收到 `-c model_reasoning_effort=bogus` 既不报错也不退出，
+ * 直接用默认档位把任务跑完。因此这里必须拦住而不是透传——
+ * 否则任务会以错误的档位产出结果，且没有任何信号说明发生过降级。
+ */
+export class InvalidEffortError extends AdapterError {
+  constructor(effort: string) {
+    super(
+      'INVALID_EFFORT',
+      `努力度档位 ${effort} 不在 low/medium/high/xhigh 之内；codex 对非法值静默套用默认档位，不能透传`,
+      false,
+      `invalid-effort:${effort}`,
+    )
+    this.name = 'InvalidEffortError'
+  }
+}
+
+export interface CodexArgsOptions {
+  readonly workDir: string
+  readonly resultFile: string
+  readonly outputSchemaPath: string
+  readonly prompt: string
+}
+
+/**
+ * 构造 codex exec 的命令行参数。
+ *
+ * 独立成纯函数是为了能直接断言参数形状——这里的分支（沙箱档位、
+ * model_policy 有无）出错时不会让进程失败，只会让任务用错误的配置跑完。
+ */
+export const buildCodexArgs = (
+  envelope: TaskEnvelopeV1,
+  opts: CodexArgsOptions,
+): string[] => {
+  const args = [
+    'exec',
+    '--json',
+    '-s', chooseSandbox(envelope),
+    '-C', opts.workDir,
+    '--skip-git-repo-check',
+    '--output-schema', opts.outputSchemaPath,
+    '-o', opts.resultFile,
+  ]
+
+  // 没有 model_policy 就什么都不传：凭空造一个默认档位会悄悄覆盖
+  // 用户在 config.toml 里的设置，而信封并未要求这么做。
+  const policy = envelope.execution_policy.model_policy
+  if (policy) {
+    if (!EFFORTS.has(policy.effort)) throw new InvalidEffortError(policy.effort)
+    // -c 的值按 TOML 解析，字符串必须带引号
+    //
+    // ⚠️ effort 的实际生效性未经证实。实测 codex v0.144.6 + chatgpt-http +
+    // gpt-5.6-sol：low 与 xhigh 跑同一道需要推理的题，token 消耗分别是
+    // 22,024 与 21,997——差异在噪声内。而且 codex 连 `-c 'k="unclosed'`
+    // 这种 TOML 语法错误都不报错，所以「命令成功」不能证明配置被采纳。
+    //
+    // -m 是确证生效的（传 fake-model-xyz 时启动横幅如实显示该名字）。
+    // 在拿到 effort 的生效证据前，UI 不得把它呈现为「已生效」，
+    // 否则就是又造了一个假信号。
+    args.push('-m', policy.model, '-c', `model_reasoning_effort="${policy.effort}"`)
+  }
+
+  args.push(opts.prompt)
+  return args
+}
+
 interface RunState {
   readonly child: ChildProcess
   readonly resultFile: string
@@ -175,16 +246,12 @@ export class CodexAdapter implements AgentAdapter {
 
     await writeFile(promptFile, renderPrompt(envelope), 'utf8')
 
-    const args = [
-      'exec',
-      '--json',
-      '-s', chooseSandbox(envelope),
-      '-C', workDir,
-      '--skip-git-repo-check',
-      '--output-schema', this.#outputSchemaPath,
-      '-o', resultFile,
-      await readFile(promptFile, 'utf8'),
-    ]
+    const args = buildCodexArgs(envelope, {
+      workDir,
+      resultFile,
+      outputSchemaPath: this.#outputSchemaPath,
+      prompt: await readFile(promptFile, 'utf8'),
+    })
 
     const child = spawn(this.#bin, args, {
       env: {
