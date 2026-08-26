@@ -10,19 +10,62 @@
  *  3. 写 Ledger 与调 Adapter 合并为单个 Activity——跨 Activity 无事务保护
  */
 
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+
+import { Context } from '@temporalio/activity'
+
 import type {
   Store,
-  RemoteTaskBinding,
+  Artifact,
   EventActor,
   EventType,
   TaskEnvelopeV1,
+  TaskResultV1,
   ReviewDecisionV1,
   ProgressSnapshot,
 } from '#domain-model'
 import { detectNoProgress } from '#domain-model'
+import type { AgentAdapter } from '#adapter-sdk'
+
+/**
+ * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
+ * 心跳只对 Temporal 有意义，不该成为单测必须搭起 Worker 的理由。
+ */
+const heartbeat = (): void => {
+  try {
+    Context.current().heartbeat()
+  } catch {
+    /* 非 Activity 上下文 */
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+/**
+ * 逐条比对信封声明的验收标准与 Agent 的回应。
+ *
+ * 漏答等同未通过：只看 status 会让「干完了但没答标准」被当成成功，
+ * 那正是无证据即失败要防的情形。
+ */
+const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectOutput => {
+  const answered = new Map(result.criterion_results.map((c) => [c.criterion_id, c.passed]))
+  const failedCriteria = (envelope.goal.success_definition ?? [])
+    .map((c) => c.criterion_id)
+    .filter((id) => answered.get(id) !== true)
+
+  return {
+    status: result.status,
+    passed: result.status === 'completed' && failedCriteria.length === 0,
+    failedCriteria,
+    summary: result.summary,
+  }
+}
 
 const ACTOR: EventActor = { type: 'system', id: 'mission-workflow' }
-const RUNNER_ID = process.env['RUNNER_ID'] ?? 'test-runner'
+const DEFAULT_RUNNER_ID = process.env['RUNNER_ID'] ?? 'local-dev'
+/** 证据保留期。到期前不得覆盖，否则结论无法复核。 */
+const RETENTION_MS = 365 * 24 * 3600 * 1000
 
 /**
  * 锁 TTL。runner 须在此周期内续租，否则视为失锁并主动终止操作。
@@ -33,22 +76,33 @@ const RUNNER_ID = process.env['RUNNER_ID'] ?? 'test-runner'
  */
 const LOCK_TTL_MS = 90_000
 
-/** 测试用的派发记录，便于断言 Adapter 被调用的次数。 */
-export interface FakeDispatchRecord {
-  readonly taskId: string
-  readonly at: string
-}
-
 export interface ActivityDeps {
   readonly store: Store
-  /** 提供时记录每次真实派发，用于测试断言。 */
-  readonly dispatchRecorder?: FakeDispatchRecord[]
+  /**
+   * 派发目标。不注入则无法派发——宁可明确报错，也不要让 Workflow 跑出
+   * 一条「任务已 RUNNING」却根本没人干活的绿色轨迹。
+   */
+  readonly adapter?: AgentAdapter
+  readonly runnerId?: string
+  /**
+   * 工作目录根。每个任务分一个子目录，避免并发任务互相污染。
+   * 不给则由 Adapter 自建临时目录。
+   *
+   * 注意工作目录是 **runner 侧的选择**，不进信封：信封里放本机绝对路径
+   * 会让同一个任务无法在另一台机器上执行。
+   */
+  readonly workRoot?: string
+  /** 轮询 Agent 状态的间隔。测试用极小值，生产用默认。 */
+  readonly pollIntervalMs?: number
+  /** 等待终态的上限。默认取信封的 execution_policy.timeout_seconds。 */
+  readonly waitTimeoutMs?: number
 }
 
 export interface CreateTaskInput {
   readonly missionId: string
   readonly capability: string
-  readonly goal: string
+  /** 缺省则用 Mission 的目标。返工派生的子任务才需要单独措辞。 */
+  readonly goal?: string
   /** 返工时指向被取代的原任务，用于重建因果链。 */
   readonly supersedesTaskId?: string
 }
@@ -61,6 +115,15 @@ export interface DispatchOutput {
   /** true 表示本次真实派发；false 表示已有 binding，跳过。 */
   readonly dispatched: boolean
   readonly remoteTaskId: string
+}
+
+export interface CollectOutput {
+  readonly status: TaskResultV1['status']
+  /** 全部验收标准都被逐条回应且通过，才为 true。 */
+  readonly passed: boolean
+  /** 未通过或 Agent 压根没回应的标准。沉默不算通过。 */
+  readonly failedCriteria: readonly string[]
+  readonly summary: string
 }
 
 export interface ApplyReviewInput {
@@ -81,7 +144,18 @@ export interface ApplyReviewOutput {
 }
 
 export const createActivities = (deps: ActivityDeps) => {
-  const { store, dispatchRecorder } = deps
+  const { store, adapter, workRoot } = deps
+  const runnerId = deps.runnerId ?? DEFAULT_RUNNER_ID
+  const pollIntervalMs = deps.pollIntervalMs ?? 2_000
+
+  const requireAdapter = (): AgentAdapter => {
+    if (!adapter) {
+      throw new Error(
+        '未注入 Adapter：控制面没有可派发的目标。Worker 启动时须传入 adapter。',
+      )
+    }
+    return adapter
+  }
 
   let seq = 0
   /**
@@ -140,18 +214,28 @@ export const createActivities = (deps: ActivityDeps) => {
         eventType: 'TASK_ASSIGNED', idempotencyKey: `queued:${taskId}`,
       })
 
-      const binding: RemoteTaskBinding = {
-        adapter: 'codex-adapter',
-        remote_task_id: `codex:${taskId}:1`,
-        protocol: 'codex-exec',
-        protocol_version: '0.1.0',
-        runner_id: RUNNER_ID,
-      }
+      const envelope = existing.envelope as TaskEnvelopeV1
+      const timeoutMs = (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
 
-      // 真实实现在此调用 adapter.startTask；测试注入 recorder 以断言调用次数。
-      dispatchRecorder?.push({ taskId, at: new Date().toISOString() })
+      // 工作目录由 runner 侧准备。不存在时 spawn 会直接失败，
+      // 而失败信息指向 codex 而不是这里，很难查。
+      const worktree = workRoot ? join(workRoot, taskId) : null
+      if (worktree) await mkdir(worktree, { recursive: true })
 
-      // 先写库再返回：Activity 内部保证「调用与记录」不分离
+      const binding = await requireAdapter().startTask(envelope, {
+        // P4 接入鉴权后换成短期、受众绑定的令牌。现在是本机单租户，
+        // 但字段先占住位置，免得那时才发现调用方根本没有令牌可传。
+        token: process.env['CMAP_RUNNER_TOKEN'] ?? 'local-dev-token',
+        runner_id: runnerId,
+        trace_id: taskId,
+        correlation_id: envelope.identity.idempotency_key,
+        ...(worktree ? { worktree } : {}),
+        deadline_at: new Date(Date.now() + timeoutMs).toISOString(),
+      })
+
+      // 先写库再返回：Activity 内部保证「调用与记录」不分离。
+      // 顺序反过来的话，进程在这两步之间崩溃就会留下一个已在跑、
+      // 账本却不知道的 Agent 进程——重试会再 spawn 一个。
       await store.setTaskBinding(taskId, binding)
 
       await store.transitionTask({
@@ -160,6 +244,138 @@ export const createActivities = (deps: ActivityDeps) => {
       })
 
       return { dispatched: true, remoteTaskId: binding.remote_task_id }
+    },
+
+    /**
+     * 等 Agent 干完，收结果，落账本。
+     *
+     * 三条规则：
+     *  1. **等到终态才算完**。进程还在跑就收结果，拿到的是半成品。
+     *  2. **身份字段由控制面填充**。Agent 自报的 mission_id / task_id 一律覆盖——
+     *     账本归控制面所有，Agent 说自己是谁不作数。
+     *  3. **沉默不是通过**。信封声明的验收标准若没被逐条回应，视为未通过。
+     *
+     * 已有结果直接返回：Activity 超时重跑是常态，重复收取不得产生重复证据。
+     */
+    async collectTaskResult(taskId: string): Promise<CollectOutput> {
+      const t = await store.getTask(taskId)
+      if (!t) throw new Error(`任务不存在：${taskId}`)
+
+      const envelope = t.envelope as TaskEnvelopeV1
+      if (t.result) return judge(envelope, t.result)
+
+      if (!t.binding) throw new Error(`任务 ${taskId} 尚未派发，无结果可收`)
+      const a = requireAdapter()
+
+      const waitMs =
+        deps.waitTimeoutMs ?? (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
+      const deadline = Date.now() + waitMs
+
+      // 轮询至终态。显式超时：宁可明确失败，也不要静默挂起——
+      // 卡住而无日志比失败难查得多。
+      for (;;) {
+        const status = await a.getStatus(t.binding)
+        if (status.terminal_observed) break
+        if (Date.now() > deadline) {
+          throw new Error(
+            `等待任务 ${taskId} 终态超时（${waitMs}ms），最后状态 ${status.status}`,
+          )
+        }
+        heartbeat()
+        await sleep(pollIntervalMs)
+      }
+
+      const raw = await a.collectResult(t.binding)
+
+      // Agent 自报的 artifact_id 只是它自己的叫法，实测常是 `report` 这种
+      // 大众名字——落到账本的全局主键上，第二个任务就会跟第一个撞车。
+      // 控制面按「任务 + 角色」重新命名，并把结论里的证据引用一起改写，
+      // 否则「这条结论基于哪些证据」在账本里就断了。
+      const ledgerIds = new Map<string, string>()
+      const used = new Set<string>()
+      raw.artifacts.forEach((art, i) => {
+        let id = `${taskId}:${art.role}`
+        if (used.has(id)) id = `${taskId}:${art.role}:${i}`
+        used.add(id)
+        ledgerIds.set(art.artifact_id, id)
+      })
+
+      const result: TaskResultV1 = {
+        ...raw,
+        mission_id: t.mission_id,
+        task_id: taskId,
+        attempt: t.attempt,
+        artifacts: raw.artifacts.map((art) => ({
+          ...art,
+          artifact_id: ledgerIds.get(art.artifact_id) ?? art.artifact_id,
+        })),
+        criterion_results: raw.criterion_results.map((c) => ({
+          ...c,
+          ...(c.evidence_artifact_ids
+            ? {
+                evidence_artifact_ids: c.evidence_artifact_ids.map(
+                  (x) => ledgerIds.get(x) ?? x,
+                ),
+              }
+            : {}),
+        })),
+      }
+      await store.setTaskResult(taskId, result)
+
+      // 证据落库。已存在的不重写——重复收取会生成重复记录，
+      // 让「这个结论基于哪些证据」多出几条同名副本。
+      const seen = new Set((await store.listArtifacts(taskId)).map((x) => x.artifact_id))
+      const now = new Date()
+      for (const art of result.artifacts) {
+        if (seen.has(art.artifact_id)) continue
+        const record: Artifact = {
+          artifact_id: art.artifact_id,
+          mission_id: t.mission_id,
+          task_id: taskId,
+          role: art.role,
+          uri: art.uri,
+          media_type: art.media_type ?? 'application/octet-stream',
+          size_bytes: art.size_bytes ?? 0,
+          sha256: art.sha256,
+          version: 1,
+          state: 'AVAILABLE',
+          producer: {
+            agent_id: a.agentId,
+            adapter_version: t.binding.protocol_version,
+            execution_session_id:
+              result.session?.provider_session_id ?? t.binding.remote_task_id,
+          },
+          provenance: { runner_id: t.binding.runner_id },
+          retention: {
+            retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(),
+            immutable: true,
+          },
+          security: {
+            classification: 'internal',
+            contains_secrets: false,
+            contains_pii: false,
+            allowed_roles: [],
+          },
+          created_at: now.toISOString(),
+        }
+        await store.putArtifact(record)
+      }
+
+      return judge(envelope, result)
+    },
+
+    /** 结果不达标时落终态。失败要留在账本里，不能只体现为 Workflow 报错。 */
+    async failTask(input: { taskId: string; reason: string }): Promise<void> {
+      const t = await store.getTask(input.taskId)
+      if (!t || t.state === 'FAILED_TERMINAL') return
+      await store.transitionTask({
+        taskId: input.taskId,
+        to: 'FAILED_TERMINAL',
+        actor: ACTOR,
+        eventType: 'TASK_FAILED',
+        idempotencyKey: `failed:${input.taskId}`,
+        payload: { reason: input.reason },
+      })
     },
 
     /**
@@ -198,7 +414,7 @@ export const createActivities = (deps: ActivityDeps) => {
           resource: input.resource,
           task_id: input.taskId,
           mission_id: t.mission_id,
-          holder_runner_id: RUNNER_ID,
+          holder_runner_id: runnerId,
           acquired_at: acquiredAt,
           expires_at: expiresAt,
           released_at: null,
@@ -253,10 +469,18 @@ export const createActivities = (deps: ActivityDeps) => {
       if (!t) throw new Error(`任务不存在：${taskId}`)
       if (t.state === 'COMPLETED') return
 
+      // 每一步记各自的事件。全记成 TASK_STARTED 的话，事件流里读不出
+      // 「硬门槛过了没有」——那正是事后复核最想知道的一件事。
+      const eventOf = {
+        VERIFYING: 'HARD_GATE_EVALUATED',
+        REVIEWING: 'REVIEW_STARTED',
+        COMPLETED: 'TASK_COMPLETED',
+      } as const
+
       for (const to of ['VERIFYING', 'REVIEWING', 'COMPLETED'] as const) {
         await store.transitionTask({
           taskId, to, actor: ACTOR,
-          eventType: to === 'COMPLETED' ? 'TASK_COMPLETED' : 'TASK_STARTED',
+          eventType: eventOf[to],
           idempotencyKey: `${to.toLowerCase()}:${taskId}`,
         })
       }
@@ -264,7 +488,7 @@ export const createActivities = (deps: ActivityDeps) => {
 
     async setMissionState(input: {
       missionId: string
-      state: 'RUNNING' | 'COMPLETED' | 'ESCALATED'
+      state: 'RUNNING' | 'COMPLETED' | 'ESCALATED' | 'FAILED'
     }): Promise<void> {
       await store.setMissionState(input.missionId, input.state, ACTOR)
     },
@@ -455,24 +679,47 @@ export const createActivities = (deps: ActivityDeps) => {
     const taskId = nextId('tsk')
     const now = new Date().toISOString()
 
+    // 信封必须自洽：spawn 出来的 Agent 不继承任何上下文，它只能看到这份信封。
+    // 目标与验收标准因此必须从 Mission 抄进来——写死的占位会让 Agent 去回应
+    // 一条根本不存在的标准，而验收又按 Mission 的标准判，永远对不上。
+    const m = await store.getMission(input.missionId)
+    if (!m) throw new Error(`Mission 不存在：${input.missionId}`)
+
+    // 没有验收标准就没有「完成」的定义，任务无从判定，也无从返工。
+    // 与其派一个永远说不清算不算过的任务出去，不如在这里挡住。
+    const [firstCriterion, ...restCriteria] = m.acceptance.map((c) => ({
+      criterion_id: c.criterion_id,
+      metric: c.metric,
+      operator: c.operator,
+      expected: c.expected,
+      hard_gate: c.hard_gate,
+    }))
+    if (!firstCriterion) {
+      throw new Error(`Mission ${m.id} 未声明验收标准，无法判定任务是否完成`)
+    }
+
     const envelope = {
       schema: 'cmap/task-envelope/v1',
       identity: {
         mission_id: input.missionId,
         task_id: taskId,
+        ...(input.supersedesTaskId ? { supersedes_task_id: input.supersedesTaskId } : {}),
         idempotency_key: `${input.missionId}:${taskId}`,
         revision: 1,
+        tenant: m.tenant,
+        owner: m.owner,
       },
       classification: {
-        task_type: 'inspect',
+        task_type: m.type,
         requested_capability: input.capability,
         risk_level: 'read-meta',
       },
       goal: {
-        statement: input.goal,
-        success_definition: [{ criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: 1 }],
+        statement: input.goal ?? m.goal,
+        success_definition: [firstCriterion, ...restCriteria],
       },
-      environment: {},
+      // 工作目录不进信封：本机绝对路径会让同一任务无法在别的机器上执行。
+      environment: { tenant: m.tenant },
       execution_policy: { timeout_seconds: 300, max_attempts: 1 },
       permissions: { forbidden: [] },
       evidence_requirements: { required_artifact_roles: ['report'] },

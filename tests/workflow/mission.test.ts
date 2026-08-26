@@ -26,7 +26,7 @@ import { dirname, join } from 'node:path'
 import { MemoryStore } from '#domain-model'
 import type { Mission, Store } from '#domain-model'
 import { createActivities } from '../../workflows/activities.ts'
-import type { FakeDispatchRecord } from '../../workflows/activities.ts'
+import { FakeAdapter } from './fake-adapter.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const TASK_QUEUE = 'cmap-test'
@@ -37,7 +37,7 @@ let workerRun: Promise<void>
 let client: Client
 let conn: Connection
 let store: Store
-let dispatched: FakeDispatchRecord[]
+let adapter: FakeAdapter
 
 const mission = (id: string): Mission => ({
   id,
@@ -56,7 +56,7 @@ const mission = (id: string): Mission => ({
 
 before(async () => {
   store = new MemoryStore()
-  dispatched = []
+  adapter = new FakeAdapter()
 
   try {
     conn = await Connection.connect({ address: ADDRESS, connectTimeout: 15_000 })
@@ -68,7 +68,9 @@ before(async () => {
       workflowsPath: join(here, '../../workflows/mission.workflow.ts'),
       // Activity 注入 Store 与假 Adapter：这里验证的是编排逻辑，
       // 真实 Agent 调用由 scripts/e2e-single-hop.mjs 覆盖。
-      activities: createActivities({ store, dispatchRecorder: dispatched }),
+      activities: createActivities({
+        store, adapter, runnerId: 'test-runner', pollIntervalMs: 1,
+      }),
     })
     workerRun = worker.run()
   } catch (e) {
@@ -131,7 +133,7 @@ describe('Mission Workflow', () => {
       actor: { type: 'system', id: 'test' },
     })
 
-    const before = dispatched.length
+    const before = adapter.startCalls.length
     const result = await run('mis-wf-3')
     const taskId = result.taskIds[0]!
 
@@ -142,7 +144,7 @@ describe('Mission Workflow', () => {
       'test-runner',
       'binding 应携带执行方标识',
     )
-    assert.ok(dispatched.length > before, 'Adapter 应被调用')
+    assert.ok(adapter.startCalls.length > before, 'Adapter 应被真实调用')
   })
 
   test('同一任务重复派发不重复调用 Adapter（ADR-0005 规则一）', async () => {
@@ -153,17 +155,17 @@ describe('Mission Workflow', () => {
 
     const result = await run('mis-wf-4')
     const taskId = result.taskIds[0]!
-    const afterFirst = dispatched.length
+    const afterFirst = adapter.startCalls.length
 
     // 模拟 Activity 重试：Temporal 在超时后会真正重跑 Activity，
     // 且可能落到另一个 Worker 进程——那时 Adapter 的内存缓存是空的。
     // 唯一能认出「已派发过」的依据是 Ledger 中的 binding。
-    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
     const retry = await acts.dispatchTask(taskId)
 
     assert.equal(retry.dispatched, false, '重试必须识别出已派发，不得再次执行')
     assert.equal(
-      dispatched.length,
+      adapter.startCalls.length,
       afterFirst,
       '已派发的任务不得重复调用 Adapter——这是跨进程幂等的核心保证',
     )
@@ -178,14 +180,18 @@ describe('Mission Workflow', () => {
     const result = await run('mis-wf-6')
     const taskId = result.taskIds[0]!
 
-    // 全新的 Activity 实例，内部无任何内存状态——正是 Worker 重启后的情形
-    const freshRecorder: FakeDispatchRecord[] = []
-    const freshActs = createActivities({ store, dispatchRecorder: freshRecorder })
+    // 全新的 Activity 实例，内部无任何内存状态——正是 Worker 重启后的情形。
+    // 连 Adapter 也换成新的：Adapter 的幂等缓存同样在内存里，只有 Ledger
+    // 里的 binding 能跨进程认出「已经派发过了」。
+    const freshAdapter = new FakeAdapter()
+    const freshActs = createActivities({
+      store, adapter: freshAdapter, runnerId: 'test-runner', pollIntervalMs: 1,
+    })
     const out = await freshActs.dispatchTask(taskId)
 
     assert.equal(out.dispatched, false, '新进程必须从 Ledger 认出已派发')
     assert.equal(
-      freshRecorder.length,
+      freshAdapter.startCalls.length,
       0,
       '此前的 e2e 幂等断言在同一进程内调用，掩盖了这个缺陷',
     )
@@ -209,7 +215,7 @@ describe('Mission Workflow', () => {
       released_at: null,
     })
 
-    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
     const { taskId } = await acts.createTask({
       missionId: 'mis-lock-1',
       capability: 'realdevice-validation',
@@ -245,7 +251,7 @@ describe('Mission Workflow', () => {
       released_at: null,
     })
 
-    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
     const { taskId } = await acts.createTask({
       missionId: 'mis-lock-2',
       capability: 'realdevice-validation',
@@ -284,7 +290,7 @@ describe('Mission Workflow', () => {
       actor: { type: 'system', id: 'test' },
     })
 
-    const acts = createActivities({ store, dispatchRecorder: dispatched })
+    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
     const { taskId } = await acts.createTask({
       missionId: 'mis-lock-3',
       capability: 'realdevice-validation',
@@ -316,7 +322,13 @@ describe('Mission Workflow', () => {
     const types = events.map((e) => e.event_type)
 
     assert.ok(types.includes('TASK_CREATED'), '缺 TASK_CREATED')
+    assert.ok(types.includes('TASK_ASSIGNED'), '缺 TASK_ASSIGNED —— 派发没留痕')
+    assert.ok(types.includes('HARD_GATE_EVALUATED'), '缺硬门槛事件 —— 事后复核读不出验收发生过')
     assert.ok(types.includes('TASK_COMPLETED'), '缺 TASK_COMPLETED')
+    assert.ok(
+      !types.includes('MISSION_ESCALATED'),
+      '顺利完成的 Mission 不得出现「已升级」事件 —— 那是叫人来救的信号',
+    )
 
     for (let i = 1; i < events.length; i += 1) {
       assert.ok(events[i]!.lamport > events[i - 1]!.lamport, 'lamport 必须严格递增')

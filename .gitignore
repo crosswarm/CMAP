@@ -19,6 +19,8 @@ build/
 # 运行时产物：Artifact 本地映射与 Temporal 数据卷
 artifacts/
 .artifacts/
+# runner 工作区：Agent 在这里干活，产物不入库
+.cmap-work/
 infra/docker-compose/volumes/
 
 # 日志
