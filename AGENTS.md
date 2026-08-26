@@ -40,6 +40,7 @@
 | domain-model / adapter-sdk | `npm run check`（typecheck + 全量测试） |
 | Adapter 实现 | 相关单测 + `node scripts/e2e-single-hop.mjs` 真实链路 |
 | Workflow / Activity | 单测 + Temporal 重放测试；确认 Workflow 内无 `Date.now()`/`Math.random()` |
+| 派发链路（Activity ↔ Adapter） | 假 Adapter 单测 + `node scripts/e2e-mission.mjs` 真实跑一次；假 Adapter 只证明逻辑对，证明不了线接在真东西上 |
 | 基础设施（compose/hooks） | 实际启停一次并用 SDK 验证；hook 改动须用真实坏数据验证确实拦截 |
 
 **测试失败时记录准确的既有阻断原因；不得通过改动无关文件、放宽断言或伪造数据来获得通过。**

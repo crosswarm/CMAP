@@ -191,9 +191,31 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | Evidence Pack（聚合 + 血缘） | ✅ P1 |
 | 资源锁接入 Workflow（含续租与失锁自停） | ✅ P1 |
 | 自动返工闭环（两道刹车 + 端到端验证） | ✅ P1 |
-| Web UI（Mission/审批/证据/返工追踪） | ⬜ P2 |
+| 控制面 REST API（9 条路由，租户过滤 + 双 scope 审批） | ✅ P2 |
+| 进程入口（`npm run start:worker` / `start:api`） | ✅ P2 |
+| Workflow 派发接真实 Adapter（codex 真执行） | ✅ P2，实测一次 Mission 无人值守跑完 102s |
+| 任务结果与证据落账本（`setTaskResult` + Artifact 入库） | ✅ P2 |
+| 验收逐条判定（漏答即不通过） | ✅ P2 |
+| 证据哈希由控制面独立复算 | ✅ P2，复算在控制面 Adapter 层，不采信 Agent 自报 |
+| WebUI 原型（3 方案 × 2 轮迭代） | 🟡 P2，PNG 已入库，方案说明与「两类授权同时 pending」帧未交付 |
+| Web UI 前端实现（Mission/审批/证据/返工追踪） | ⬜ P2 |
+| SSE 实时推送 | ⬜ P2 |
+| 评审与返工接进 Workflow（Activity 已实现，未串进主流程） | ⬜ P2 |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
+
+P2 出口验证记录在 `scripts/e2e-mission.mjs`：建 Mission → Workflow 派发 →
+codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独立复算证据哈希 →
+核对事件流。与 P0 的单跳脚本互补：那个证明「能调起 codex」，这个证明
+「调度系统真的会去调 codex」——两头都在不等于线接上了。
+
+两个进程入口（`apps/worker/src/main.ts`、`apps/control-plane-api/src/main.ts`）
+只做接线：Store 换成 PgStore、生命周期接信号，Workflow 与 Activity 与测试里
+跑的是同一套。验证方式是实际启停一次并跑真实 Mission，不看进程是否存活。
+
+**还没接进主流程的是评审与返工**：`applyReviewDecision` 及两道刹车都已实现并
+有端到端断言，但 `missionWorkflow` 目前是「验收不过就落 FAILED」，不会自动派生
+后继任务。返工闭环因此还需要外部调用者驱动。
 
 P0 出口验证记录在 `scripts/e2e-single-hop.mjs`：信封校验 → codex 真实执行 → 结果 Schema 校验 → 证据哈希独立复算 → 验收标准逐条回应 → 幂等去重。
 

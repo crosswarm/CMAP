@@ -35,6 +35,29 @@ Temporal（持久化工作流引擎）+ PostgreSQL（任务账本）+ S3 兼容�
 - `docs/threat-model.md` — 威胁模型（多人多机跨公网 = 远程代码执行平台）
 - `docs/adr/` — 架构决策记录
 
+## 本地运行
+
+```bash
+# 1. 起基础设施（Temporal + PostgreSQL）
+docker compose -f infra/docker-compose/docker-compose.yml up -d
+node scripts/verify-temporal.mjs        # 就绪判定的唯一权威判据
+
+# 2. 起 CMAP 自己的两个进程（各占一个终端）
+npm run start:worker                     # Temporal Worker，队列 cmap-main
+npm run start:api                        # 控制面 API，http://127.0.0.1:8787
+
+# 3. 真跑一次 Mission（codex 会被真实调起，约 1-3 分钟）
+node scripts/e2e-mission.mjs
+```
+
+两个进程都会幂等建表，空库首次启动即可用。环境变量见 `.env.example`，
+存在 `.env` 时自动加载。
+
 ## 状态
 
-P0 契约层建设中。
+P0（契约层 + 单跳闭环）、P1（任务账本 + Workflow + 自动返工闭环）已完成。
+
+P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发给 codex、真实执行、
+收结果落账本、逐条核对验收标准、独立复算证据哈希（实测 102s）。还缺 WebUI
+（只有原型图）、SSE 推送，以及把评审返工接进主流程。
+逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。
