@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import pg from 'pg'
 
+import type { TaskResultV1 } from './generated/task-result.ts'
 import { assertTransition } from './task-state.ts'
 import type { TaskState } from './task-state.ts'
 import type {
@@ -47,6 +48,7 @@ import type {
   TaskQuery,
 } from './store.ts'
 import {
+  ArtifactConflictError,
   ConcurrentModificationError,
   NotFoundError,
   WriteVerificationError,
@@ -188,6 +190,19 @@ export interface PgStoreOptions {
   readonly schema?: string
 }
 
+const missionEventType = (state: MissionState): EventType => {
+  switch (state) {
+    case 'COMPLETED':
+      return 'MISSION_COMPLETED'
+    case 'ESCALATED':
+      return 'MISSION_ESCALATED'
+    case 'FAILED':
+      return 'MISSION_FAILED'
+    default:
+      return 'MISSION_STATE_CHANGED'
+  }
+}
+
 export class PgStore implements Store {
   readonly #pool: pg.Pool
   readonly #schema: string
@@ -320,7 +335,7 @@ export class PgStore implements Store {
 
       await this.#insertEvent(c, {
         missionId: id, taskId: null,
-        type: state === 'COMPLETED' ? 'MISSION_COMPLETED' : 'MISSION_ESCALATED',
+        type: missionEventType(state),
         actor, idempotencyKey: `mission-state:${id}:${state}`, payload: { state },
       })
       return toMission(rows[0] as Record<string, unknown>)
@@ -430,6 +445,20 @@ export class PgStore implements Store {
     return back
   }
 
+  async setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord> {
+    const { rows, rowCount } = await this.#pool.query(
+      'UPDATE tasks SET result = $2, updated_at = now() WHERE id = $1 RETURNING *',
+      [taskId, JSON.stringify(result)],
+    )
+    if (rowCount === 0) throw new NotFoundError('Task', taskId)
+
+    const back = toTask(rows[0] as Record<string, unknown>)
+    if (back.result?.status !== result.status) {
+      throw new WriteVerificationError('Task', taskId, 'result 回读不符')
+    }
+    return back
+  }
+
   async queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]> {
     const where: string[] = []
     const args: unknown[] = []
@@ -517,6 +546,19 @@ export class PgStore implements Store {
   // --------------------------------------------------------- Artifact
 
   async putArtifact(a: Artifact): Promise<Artifact> {
+    const prev = await this.#pool.query(
+      'SELECT task_id, sha256 FROM artifacts WHERE artifact_id = $1',
+      [a.artifact_id],
+    )
+    const row = prev.rows[0] as { task_id: string; sha256: string } | undefined
+    if (row && (row.task_id !== a.task_id || row.sha256 !== a.sha256)) {
+      throw new ArtifactConflictError(
+        a.artifact_id,
+        `已属于任务 ${row.task_id}（sha256 ${row.sha256.slice(0, 12)}…），` +
+          `不能改指任务 ${a.task_id}`,
+      )
+    }
+
     const { rows } = await this.#pool.query(
       `INSERT INTO artifacts (artifact_id, mission_id, task_id, role, uri, media_type,
                               size_bytes, sha256, version, state, producer, provenance,

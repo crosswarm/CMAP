@@ -30,6 +30,7 @@ export {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  ArtifactConflictError,
 } from './store.ts'
 export type {
   Store,

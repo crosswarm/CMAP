@@ -20,6 +20,7 @@ import type {
   ResourceLock,
   Artifact,
   Review,
+  TaskResultV1,
 } from '#domain-model'
 import {
   ConcurrentModificationError,
@@ -135,6 +136,24 @@ const artifact = (id: string, taskId: string, role: string): Artifact => ({
   created_at: T0,
 })
 
+const taskResult = (taskId: string, missionId: string, passed = true): TaskResultV1 => ({
+  schema: 'cmap/task-result/v1',
+  mission_id: missionId,
+  task_id: taskId,
+  attempt: 1,
+  status: passed ? 'completed' : 'failed',
+  summary: passed ? '统计完成，共 3 个文件' : '统计失败',
+  criterion_results: [
+    { criterion_id: 'FILE-COUNT', actual: 3, passed, evidence_artifact_ids: ['art-1'] },
+  ],
+  artifacts: [
+    {
+      artifact_id: 'art-1', role: 'report', uri: 'evidence/report.json',
+      media_type: 'application/json', size_bytes: 42, sha256: 'd'.repeat(64),
+    },
+  ],
+})
+
 const review = (
   id: string,
   missionId: string,
@@ -211,6 +230,35 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
       test('不存在的 Mission 返回 null 而非抛错', async () => {
         const s = await createStore()
         assert.equal(await s.getMission('no-such'), null)
+      })
+
+      test('状态变更记成对应的事件，不得张冠李戴', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+
+        await s.setMissionState('mis-1', 'RUNNING', ACTOR)
+        const running = (await s.listEvents('mis-1')).map((e) => e.event_type)
+        assert.ok(
+          !running.includes('MISSION_ESCALATED'),
+          '刚开始跑的 Mission 被记成「已升级」，等于给界面造了一个假的求救信号',
+        )
+        assert.ok(running.includes('MISSION_STATE_CHANGED'), '状态变更应留下中性事件')
+
+        await s.setMissionState('mis-1', 'ESCALATED', ACTOR)
+        assert.ok((await s.listEvents('mis-1')).some((e) => e.event_type === 'MISSION_ESCALATED'))
+      })
+
+      test('失败与完成分别记成各自的事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createMission({ mission: mission('mis-2'), actor: ACTOR })
+
+        await s.setMissionState('mis-1', 'COMPLETED', ACTOR)
+        await s.setMissionState('mis-2', 'FAILED', ACTOR)
+
+        assert.ok((await s.listEvents('mis-1')).some((e) => e.event_type === 'MISSION_COMPLETED'))
+        const failed = (await s.listEvents('mis-2')).map((e) => e.event_type)
+        assert.ok(failed.includes('MISSION_FAILED'), '失败必须与升级区分——一个要人来救，一个不用')
       })
 
       test('创建 Mission 产生事件', async () => {
@@ -575,6 +623,79 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
             }),
           /不存在/,
         )
+      })
+    })
+
+    describe('证据写入冲突（Agent 爱用 report 这种大众名字）', () => {
+      test('同一 artifact 重复写入是幂等的', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        await s.putArtifact(artifact('art-1', 'tsk-1', 'report'))
+        await s.putArtifact(artifact('art-1', 'tsk-1', 'report'))
+
+        assert.equal((await s.listArtifacts('tsk-1')).length, 1)
+      })
+
+      test('同一 id 落到另一个任务必须报错，不得静默丢弃或覆盖', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-2', 'mis-1'), actor: ACTOR })
+
+        await s.putArtifact(artifact('report', 'tsk-1', 'report'))
+
+        // 静默处理会让第二个任务「有结论没证据」，而两个实现各自静默的
+        // 方式还不一样（一个保留旧的，一个覆盖新的）——那是最难查的一类不一致
+        await assert.rejects(
+          () => s.putArtifact(artifact('report', 'tsk-2', 'report')),
+          /冲突|已属于/,
+        )
+        assert.equal((await s.listArtifacts('tsk-1')).length, 1, '原任务的证据不得被顶掉')
+      })
+    })
+
+    describe('任务结果落库（Agent 干完活之后）', () => {
+      test('结果写入后可原样读回', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        await s.setTaskResult('tsk-1', taskResult('tsk-1', 'mis-1'))
+
+        const back = await s.getTask('tsk-1')
+        assert.equal(back?.result?.status, 'completed')
+        assert.equal(back?.result?.summary, '统计完成，共 3 个文件')
+        assert.equal(
+          back?.result?.criterion_results[0]?.passed,
+          true,
+          '逐条验收结论必须落库——它是「这个通过是怎么来的」的唯一凭据',
+        )
+        assert.equal(back?.result?.artifacts[0]?.sha256, 'd'.repeat(64))
+      })
+
+      test('未收结果的任务 result 为 null', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        assert.equal((await s.getTask('tsk-1'))?.result, null)
+      })
+
+      test('重复写入以最后一次为准（重试收取同一结果不得报错）', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        await s.setTaskResult('tsk-1', taskResult('tsk-1', 'mis-1', false))
+        await s.setTaskResult('tsk-1', taskResult('tsk-1', 'mis-1', true))
+
+        assert.equal((await s.getTask('tsk-1'))?.result?.status, 'completed')
+      })
+
+      test('对不存在的任务写结果抛错，不得静默丢弃', async () => {
+        const s = await createStore()
+        await assert.rejects(() => s.setTaskResult('ghost', taskResult('ghost', 'mis-1')), /不存在/)
       })
     })
 

@@ -136,7 +136,11 @@ export const EVENT_TYPES = [
   'TASK_FAILED',
   'TASK_COMPLETED',
   'MISSION_COMPLETED',
+  /** 需要人介入。与 MISSION_FAILED 分开：一个要人来救，一个只是结果不达标。 */
   'MISSION_ESCALATED',
+  'MISSION_FAILED',
+  /** 其余状态流转（如进入 RUNNING）。没有它，中间态只能借用终态事件，届时界面会显示假信号。 */
+  'MISSION_STATE_CHANGED',
 ] as const
 export type EventType = (typeof EVENT_TYPES)[number]
 

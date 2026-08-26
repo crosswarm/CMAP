@@ -9,10 +9,12 @@
  * 脏数据，而审计流一旦失真就再也无法复盘。
  */
 
+import type { TaskResultV1 } from './generated/task-result.ts'
 import { assertTransition } from './task-state.ts'
 import type {
   Mission,
   MissionState,
+  EventType,
   TaskRecord,
   TaskEvent,
   EventActor,
@@ -33,11 +35,25 @@ import type {
   TaskQuery,
 } from './store.ts'
 import {
+  ArtifactConflictError,
   ConcurrentModificationError,
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
 } from './store.ts'
+
+const missionEventType = (state: MissionState): EventType => {
+  switch (state) {
+    case 'COMPLETED':
+      return 'MISSION_COMPLETED'
+    case 'ESCALATED':
+      return 'MISSION_ESCALATED'
+    case 'FAILED':
+      return 'MISSION_FAILED'
+    default:
+      return 'MISSION_STATE_CHANGED'
+  }
+}
 
 export class MemoryStore implements Store {
   readonly #missions = new Map<string, Mission>()
@@ -124,7 +140,7 @@ export class MemoryStore implements Store {
     this.#missions.set(id, next)
     this.#record(
       id, null,
-      state === 'COMPLETED' ? 'MISSION_COMPLETED' : 'MISSION_ESCALATED',
+      missionEventType(state),
       actor, `mission-state:${id}:${state}`, { state },
     )
 
@@ -214,6 +230,20 @@ export class MemoryStore implements Store {
     return back
   }
 
+  async setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord> {
+    const t = this.#tasks.get(taskId)
+    if (!t) throw new NotFoundError('Task', taskId)
+
+    const next: TaskRecord = { ...t, result, updated_at: new Date().toISOString() }
+    this.#tasks.set(taskId, next)
+
+    const back = this.#tasks.get(taskId)
+    if (back?.result?.status !== result.status) {
+      throw new WriteVerificationError('Task', taskId, 'result 回读不符')
+    }
+    return back
+  }
+
   async queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]> {
     let out = [...this.#tasks.values()]
     if (q.missionId) out = out.filter((t) => t.mission_id === q.missionId)
@@ -273,6 +303,14 @@ export class MemoryStore implements Store {
   // --------------------------------------------------------- Artifact
 
   async putArtifact(a: Artifact): Promise<Artifact> {
+    const prev = this.#artifacts.get(a.artifact_id)
+    if (prev && (prev.task_id !== a.task_id || prev.sha256 !== a.sha256)) {
+      throw new ArtifactConflictError(
+        a.artifact_id,
+        `已属于任务 ${prev.task_id}（sha256 ${prev.sha256.slice(0, 12)}…），` +
+          `不能改指任务 ${a.task_id}`,
+      )
+    }
     this.#artifacts.set(a.artifact_id, a)
     return a
   }

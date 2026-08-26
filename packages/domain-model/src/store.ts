@@ -12,6 +12,7 @@
  * P1 用内存实现跑通；P4 换 PostgreSQL 时调用方代码不应改动。
  */
 
+import type { TaskResultV1 } from './generated/task-result.ts'
 import type { TaskState } from './task-state.ts'
 import type {
   Mission,
@@ -105,6 +106,19 @@ export class WriteVerificationError extends Error {
   }
 }
 
+/**
+ * 同一 artifact_id 指向了不同的任务或不同的内容。
+ *
+ * Agent 爱把证据叫 `report` 这种大众名字，落到全局主键上就会撞车。
+ * 静默处理的代价是「有结论没证据」，且两个实现静默的方式还可能不一样。
+ */
+export class ArtifactConflictError extends Error {
+  constructor(artifactId: string, detail: string) {
+    super(`证据 ${artifactId} 写入冲突：${detail}`)
+    this.name = 'ArtifactConflictError'
+  }
+}
+
 export class LockUnavailableError extends Error {
   readonly resource: string
   readonly heldBy: string
@@ -141,6 +155,14 @@ export interface Store {
    * 没有它，Temporal 重试会重复 spawn Agent 进程。
    */
   setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord>
+  /**
+   * 持久化 Agent 交回的归一化结果。
+   *
+   * 覆盖写入而非追加：Activity 超时重试会重新收取同一份结果，报错或写重复
+   * 记录都会把「重试」变成「失败」。要保留历史用的是返工派生新 Task，不是
+   * 在同一条记录上堆版本。
+   */
+  setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord>
 
   queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]>
   /**
