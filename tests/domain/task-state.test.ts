@@ -82,6 +82,11 @@ describe('审批闸口', () => {
     assert.ok(canTransition('APPROVAL_REQUIRED', 'REJECTED'))
   })
 
+  test('READY 可进入审批等待，批准后回到 READY 再派发', () => {
+    assert.ok(canTransition('READY', 'APPROVAL_REQUIRED'))
+    assert.ok(canTransition('APPROVAL_REQUIRED', 'READY'))
+  })
+
   test('批准后回到 RUNNING', () => {
     assert.ok(canTransition('APPROVAL_REQUIRED', 'RUNNING'))
   })

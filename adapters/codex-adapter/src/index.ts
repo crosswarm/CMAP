@@ -11,7 +11,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, realpath, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, isAbsolute } from 'node:path'
@@ -257,6 +257,9 @@ export class CodexAdapter implements AgentAdapter {
     const child = spawn(this.#bin, args, {
       env: {
         ...process.env,
+        // macOS 上 TMPDIR 可能经 /Volumes/<disk> 符号链接指回 /Users。
+        // Codex workspace-write 拒绝带符号链接的 writable root，传物理路径即可。
+        TMPDIR: await realpath(tmpdir()),
         // 隔离本机代理：Surge 会拦截 localhost 并返回 HTTP 200 + HTML，
         // 导致连接看似成功却永远等不到有效响应（静默挂起）。
         NO_PROXY: 'localhost,127.0.0.1,::1',

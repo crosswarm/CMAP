@@ -19,14 +19,17 @@ import { Context } from '@temporalio/activity'
 import type {
   Store,
   Artifact,
+  Approval,
+  ApprovalScope,
   EventActor,
   EventType,
+  RiskLevel,
   TaskEnvelopeV1,
   TaskResultV1,
   ReviewDecisionV1,
   ProgressSnapshot,
 } from '#domain-model'
-import { detectNoProgress } from '#domain-model'
+import { detectNoProgress, needsApproval, RISK_LEVELS } from '#domain-model'
 import type { AgentAdapter } from '#adapter-sdk'
 
 /**
@@ -100,6 +103,27 @@ export interface ActivityDeps {
   readonly pollIntervalMs?: number
   /** 等待终态的上限。默认取信封的 execution_policy.timeout_seconds。 */
   readonly waitTimeoutMs?: number
+  /** 审批轮询间隔。审批来自人，生产默认无需高频查库。 */
+  readonly approvalPollIntervalMs?: number
+  /** 审批等待上限。默认 24 小时，超时按拒绝处理。 */
+  readonly approvalWaitTimeoutMs?: number
+}
+
+export interface ApprovalGateOutput {
+  readonly required: boolean
+  readonly approvalId?: string
+  readonly scope?: ApprovalScope
+}
+
+export interface WaitApprovalInput {
+  readonly taskId: string
+  readonly approvalId: string
+  readonly scope: ApprovalScope
+}
+
+export interface WaitApprovalOutput {
+  readonly decision: 'approved' | 'rejected'
+  readonly decidedBy: string
 }
 
 export interface CreateTaskInput {
@@ -163,6 +187,8 @@ export const createActivities = (deps: ActivityDeps) => {
   const { store, adapter, workRoot } = deps
   const runnerId = deps.runnerId ?? DEFAULT_RUNNER_ID
   const pollIntervalMs = deps.pollIntervalMs ?? 2_000
+  const approvalPollIntervalMs = deps.approvalPollIntervalMs ?? 5_000
+  const approvalWaitTimeoutMs = deps.approvalWaitTimeoutMs ?? 24 * 3600 * 1000
 
   const requireAdapter = (): AgentAdapter => {
     if (!adapter) {
@@ -205,6 +231,100 @@ export const createActivities = (deps: ActivityDeps) => {
         taskId, to: 'READY', actor: ACTOR,
         eventType: 'TASK_READY', idempotencyKey: `ready:${taskId}`,
       })
+    },
+
+    /**
+     * 高风险任务在派发前创建审批并暂停。
+     *
+     * approval id 由 task + scope 确定，Activity 重试不会多建审批；批准记录
+     * 已存在时也不会被新的 pending 记录覆盖。
+     */
+    async requestApproval(taskId: string): Promise<ApprovalGateOutput> {
+      const t = await store.getTask(taskId)
+      if (!t) throw new Error(`任务不存在：${taskId}`)
+      if (!needsApproval(t.risk)) return { required: false }
+
+      const scope = t.risk
+      const approvalId = `apr:${taskId}:${scope}`
+      const existing = await store.getApproval(approvalId)
+
+      if (!existing) {
+        const now = new Date()
+        const approval: Approval = {
+          id: approvalId,
+          mission_id: t.mission_id,
+          task_id: taskId,
+          action: t.capability,
+          scope,
+          requested_by: `system:${runnerId}`,
+          risk_level: t.risk,
+          reason: `任务 ${taskId} 风险级别为 ${scope}，执行前需要人工授权`,
+          evidence_artifact_ids: [],
+          decision: 'pending',
+          decided_by: null,
+          decided_at: null,
+          expires_at: new Date(now.getTime() + approvalWaitTimeoutMs).toISOString(),
+          created_at: now.toISOString(),
+        }
+        await store.createApproval(approval)
+      }
+
+      if (t.state === 'READY' && (await store.getApproval(approvalId))?.decision === 'pending') {
+        await store.transitionTask({
+          taskId, to: 'APPROVAL_REQUIRED', actor: ACTOR,
+          eventType: 'APPROVAL_REQUESTED', idempotencyKey: `approval-requested:${taskId}:${scope}`,
+          payload: { approval_id: approvalId, scope },
+        })
+      }
+
+      return { required: true, approvalId, scope }
+    },
+
+    /** 等真人决策。批准另一 scope 不会改变本审批记录，因此不会误放行。 */
+    async waitForApproval(input: WaitApprovalInput): Promise<WaitApprovalOutput> {
+      const deadline = Date.now() + approvalWaitTimeoutMs
+
+      for (;;) {
+        const approval = await store.getApproval(input.approvalId)
+        if (!approval) throw new Error(`审批不存在：${input.approvalId}`)
+        if (approval.task_id !== input.taskId || approval.scope !== input.scope) {
+          throw new Error(`审批 ${input.approvalId} 与任务或 scope 不匹配`)
+        }
+
+        if (approval.decision === 'approved') {
+          const t = await store.getTask(input.taskId)
+          if (t?.state === 'APPROVAL_REQUIRED') {
+            await store.transitionTask({
+              taskId: input.taskId, to: 'READY', actor: ACTOR,
+              eventType: 'APPROVAL_GRANTED',
+              idempotencyKey: `approval-granted:${input.approvalId}`,
+              payload: { approval_id: input.approvalId, scope: input.scope },
+            })
+          }
+          return { decision: 'approved', decidedBy: approval.decided_by! }
+        }
+
+        if (approval.decision === 'rejected' || approval.decision === 'expired') {
+          const t = await store.getTask(input.taskId)
+          if (t?.state === 'APPROVAL_REQUIRED') {
+            await store.transitionTask({
+              taskId: input.taskId, to: 'REJECTED', actor: ACTOR,
+              eventType: 'APPROVAL_DENIED',
+              idempotencyKey: `approval-denied:${input.approvalId}`,
+              payload: { approval_id: input.approvalId, scope: input.scope },
+            })
+          }
+          return { decision: 'rejected', decidedBy: approval.decided_by ?? 'system:expired' }
+        }
+
+        if (Date.now() > deadline) {
+          await store.decideApproval(input.approvalId, 'expired', 'system:timeout', new Date().toISOString())
+          continue
+        }
+
+        heartbeat()
+        await sleep(approvalPollIntervalMs)
+      }
     },
 
     /**
@@ -486,9 +606,10 @@ export const createActivities = (deps: ActivityDeps) => {
 
     async setMissionState(input: {
       missionId: string
-      state: 'RUNNING' | 'COMPLETED' | 'ESCALATED' | 'FAILED'
+      state: 'RUNNING' | 'AWAITING_APPROVAL' | 'COMPLETED' | 'ESCALATED' | 'FAILED'
+      idempotencyKey?: string
     }): Promise<void> {
-      await store.setMissionState(input.missionId, input.state, ACTOR)
+      await store.setMissionState(input.missionId, input.state, ACTOR, input.idempotencyKey)
     },
 
     /** 把任务推进到可评审状态。 */
@@ -804,6 +925,15 @@ export const createActivities = (deps: ActivityDeps) => {
       throw new Error(`Mission ${m.id} 未声明验收标准，无法判定任务是否完成`)
     }
 
+    const requestedRisk = m.constraints['risk_level']
+    if (
+      requestedRisk !== undefined &&
+      (typeof requestedRisk !== 'string' || !(RISK_LEVELS as readonly string[]).includes(requestedRisk))
+    ) {
+      throw new Error(`Mission ${m.id} 的 risk_level 非法：${String(requestedRisk)}`)
+    }
+    const risk = (requestedRisk ?? 'read-meta') as RiskLevel
+
     const envelope = {
       schema: 'cmap/task-envelope/v1',
       identity: {
@@ -818,7 +948,7 @@ export const createActivities = (deps: ActivityDeps) => {
       classification: {
         task_type: m.type,
         requested_capability: input.capability,
-        risk_level: 'read-meta',
+        risk_level: risk,
       },
       goal: {
         statement: input.goal ?? m.goal,
@@ -839,7 +969,7 @@ export const createActivities = (deps: ActivityDeps) => {
         parent_task_id: null,
         supersedes_task_id: input.supersedesTaskId ?? null,
         capability: input.capability,
-        risk: 'read-meta',
+        risk,
         state: 'DRAFT',
         attempt: 1,
         max_attempts: 1,

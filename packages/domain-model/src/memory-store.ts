@@ -132,16 +132,24 @@ export class MemoryStore implements Store {
     return this.#missions.get(id) ?? null
   }
 
-  async setMissionState(id: string, state: MissionState, actor: EventActor): Promise<Mission> {
+  async setMissionState(
+    id: string,
+    state: MissionState,
+    actor: EventActor,
+    idempotencyKey?: string,
+  ): Promise<Mission> {
     const m = this.#missions.get(id)
     if (!m) throw new NotFoundError('Mission', id)
+    if (m.state === state) return m
 
     const next: Mission = { ...m, state, updated_at: new Date().toISOString() }
     this.#missions.set(id, next)
     this.#record(
       id, null,
       missionEventType(state),
-      actor, `mission-state:${id}:${state}`, { state },
+      actor,
+      idempotencyKey ?? `mission-state:${id}:${m.state}->${state}`,
+      { from: m.state, state },
     )
 
     const back = this.#missions.get(id)
@@ -350,8 +358,14 @@ export class MemoryStore implements Store {
   // --------------------------------------------------------- Approval
 
   async createApproval(a: Approval): Promise<Approval> {
+    const existing = this.#approvals.get(a.id)
+    if (existing) return existing
     this.#approvals.set(a.id, { ...a })
     return a
+  }
+
+  async getApproval(id: string): Promise<Approval | null> {
+    return this.#approvals.get(id) ?? null
   }
 
   async decideApproval(

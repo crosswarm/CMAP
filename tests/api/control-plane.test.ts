@@ -83,6 +83,11 @@ before(async () => {
   await store.putArtifact(artifact('art-1', 'tsk-1', 'report'))
   await store.createApproval(approval('apr-ctl', 'controlled'))
   await store.createApproval(approval('apr-mut', 'mutating'))
+  await store.createApproval({
+    ...approval('apr-other', 'controlled'),
+    mission_id: 'mis-other',
+    task_id: 'tsk-other',
+  })
 
   server = await createControlPlane({ store, tenant: TENANT })
   await server.listen(0)
@@ -144,6 +149,17 @@ describe('审批闸口', () => {
     const items = (body as { items: Approval[] }).items
     assert.equal(items.length, 2)
     assert.deepEqual(items.map((a) => a.scope).sort(), ['controlled', 'mutating'])
+  })
+
+  test('他租户的审批不可见，也不可决策', async () => {
+    const listed = await get('/v1/approvals')
+    const items = (listed.body as { items: Approval[] }).items
+    assert.ok(!items.some((a) => a.id === 'apr-other'), '审批列表泄漏了他租户数据')
+
+    const decided = await post('/v1/approvals/apr-other/decision', {
+      decision: 'approved', scope: 'controlled', decided_by: 'user:crosswarm',
+    })
+    assert.equal(decided.status, 404, '跨租户审批要伪装成不存在，不能泄漏其存在性')
   })
 
   test('批准需显式声明 scope，缺失则 400', async () => {

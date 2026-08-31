@@ -325,8 +325,18 @@ export class PgStore implements Store {
     return rows.length ? toMission(rows[0] as Record<string, unknown>) : null
   }
 
-  async setMissionState(id: string, state: MissionState, actor: EventActor): Promise<Mission> {
+  async setMissionState(
+    id: string,
+    state: MissionState,
+    actor: EventActor,
+    idempotencyKey?: string,
+  ): Promise<Mission> {
     return this.#tx(async (c) => {
+      const current = await c.query('SELECT * FROM missions WHERE id = $1 FOR UPDATE', [id])
+      if (current.rowCount === 0) throw new NotFoundError('Mission', id)
+      const before = toMission(current.rows[0] as Record<string, unknown>)
+      if (before.state === state) return before
+
       const { rows, rowCount } = await c.query(
         'UPDATE missions SET state = $2, updated_at = now() WHERE id = $1 RETURNING *',
         [id, state],
@@ -336,7 +346,9 @@ export class PgStore implements Store {
       await this.#insertEvent(c, {
         missionId: id, taskId: null,
         type: missionEventType(state),
-        actor, idempotencyKey: `mission-state:${id}:${state}`, payload: { state },
+        actor,
+        idempotencyKey: idempotencyKey ?? `mission-state:${id}:${before.state}->${state}`,
+        payload: { from: before.state, state },
       })
       return toMission(rows[0] as Record<string, unknown>)
     })
@@ -641,7 +653,9 @@ export class PgStore implements Store {
       `INSERT INTO approvals (id, mission_id, task_id, action, scope, requested_by,
                               risk_level, reason, evidence_artifact_ids, decision,
                               decided_by, decided_at, expires_at, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id
+       RETURNING *`,
       [
         a.id, a.mission_id, a.task_id, a.action, a.scope, a.requested_by,
         a.risk_level, a.reason, a.evidence_artifact_ids, a.decision,
@@ -649,6 +663,11 @@ export class PgStore implements Store {
       ],
     )
     return toApproval(rows[0] as Record<string, unknown>)
+  }
+
+  async getApproval(id: string): Promise<Approval | null> {
+    const { rows } = await this.#pool.query('SELECT * FROM approvals WHERE id = $1', [id])
+    return rows[0] ? toApproval(rows[0] as Record<string, unknown>) : null
   }
 
   async decideApproval(

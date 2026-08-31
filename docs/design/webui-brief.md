@@ -213,7 +213,14 @@ Review  { round, decision: 'accept'|'rework'|'escalate', failed_criteria[], evid
 
 ## 仍然给不了
 
-- **审批闸口没有数据**。审批的账本与 API 都在，但 Workflow 不会主动请求审批、
-  也不会挂起等批——高风险任务目前直接跑。审批中心的设计继续保留，后端会补。
 - 「队列位置 · 预计 ETA」依然不存在（锁拿不到只有 `WAITING_RESOURCE`）。
 - 「已送达 · 已确认」双态依然只有「已送达」。
+
+## 审批闸口现在有真数据了
+
+- controlled / mutating 任务派发前自动创建对应 scope 的 pending Approval。
+- 任务处于 `APPROVAL_REQUIRED`、Mission 处于 `AWAITING_APPROVAL` 时，binding 为空，
+  说明 Agent 尚未启动；界面可据此明确显示「卡在你这里」。
+- API 批错 scope 返回 409；两类授权互不蕴含。他租户审批不可见也不可决策。
+- 正确批准后事件流出现 `APPROVAL_GRANTED` 并继续 `TASK_STARTED`；拒绝后 Task 为
+  `REJECTED`、Mission 为 `FAILED`。

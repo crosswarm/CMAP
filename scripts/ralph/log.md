@@ -28,3 +28,13 @@
 - 超时路径现在主动 `cancel` Agent，避免孤儿进程；Worker 关闭处理改为幂等。
 - 真实证据：`node scripts/e2e-mission.mjs --rework` 82.5s 退出 0，产生两条真实 Codex Task，后继正确 supersedes 前一轮，事件含 `REVIEW_REWORK_REQUESTED`、`TASK_FAILED`、且仅一个 `MISSION_ESCALATED`。
 - 下一轮：审批闸口接入主 Workflow，未批准不得调用 Adapter。
+
+## 第 3 轮：审批闸口接入主 Workflow（通过）
+
+- controlled / mutating 任务在派发前进入 `APPROVAL_REQUIRED`；批准前 binding 为空，Adapter 调用为零。
+- 两类 scope 互不蕴含；API 批错 scope 返回 409，他租户审批不可见且不可决策。
+- 正确批准后任务回到 READY 再派发；拒绝后 Task 落 REJECTED、Mission 落 FAILED。
+- 真实验证：`node scripts/e2e-approval.mjs` 退出 0，事件流含 `APPROVAL_REQUESTED → APPROVAL_GRANTED → TASK_STARTED → MISSION_COMPLETED`。
+- 真实验证期间修复：多轮审批状态事件幂等键带 Task ID；Codex 子进程 TMPDIR 解析为无符号链接的物理路径。
+
+<promise>FINISHED</promise>

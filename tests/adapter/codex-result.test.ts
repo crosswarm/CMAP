@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -37,7 +37,7 @@ test('Agent 缺必需证据时返回 failed 结果，而不是抛异常炸掉 Wo
 const args = process.argv.slice(2)
 const out = args[args.indexOf('-o') + 1]
 require('node:fs').writeFileSync(out, JSON.stringify({
-  status: 'failed', summary: '沙箱阻止写文件',
+  status: 'failed', summary: process.env.TMPDIR,
   criterion_results: [{ criterion_id: 'C1', actual: '未执行', passed: false, evidence_artifact_ids: [] }],
   artifacts: [], findings: [],
   error: { code: 'FILESYSTEM_BLOCKED', message: '不能写文件', retryable: true }
@@ -62,6 +62,7 @@ require('node:fs').writeFileSync(out, JSON.stringify({
   }
 
   const result = await adapter.collectResult(binding)
+  assert.equal(result.summary, await realpath(tmpdir()), '传给 Codex 的 TMPDIR 必须是无符号链接的物理路径')
   assert.equal(result.status, 'failed')
   assert.equal(result.error?.code, 'EVIDENCE_MISSING')
   assert.match(result.error?.message ?? '', /report/)

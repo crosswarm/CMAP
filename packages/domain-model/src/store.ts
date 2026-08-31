@@ -137,7 +137,12 @@ export interface Store {
   // Mission
   createMission(input: CreateMissionInput): Promise<Mission>
   getMission(id: string): Promise<Mission | null>
-  setMissionState(id: string, state: MissionState, actor: EventActor): Promise<Mission>
+  setMissionState(
+    id: string,
+    state: MissionState,
+    actor: EventActor,
+    idempotencyKey?: string,
+  ): Promise<Mission>
 
   // Task
   createTask(input: CreateTaskInput): Promise<TaskRecord>
@@ -196,6 +201,7 @@ export interface Store {
 
   // Approval
   createApproval(a: Approval): Promise<Approval>
+  getApproval(id: string): Promise<Approval | null>
   decideApproval(
     id: string,
     decision: ApprovalDecision,

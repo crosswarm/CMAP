@@ -29,7 +29,9 @@ import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter } from './fake-adapter.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const TASK_QUEUE = 'cmap-test'
+// 每次测试进程用独立队列。Temporal 会保留失败用例留下的 Workflow；固定队列
+// 会让下次测试 Worker 捞起旧任务，拿新 MemoryStore 处理旧 mission，产生假失败。
+const TASK_QUEUE = `cmap-test-${process.pid}-${Date.now()}`
 const ADDRESS = process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233'
 
 let worker: Worker
@@ -101,6 +103,25 @@ const run = async (missionId: string) => {
     workflowId: `test-${missionId}-${Date.now()}`,
     args: [{ missionId }],
   })
+}
+
+const start = async (missionId: string) => {
+  client = new Client({ connection: conn, namespace: 'default' })
+  return client.workflow.start('missionWorkflow', {
+    taskQueue: TASK_QUEUE,
+    workflowId: `test-${missionId}-${Date.now()}`,
+    args: [{ missionId }],
+  })
+}
+
+const waitUntil = async <T>(read: () => Promise<T | null>): Promise<T> => {
+  const deadline = Date.now() + 5_000
+  for (;;) {
+    const value = await read()
+    if (value !== null) return value
+    if (Date.now() > deadline) throw new Error('等待测试条件超时')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
 }
 
 describe('Mission Workflow', () => {
@@ -365,6 +386,65 @@ describe('Mission Workflow', () => {
       1,
       '一次升级只能发一个 Mission 级信号，否则界面和通知会重复报警',
     )
+  })
+
+  test('mutating 任务批准前不派发，批准 controlled 也不放行', async () => {
+    await store.createMission({
+      mission: mission('mis-approval-1', { risk_level: 'mutating' }),
+      actor: { type: 'system', id: 'test' },
+    })
+    const callsBefore = adapter.startCalls.length
+    const handle = await start('mis-approval-1')
+
+    const pending = await waitUntil(async () => {
+      const items = await store.listPendingApprovals('mis-approval-1')
+      return items[0] ?? null
+    })
+    assert.equal(pending.scope, 'mutating')
+    await waitUntil(async () =>
+      (await store.getMission('mis-approval-1'))?.state === 'AWAITING_APPROVAL' ? true : null,
+    )
+    assert.equal(adapter.startCalls.length, callsBefore, '未批准不得调用 Adapter')
+    assert.equal((await store.getMission('mis-approval-1'))?.state, 'AWAITING_APPROVAL')
+
+    await store.createApproval({
+      ...pending,
+      id: 'apr-unrelated-controlled',
+      task_id: 'other-task',
+      scope: 'controlled',
+      risk_level: 'controlled',
+    })
+    await store.decideApproval(
+      'apr-unrelated-controlled', 'approved', 'user:human', new Date().toISOString(),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(adapter.startCalls.length, callsBefore, 'controlled 批准不得放行 mutating')
+
+    await store.decideApproval(pending.id, 'approved', 'user:human', new Date().toISOString())
+    const result = await handle.result()
+    assert.equal(result.state, 'COMPLETED')
+    assert.equal(adapter.startCalls.length, callsBefore + 1, '正确批准后才调用 Adapter')
+  })
+
+  test('审批被拒绝后任务终止，Adapter 从未调用', async () => {
+    await store.createMission({
+      mission: mission('mis-approval-2', { risk_level: 'controlled' }),
+      actor: { type: 'system', id: 'test' },
+    })
+    const callsBefore = adapter.startCalls.length
+    const handle = await start('mis-approval-2')
+    const pending = await waitUntil(async () => {
+      const items = await store.listPendingApprovals('mis-approval-2')
+      return items[0] ?? null
+    })
+
+    await store.decideApproval(pending.id, 'rejected', 'user:human', new Date().toISOString())
+    const result = await handle.result()
+
+    assert.equal(result.state, 'FAILED')
+    assert.equal(adapter.startCalls.length, callsBefore)
+    assert.equal((await store.getTask(pending.task_id))?.state, 'REJECTED')
+    assert.equal((await store.getMission('mis-approval-2'))?.state, 'FAILED')
   })
 
   test('事件流完整记录了状态推进', async () => {

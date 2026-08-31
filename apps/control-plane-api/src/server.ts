@@ -102,6 +102,15 @@ const missionInTenant = async (ctx: Ctx, id: string) => {
   return m && m.tenant === ctx.tenant ? m : null
 }
 
+const pendingApprovalsInTenant = async (ctx: Ctx): Promise<readonly Approval[]> => {
+  const pending = await ctx.store.listPendingApprovals()
+  const visible: Approval[] = []
+  for (const approval of pending) {
+    if (await missionInTenant(ctx, approval.mission_id)) visible.push(approval)
+  }
+  return visible
+}
+
 const routes: readonly Route[] = [
   {
     method: 'GET',
@@ -179,8 +188,8 @@ const routes: readonly Route[] = [
   {
     method: 'GET',
     pattern: '/v1/approvals',
-    handler: async ({ res, store }) => {
-      json(res, 200, { items: await store.listPendingApprovals() })
+    handler: async (ctx) => {
+      json(ctx.res, 200, { items: await pendingApprovalsInTenant(ctx) })
     },
   },
 
@@ -212,7 +221,7 @@ const routes: readonly Route[] = [
         return fail(ctx.res, 400, 'decided_by 必填，审批必须可追溯到具体的人')
       }
 
-      const pending = await ctx.store.listPendingApprovals()
+      const pending = await pendingApprovalsInTenant(ctx)
       const target = pending.find((a: Approval) => a.id === id)
       if (!target) return fail(ctx.res, 404, `待审批不存在：${id}`)
 

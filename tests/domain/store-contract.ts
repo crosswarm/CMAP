@@ -261,6 +261,23 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.ok(failed.includes('MISSION_FAILED'), '失败必须与升级区分——一个要人来救，一个不用')
       })
 
+      test('等待态解除后可再次回到 RUNNING，不与首次 RUNNING 的幂等键冲突', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+
+        await s.setMissionState('mis-1', 'RUNNING', ACTOR)
+        await s.setMissionState('mis-1', 'AWAITING_APPROVAL', ACTOR)
+        await s.setMissionState('mis-1', 'RUNNING', ACTOR)
+        await s.setMissionState('mis-1', 'AWAITING_APPROVAL', ACTOR, 'approval-wait:round-2')
+        await s.setMissionState('mis-1', 'RUNNING', ACTOR, 'approval-resumed:round-2')
+
+        assert.equal((await s.getMission('mis-1'))?.state, 'RUNNING')
+        const changed = (await s.listEvents('mis-1')).filter(
+          (event) => event.event_type === 'MISSION_STATE_CHANGED',
+        )
+        assert.equal(changed.length, 5, '每一轮等待与恢复都是独立迁移')
+      })
+
       test('创建 Mission 产生事件', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
@@ -541,6 +558,32 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
     })
 
     describe('审批', () => {
+      test('审批可按 id 读回，已决策记录也不消失', async () => {
+        const s = await createStore()
+        await s.createApproval(approval('apr-1', 'controlled'))
+        assert.equal((await s.getApproval('apr-1'))?.decision, 'pending')
+
+        await s.decideApproval('apr-1', 'approved', 'user:crosswarm', T0)
+        assert.equal((await s.getApproval('apr-1'))?.decision, 'approved')
+        assert.equal(await s.getApproval('ghost'), null)
+      })
+
+      test('相同 id 的审批重复创建是幂等的', async () => {
+        const s = await createStore()
+        const a = approval('apr-1', 'controlled')
+        await s.createApproval(a)
+        await s.createApproval(a)
+        assert.equal((await s.listPendingApprovals()).length, 1)
+
+        await s.decideApproval('apr-1', 'approved', 'user:crosswarm', T0)
+        await s.createApproval(a)
+        assert.equal(
+          (await s.getApproval('apr-1'))?.decision,
+          'approved',
+          'Activity 重试不得用新的 pending 记录覆盖真人已经作出的决定',
+        )
+      })
+
       test('待审批可被查出', async () => {
         const s = await createStore()
         await s.createApproval(approval('apr-1', 'controlled'))

@@ -48,6 +48,9 @@ npm run start:api                        # 控制面 API，http://127.0.0.1:8787
 
 # 3. 真跑一次 Mission（codex 会被真实调起，约 1-3 分钟）
 node scripts/e2e-mission.mjs
+
+# 4. 验证审批闸口（需 Worker 与 API 同时运行）
+node scripts/e2e-approval.mjs
 ```
 
 两个进程都会幂等建表，空库首次启动即可用。环境变量见 `.env.example`，
@@ -59,6 +62,6 @@ P0（契约层 + 单跳闭环）、P1（任务账本 + Workflow + 自动返工�
 
 P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发给 codex、真实执行、
 收结果落账本、逐条核对验收标准、独立复算证据哈希；验收不过会自动派生后继任务
-返工，轮次耗尽或判定无进展则升级给人。还缺 WebUI（只有原型图）、SSE 推送，
-以及把审批闸口接进主流程。
+返工，轮次耗尽或判定无进展则升级给人；高风险任务会暂停等待对应 scope 的真人
+批准，错 scope 不放行。还缺 WebUI（只有原型图）与 SSE 推送。
 逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。

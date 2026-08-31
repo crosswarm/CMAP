@@ -45,6 +45,17 @@ const longRunning = proxyActivities<Activities>({
   },
 })
 
+/** 人工审批可跨小时或跨天，不能沿用 Agent 执行的 2 小时上限。 */
+const approvalWait = proxyActivities<Activities>({
+  startToCloseTimeout: '7 days',
+  heartbeatTimeout: '2 minutes',
+  retry: {
+    initialInterval: '5s',
+    backoffCoefficient: 2,
+    maximumAttempts: 3,
+  },
+})
+
 export interface MissionWorkflowInput {
   readonly missionId: string
 }
@@ -52,7 +63,7 @@ export interface MissionWorkflowInput {
 export interface MissionWorkflowResult {
   readonly missionId: string
   /** ESCALATED 表示自动返工已停止，等人介入——与「失败」是两回事。 */
-  readonly state: 'COMPLETED' | 'ESCALATED'
+  readonly state: 'COMPLETED' | 'ESCALATED' | 'FAILED'
   /** 按轮次顺序排列，含每一轮返工派生的后继任务。 */
   readonly taskIds: readonly string[]
   /** Agent 交回的结论摘要，便于调用方不查账本也能看到发生了什么。 */
@@ -92,6 +103,39 @@ export async function missionWorkflow(
     taskIds.push(taskId)
 
     await acts.markReady(taskId)
+
+    // controlled 与 mutating 都必须在人明确批准后才派发，且两类授权互不蕴含。
+    const gate = await acts.requestApproval(taskId)
+    if (gate.required && gate.approvalId && gate.scope) {
+      await acts.setMissionState({
+        missionId,
+        state: 'AWAITING_APPROVAL',
+        idempotencyKey: `approval-wait:${taskId}`,
+      })
+      const approval = await approvalWait.waitForApproval({
+        taskId,
+        approvalId: gate.approvalId,
+        scope: gate.scope,
+      })
+
+      if (approval.decision === 'rejected') {
+        await acts.setMissionState({ missionId, state: 'FAILED' })
+        return {
+          missionId,
+          state: 'FAILED',
+          taskIds,
+          summary: `审批被 ${approval.decidedBy} 拒绝`,
+          failedCriteria: [],
+          rounds: round,
+        }
+      }
+
+      await acts.setMissionState({
+        missionId,
+        state: 'RUNNING',
+        idempotencyKey: `approval-resumed:${taskId}`,
+      })
+    }
 
     // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
     // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。

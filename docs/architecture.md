@@ -198,6 +198,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 验收逐条判定（漏答即不通过） | ✅ P2 |
 | 硬门槛判定（确定性，不用 LLM） | ✅ P2 |
 | 自动返工接进主 Workflow（两道刹车 + 升级） | ✅ P2 |
+| 审批闸口接进主 Workflow（双 scope + 拒绝终止） | ✅ P2，真实 API → Workflow → Codex 链路通过 |
 | 证据哈希由控制面独立复算 | ✅ P2，复算在控制面 Adapter 层，不采信 Agent 自报 |
 | WebUI 原型（3 方案 × 2 轮迭代） | 🟡 P2，PNG 已入库，方案说明与「两类授权同时 pending」帧未交付 |
 | Web UI 前端实现（Mission/审批/证据/返工追踪） | ⬜ P2 |
@@ -220,9 +221,10 @@ codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独�
 得到的是不可复现也无法审计的主观判断。软判断（Claude 评审）可以覆盖在其之上，
 但不得推翻硬指标。
 
-**还没接进主流程的是审批闸口**：审批的账本与 API 都在，但 Workflow 不会主动
-请求审批、也不会挂起等批。高风险任务目前直接跑——这是「人只在授权闸口出现」
-尚未兑现的那一半。
+审批闸口已接进主 Workflow：controlled / mutating 任务派发前创建对应 scope 的
+审批并进入 `APPROVAL_REQUIRED`；错 scope 不放行，正确批准后才调用 Adapter，
+拒绝则 Task 落 `REJECTED`、Mission 落 `FAILED`。`scripts/e2e-approval.mjs`
+用真实 REST API、PgStore、Temporal 与 Codex 验证整条链路。
 
 P0 出口验证记录在 `scripts/e2e-single-hop.mjs`：信封校验 → codex 真实执行 → 结果 Schema 校验 → 证据哈希独立复算 → 验收标准逐条回应 → 幂等去重。
 

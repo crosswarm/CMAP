@@ -32,6 +32,6 @@
       "未批准或只批准另一 scope 时 Adapter 调用次数保持为零",
       "运行 npm run check、npm run test:pg 和真实 API 审批冒烟"
     ],
-    "passes": false
+    "passes": true
   }
 ]
