@@ -360,6 +360,11 @@ describe('Mission Workflow', () => {
     const events = (await store.listEvents('mis-rework-2')).map((e) => e.event_type)
     assert.ok(events.includes('REVIEW_REWORK_REQUESTED'), '返工要留痕')
     assert.ok(events.includes('MISSION_ESCALATED'), '升级要留痕')
+    assert.equal(
+      events.filter((event) => event === 'MISSION_ESCALATED').length,
+      1,
+      '一次升级只能发一个 Mission 级信号，否则界面和通知会重复报警',
+    )
   })
 
   test('事件流完整记录了状态推进', async () => {

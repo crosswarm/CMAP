@@ -35,7 +35,6 @@ import type {
 import {
   AdapterError,
   RiskCeilingExceededError,
-  EvidenceMissingError,
 } from '#adapter-sdk'
 
 const ADAPTER_ID = 'codex-adapter'
@@ -106,6 +105,8 @@ export const buildCodexArgs = (
 ): string[] => {
   const args = [
     'exec',
+    '--ignore-user-config',
+    '--ephemeral',
     '--json',
     '-s', chooseSandbox(envelope),
     '-C', opts.workDir,
@@ -450,9 +451,6 @@ export class CodexAdapter implements AgentAdapter {
     const required = state.envelope.evidence_requirements.required_artifact_roles
     const produced = new Set((out.artifacts ?? []).map((a) => a.role))
     const missing = required.filter((r) => !produced.has(r))
-    if (missing.length > 0) {
-      throw new EvidenceMissingError(missing, state.envelope.identity.task_id)
-    }
 
     // 证据真实性：文件必须存在，且哈希由控制面独立复算
     const artifacts: TaskResultV1['artifacts'] = []
@@ -493,7 +491,7 @@ export class CodexAdapter implements AgentAdapter {
       mission_id: state.envelope.identity.mission_id,
       task_id: state.envelope.identity.task_id,
       attempt: state.envelope.identity.revision,
-      status: out.status,
+      status: missing.length > 0 ? 'failed' : out.status,
       summary: out.summary,
       criterion_results: (out.criterion_results ?? []).map((c) => ({
         criterion_id: c.criterion_id,
@@ -511,7 +509,16 @@ export class CodexAdapter implements AgentAdapter {
             })),
           }
         : {}),
-      ...(out.error
+      ...(missing.length > 0
+        ? {
+            error: {
+              code: 'EVIDENCE_MISSING',
+              message: `缺少声明的证据产物：${missing.join(', ')}`,
+              retryable: true,
+              fingerprint: `evidence-missing:${missing.sort().join(',')}`,
+            },
+          }
+        : out.error
         ? {
             error: {
               code: out.error.code,

@@ -75,7 +75,12 @@ const worker = await Worker.create({
 
 // shutdown 让 worker.run() 正常返回，正在执行的 Activity 得以收尾；
 // 直接 process.exit 会把它们截断成需要重试的孤儿。
-const stop = (): void => worker.shutdown()
+let stopping = false
+const stop = (): void => {
+  if (stopping) return
+  stopping = true
+  worker.shutdown()
+}
 process.on('SIGINT', stop)
 process.on('SIGTERM', stop)
 

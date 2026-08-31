@@ -23,6 +23,7 @@ export class FakeAdapter implements AgentAdapter {
   /** 每次 startTask 的信封，用于断言「Adapter 真的被调用了几次」。 */
   readonly startCalls: TaskEnvelopeV1[] = []
   readonly contexts: DispatchContext[] = []
+  readonly cancelCalls: RemoteTaskBinding[] = []
 
   /** getStatus 前几次返回 running，模拟真实的等待过程。 */
   runningRounds = 1
@@ -72,7 +73,9 @@ export class FakeAdapter implements AgentAdapter {
     return { unsubscribe: async () => {} }
   }
 
-  async cancel(): Promise<void> {}
+  async cancel(binding: RemoteTaskBinding): Promise<void> {
+    this.cancelCalls.push(binding)
+  }
 
   /**
    * 默认逐条回应信封声明的验收标准（全部通过），并刻意把 mission_id /

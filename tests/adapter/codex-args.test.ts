@@ -108,6 +108,8 @@ describe('既有参数不受影响', () => {
   test('沙箱、输出 schema、结果文件、提示词都在', () => {
     const args = buildCodexArgs(envelope(), opts)
     assert.equal(args[0], 'exec')
+    assert.ok(args.includes('--ignore-user-config'), '任务 Agent 不得继承个人插件、hooks 与额外 writable roots')
+    assert.ok(args.includes('--ephemeral'), '一次性任务不得留下可恢复的本机会话')
     assert.equal(valueOf(args, '--output-schema'), opts.outputSchemaPath)
     assert.equal(valueOf(args, '-o'), opts.resultFile)
     assert.equal(valueOf(args, '-C'), opts.workDir)

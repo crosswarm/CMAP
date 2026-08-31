@@ -242,5 +242,6 @@ describe('收结果并落账本', () => {
       () => createActivities({ store, adapter, pollIntervalMs: 1, waitTimeoutMs: 5 }).collectTaskResult(taskId),
       /超时/,
     )
+    assert.equal(adapter.cancelCalls.length, 1, '超时后必须终止 Agent，不能留下孤儿进程继续占资源')
   })
 })

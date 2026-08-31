@@ -136,6 +136,9 @@ if (reworkMode) {
   for (const need of ['REVIEW_REWORK_REQUESTED', 'MISSION_ESCALATED']) {
     if (!kinds.includes(need)) fail(`事件流缺少 ${need}`)
   }
+  if (kinds.filter((kind) => kind === 'MISSION_ESCALATED').length !== 1) {
+    fail('一次升级应只有一个 MISSION_ESCALATED，重复事件会让界面和通知重复报警')
+  }
   ok(`返工与升级都已留痕：${kinds.join(' → ')}`)
 
   console.log(`\n✅ 返工闭环在真实链路上成立：够不着的标准会返工，预算耗尽即升级，不无限重试。`)

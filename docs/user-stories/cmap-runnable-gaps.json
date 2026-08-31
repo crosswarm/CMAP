@@ -20,7 +20,7 @@
       "确认事件流同时包含 REVIEW_REWORK_REQUESTED 与 MISSION_ESCALATED",
       "确认脚本输出 FINISHED 等价的成功终态且退出码为 0"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "functional",

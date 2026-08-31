@@ -293,6 +293,7 @@ export const createActivities = (deps: ActivityDeps) => {
         const status = await a.getStatus(t.binding)
         if (status.terminal_observed) break
         if (Date.now() > deadline) {
+          await a.cancel(t.binding, `等待终态超时（${waitMs}ms）`)
           throw new Error(
             `等待任务 ${taskId} 终态超时（${waitMs}ms），最后状态 ${status.status}`,
           )
@@ -773,7 +774,7 @@ export const createActivities = (deps: ActivityDeps) => {
     })
     await store.transitionTask({
       taskId, to: 'FAILED_TERMINAL', actor: ACTOR,
-      eventType: 'MISSION_ESCALATED',
+      eventType: 'TASK_FAILED',
       idempotencyKey: `escalate-done:${taskId}`,
       payload: { reason },
     })
