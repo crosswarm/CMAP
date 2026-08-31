@@ -24,7 +24,8 @@
     "test:pg": "node --test --test-concurrency=1 tests/domain/pg-store.test.ts",
     "test:store": "node --test --test-concurrency=1 tests/domain/memory-store.test.ts tests/domain/pg-store.test.ts",
     "test:workflow": "node --test --test-concurrency=1 tests/workflow/*.test.ts",
-    "test:api": "node --test --test-concurrency=1 tests/api/*.test.ts"
+    "test:api": "node --test --test-concurrency=1 tests/api/*.test.ts",
+    "user-stories:verify": "node scripts/verify-user-stories.mjs"
   },
   "devDependencies": {
     "@temporalio/activity": "^1.21.1",

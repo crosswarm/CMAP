@@ -156,7 +156,8 @@ describe('收结果并落账本', () => {
     const arts = await store.listArtifacts(taskId)
     assert.equal(arts.length, 1)
     assert.equal(arts[0]?.role, 'report')
-    assert.equal(arts[0]?.sha256, 'a'.repeat(64))
+    const t = await store.getTask(taskId)
+    assert.equal(arts[0]?.sha256, t?.result?.artifacts[0]?.sha256, '账本里的哈希要与结果一致')
     assert.equal(arts[0]?.mission_id, 'mis-1')
   })
 

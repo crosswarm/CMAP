@@ -1,0 +1,37 @@
+[
+  {
+    "category": "functional",
+    "description": "验收不通过时主 Workflow 自动派生后继任务返工，并在通过或触发刹车时停止",
+    "steps": [
+      "运行 npm run test:workflow，确认首轮失败后第二轮通过的真实 Temporal 集成用例通过",
+      "确认后继 Task 的 supersedes_task_id 指向上一轮 Task，上一轮结果与证据仍保留",
+      "确认轮次预算耗尽与无进展检测都会把 Mission 置为 ESCALATED",
+      "运行 npm run check 与 npm run test:pg"
+    ],
+    "passes": true
+  },
+  {
+    "category": "integration",
+    "description": "真实 Codex 链路完成一次返工并在预算耗尽后升级，不以假 Adapter 代替",
+    "steps": [
+      "启动真实 Worker 并用 SDK 验证 Temporal 可用",
+      "运行 node scripts/e2e-mission.mjs --rework",
+      "确认至少产生两个 Task，后继 Task 指向被返工 Task",
+      "确认事件流同时包含 REVIEW_REWORK_REQUESTED 与 MISSION_ESCALATED",
+      "确认脚本输出 FINISHED 等价的成功终态且退出码为 0"
+    ],
+    "passes": false
+  },
+  {
+    "category": "functional",
+    "description": "需要授权的任务会在主 Workflow 暂停，只有对应 scope 被批准后才执行",
+    "steps": [
+      "为 controlled 与 mutating 分别写失败测试，证明两类批准互不蕴含",
+      "任务进入 APPROVAL_REQUIRED 并在账本创建 pending Approval",
+      "批准对应 scope 后 Workflow 恢复并调用 Adapter；拒绝后任务终止且不调用 Adapter",
+      "未批准或只批准另一 scope 时 Adapter 调用次数保持为零",
+      "运行 npm run check、npm run test:pg 和真实 API 审批冒烟"
+    ],
+    "passes": false
+  }
+]

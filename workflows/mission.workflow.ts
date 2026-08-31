@@ -15,6 +15,8 @@
  */
 
 import { proxyActivities } from '@temporalio/workflow'
+
+import type { ProgressSnapshot } from '#domain-model'
 import type { Activities } from './activities.ts'
 
 const acts = proxyActivities<Activities>({
@@ -49,12 +51,18 @@ export interface MissionWorkflowInput {
 
 export interface MissionWorkflowResult {
   readonly missionId: string
-  readonly state: 'COMPLETED' | 'FAILED'
+  /** ESCALATED 表示自动返工已停止，等人介入——与「失败」是两回事。 */
+  readonly state: 'COMPLETED' | 'ESCALATED'
+  /** 按轮次顺序排列，含每一轮返工派生的后继任务。 */
   readonly taskIds: readonly string[]
   /** Agent 交回的结论摘要，便于调用方不查账本也能看到发生了什么。 */
   readonly summary: string
-  /** 未通过的验收标准。state 为 COMPLETED 时必为空。 */
+  /** 最后一轮未通过的验收标准。state 为 COMPLETED 时必为空。 */
   readonly failedCriteria: readonly string[]
+  /** 停止自动返工的原因：轮次耗尽，还是判定无进展。 */
+  readonly escalationReason?: string
+  /** 实际跑了几轮。0 表示一次过。 */
+  readonly rounds: number
 }
 
 export async function missionWorkflow(
@@ -67,45 +75,81 @@ export async function missionWorkflow(
   // ID 来自 Activity 返回值。该值被记入 Event History，
   // 重放时取缓存——这正是它不能在 Workflow 里生成的原因。
   // 目标与验收标准由 Activity 从 Mission 抄进信封，Workflow 不复述。
-  const { taskId } = await acts.createTask({
+  const first = await acts.createTask({
     missionId,
     // P3 的能力路由才会按 capability 选 Adapter；现在只有 codex 一家。
     capability: 'code.analyze',
   })
 
-  await acts.markReady(taskId)
+  const taskIds: string[] = []
+  let taskId = first.taskId
+  let previousProgress: ProgressSnapshot | null = null
+  let round = 0
 
-  // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
-  // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。
-  await acts.dispatchTask(taskId)
+  // 返工循环。出口只有三个：验收通过、轮次耗尽、判定无进展——
+  // 后两个都交给人，绝不无限重试。
+  for (;;) {
+    taskIds.push(taskId)
 
-  // 等 Agent 干完并收结果。验收结论由确定性程序判定，不看 Agent 的措辞。
-  const collected = await longRunning.collectTaskResult(taskId)
+    await acts.markReady(taskId)
 
-  if (!collected.passed) {
-    const reason =
-      collected.failedCriteria.length > 0
-        ? `验收未通过：${collected.failedCriteria.join(', ')}`
-        : `Agent 未成功完成：${collected.status}`
-    await acts.failTask({ taskId, reason })
-    await acts.setMissionState({ missionId, state: 'FAILED' })
-    return {
-      missionId,
-      state: 'FAILED',
-      taskIds: [taskId],
-      summary: collected.summary,
-      failedCriteria: collected.failedCriteria,
+    // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
+    // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。
+    await acts.dispatchTask(taskId)
+
+    // 等 Agent 干完并收结果。
+    const collected = await longRunning.collectTaskResult(taskId)
+
+    // 硬门槛由确定性程序判定，不看 Agent 的措辞。
+    await acts.markVerifying(taskId)
+    const { decision, progress } = await acts.evaluateHardGate({ taskId, round })
+
+    // 通过的才进评审态收尾；没过的从 VERIFYING 直接进 REWORK，
+    // 不经过 REVIEWING——那会在事件流里显示一场并不存在的评审。
+    if (decision.decision === 'accept') await acts.beginReview(taskId)
+
+    const outcome = await acts.applyReviewDecision({
+      taskId,
+      decision,
+      round,
+      ...(previousProgress ? { previousProgress } : {}),
+      currentProgress: progress,
+    })
+
+    if (outcome.outcome === 'accept') {
+      await acts.setMissionState({ missionId, state: 'COMPLETED' })
+      return {
+        missionId,
+        state: 'COMPLETED',
+        taskIds,
+        summary: collected.summary,
+        failedCriteria: [],
+        rounds: round,
+      }
     }
-  }
 
-  await acts.completeTask(taskId)
-  await acts.setMissionState({ missionId, state: 'COMPLETED' })
+    if (outcome.outcome === 'escalated') {
+      // Mission 状态已由 applyReviewDecision 置为 ESCALATED
+      return {
+        missionId,
+        state: 'ESCALATED',
+        taskIds,
+        summary: collected.summary,
+        failedCriteria: collected.failedCriteria,
+        ...(outcome.escalationReason ? { escalationReason: outcome.escalationReason } : {}),
+        rounds: round,
+      }
+    }
 
-  return {
-    missionId,
-    state: 'COMPLETED',
-    taskIds: [taskId],
-    summary: collected.summary,
-    failedCriteria: [],
+    const next = outcome.followupTaskIds[0]
+    if (!next) {
+      // 判了返工却没派生后继任务，说明决策与执行不一致。继续循环会
+      // 原地重跑同一个已完成的任务，不如在这里明确失败。
+      throw new Error(`任务 ${taskId} 判定返工但没有后继任务`)
+    }
+
+    taskId = next
+    previousProgress = progress
+    round += 1
   }
 }

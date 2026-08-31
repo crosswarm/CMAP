@@ -12,7 +12,7 @@
  * 本文件不在默认 npm test 内（npm run test:workflow 单独跑）。
  * 数据库或 Temporal 不可用时明确失败，不跳过——那等于用沉默替代验证。
  */
-import { test, describe, before, after } from 'node:test'
+import { test, describe, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 
 process.env['NO_PROXY'] = 'localhost,127.0.0.1,::1'
@@ -39,13 +39,13 @@ let conn: Connection
 let store: Store
 let adapter: FakeAdapter
 
-const mission = (id: string): Mission => ({
+const mission = (id: string, constraints: Record<string, unknown> = {}): Mission => ({
   id,
   tenant: 'team-ycc',
   owner: 'crosswarm',
   type: 'inspect',
   goal: '验证 Workflow 骨架',
-  constraints: {},
+  constraints,
   acceptance: [{ criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: 1, hard_gate: true }],
   workflow_template: 'inspect/v1',
   state: 'DRAFT',
@@ -80,6 +80,12 @@ before(async () => {
         `  node scripts/verify-temporal.mjs\n原始错误：${String(e)}`,
     )
   }
+})
+
+// 假 Adapter 由 Worker 持有，整个文件共用一个实例——每个用例前重置计数，
+// 否则上一个用例设的「连续不达标」会漏到下一个用例里。
+beforeEach(() => {
+  adapter.failNext = 0
 })
 
 after(async () => {
@@ -311,6 +317,51 @@ describe('Mission Workflow', () => {
     )
   })
 
+  test('第一轮没过就自动返工，第二轮过了就完成', async () => {
+    await store.createMission({
+      mission: mission('mis-rework-1', { max_additional_cycles: 2 }),
+      actor: { type: 'system', id: 'test' },
+    })
+    // 第一次收结果一律判不达标，第二次通过
+    adapter.failNext = 1
+
+    const result = await run('mis-rework-1')
+
+    assert.equal(result.state, 'COMPLETED', `应在第二轮通过，实际 ${result.state}`)
+    assert.equal(result.rounds, 1, '应恰好返工一轮')
+    assert.equal(result.taskIds.length, 2, '返工要派生新 Task，不是原地重跑')
+
+    const [firstId, secondId] = result.taskIds
+    const second = await store.getTask(secondId!)
+    assert.equal(
+      second?.supersedes_task_id,
+      firstId,
+      '后继任务必须指向被返工的原任务，否则说不清第几轮卡在哪',
+    )
+    const first = await store.getTask(firstId!)
+    assert.equal(first?.state, 'COMPLETED', '原任务已尽其责，落 COMPLETED 保留证据')
+    assert.ok(first?.result, '原任务那一轮的结果要留着，供下一轮比对进展')
+  })
+
+  test('轮次预算耗尽就升级给人，不无限重试', async () => {
+    await store.createMission({
+      mission: mission('mis-rework-2', { max_additional_cycles: 1 }),
+      actor: { type: 'system', id: 'test' },
+    })
+    adapter.failNext = 99 // 一直不达标
+
+    const result = await run('mis-rework-2')
+
+    assert.equal(result.state, 'ESCALATED', '预算耗尽必须交给人，而不是继续烧')
+    assert.match(result.escalationReason ?? '', /轮次/, '要说清为什么停')
+    assert.equal(result.taskIds.length, 2, '预算 1 轮 = 原任务 + 一个后继任务')
+    assert.equal((await store.getMission('mis-rework-2'))?.state, 'ESCALATED')
+
+    const events = (await store.listEvents('mis-rework-2')).map((e) => e.event_type)
+    assert.ok(events.includes('REVIEW_REWORK_REQUESTED'), '返工要留痕')
+    assert.ok(events.includes('MISSION_ESCALATED'), '升级要留痕')
+  })
+
   test('事件流完整记录了状态推进', async () => {
     await store.createMission({
       mission: mission('mis-wf-5'),
@@ -324,7 +375,9 @@ describe('Mission Workflow', () => {
     assert.ok(types.includes('TASK_CREATED'), '缺 TASK_CREATED')
     assert.ok(types.includes('TASK_ASSIGNED'), '缺 TASK_ASSIGNED —— 派发没留痕')
     assert.ok(types.includes('HARD_GATE_EVALUATED'), '缺硬门槛事件 —— 事后复核读不出验收发生过')
-    assert.ok(types.includes('TASK_COMPLETED'), '缺 TASK_COMPLETED')
+    // 通过评审而结束的任务记 REVIEW_ACCEPTED——状态是 COMPLETED，
+    // 事件类型表达的是「为什么结束」。返工结束的那条才记 TASK_COMPLETED。
+    assert.ok(types.includes('REVIEW_ACCEPTED'), '缺 REVIEW_ACCEPTED')
     assert.ok(
       !types.includes('MISSION_ESCALATED'),
       '顺利完成的 Mission 不得出现「已升级」事件 —— 那是叫人来救的信号',

@@ -198,10 +198,22 @@ Review  { round, decision: 'accept'|'rework'|'escalate', failed_criteria[], evid
 之前所有非完成状态都被记成 `MISSION_ESCALATED`，包括刚开始跑——那是个假的求救信号，
 已修。这条与「等资源 vs 等我批」是同一类要求：**看一眼就知道要不要我动手**。
 
+## 返工追踪页现在有真数据了
+
+自动返工已接进主流程。界面能拿到的形状：
+
+- **第几轮**：任务通过 `supersedes_task_id` 串成链，第 N 个就是第 N 轮
+- **卡在哪条标准**：`review-decision` 的 `failed_criteria` 逐条带 `expected` /
+  `actual` / `reason`，并指向具体证据 id。**「Agent 没回应这条」与「实测没达标」
+  措辞不同**，界面要能分辨——前者要追的是 Agent 没干活，后者是没干成
+- **有没有进展**：由确定性程序比对相邻两轮（证据哈希、失败标准集合、指标、
+  错误指纹），不是主观感觉
+- **两道刹车还剩多少**：`stop_conditions.max_additional_cycles` 是预算，
+  当前轮次从任务链长度得出
+
 ## 仍然给不了
 
-- **返工追踪页暂时没有自动产生的数据**。`applyReviewDecision` 与两道刹车都实现了，
-  但还没接进主 Workflow——目前验收不过就落 FAILED，不会自动派生后继任务。
-  返工追踪的设计继续保留，后端会补。
+- **审批闸口没有数据**。审批的账本与 API 都在，但 Workflow 不会主动请求审批、
+  也不会挂起等批——高风险任务目前直接跑。审批中心的设计继续保留，后端会补。
 - 「队列位置 · 预计 ETA」依然不存在（锁拿不到只有 `WAITING_RESOURCE`）。
 - 「已送达 · 已确认」双态依然只有「已送达」。

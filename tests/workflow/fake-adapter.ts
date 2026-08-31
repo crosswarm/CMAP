@@ -28,6 +28,9 @@ export class FakeAdapter implements AgentAdapter {
   runningRounds = 1
   /** 设置后覆盖默认结果，用于构造未通过 / 漏答等情形。 */
   result: TaskResultV1 | null = null
+  /** 接下来几次收结果判不达标，用于驱动返工。每次收取递减。 */
+  failNext = 0
+  #collects = 0
   summary = '干完了'
 
   #polls = 0
@@ -78,6 +81,9 @@ export class FakeAdapter implements AgentAdapter {
   async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
     if (this.result) return this.result
     const envelope = this.#envelopes.get(binding.remote_task_id)
+    this.#collects += 1
+    const passed = this.failNext <= 0
+    if (!passed) this.failNext -= 1
     // 真实 Agent 爱用 `report` 这种大众名字，这里照抄这个习惯——
     // 控制面必须自己给证据重新命名，否则第二个任务就跟第一个撞主键。
     const artifactId = 'report'
@@ -90,15 +96,17 @@ export class FakeAdapter implements AgentAdapter {
       summary: this.summary,
       criterion_results: (envelope?.goal.success_definition ?? []).map((c) => ({
         criterion_id: c.criterion_id,
-        actual: c.expected,
-        passed: true,
+        actual: passed ? c.expected : '差得远',
+        passed,
         evidence_artifact_ids: [artifactId],
       })),
       artifacts: [
         {
           artifact_id: artifactId, role: 'report',
           uri: 'evidence/report.json', media_type: 'application/json',
-          size_bytes: 42, sha256: 'a'.repeat(64),
+          size_bytes: 42,
+          // 每轮证据内容不同：内容逐字节相同会被无进展检测判定为「什么都没动」
+          sha256: `${this.#collects}`.padStart(64, 'a'),
         },
       ],
     }

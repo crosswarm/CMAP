@@ -10,6 +10,7 @@
  *  3. 写 Ledger 与调 Adapter 合并为单个 Activity——跨 Activity 无事务保护
  */
 
+import { createHash } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -64,6 +65,9 @@ const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectOutput =>
 
 const ACTOR: EventActor = { type: 'system', id: 'mission-workflow' }
 const DEFAULT_RUNNER_ID = process.env['RUNNER_ID'] ?? 'local-dev'
+/** 默认返工预算。绝不无限重试——耗尽即升级给人。 */
+const DEFAULT_MAX_CYCLES = 2
+
 /** 证据保留期。到期前不得覆盖，否则结论无法复核。 */
 const RETENTION_MS = 365 * 24 * 3600 * 1000
 
@@ -115,6 +119,18 @@ export interface DispatchOutput {
   /** true 表示本次真实派发；false 表示已有 binding，跳过。 */
   readonly dispatched: boolean
   readonly remoteTaskId: string
+}
+
+export interface HardGateInput {
+  readonly taskId: string
+  /** 当前是第几轮返工。0 表示首轮。 */
+  readonly round: number
+}
+
+export interface HardGateOutput {
+  readonly decision: ReviewDecisionV1
+  /** 本轮进展快照，供下一轮做无进展检测。 */
+  readonly progress: ProgressSnapshot
 }
 
 export interface CollectOutput {
@@ -364,20 +380,6 @@ export const createActivities = (deps: ActivityDeps) => {
       return judge(envelope, result)
     },
 
-    /** 结果不达标时落终态。失败要留在账本里，不能只体现为 Workflow 报错。 */
-    async failTask(input: { taskId: string; reason: string }): Promise<void> {
-      const t = await store.getTask(input.taskId)
-      if (!t || t.state === 'FAILED_TERMINAL') return
-      await store.transitionTask({
-        taskId: input.taskId,
-        to: 'FAILED_TERMINAL',
-        actor: ACTOR,
-        eventType: 'TASK_FAILED',
-        idempotencyKey: `failed:${input.taskId}`,
-        payload: { reason: input.reason },
-      })
-    },
-
     /**
      * 获取任务所需的独占资源锁。
      *
@@ -463,27 +465,22 @@ export const createActivities = (deps: ActivityDeps) => {
       await store.releaseLock(lockId, new Date().toISOString())
     },
 
-    /** 收取结果并推进到终态。此处简化为直接通过，真实实现会调 collectResult。 */
-    async completeTask(taskId: string): Promise<void> {
+    /**
+     * 进入硬门槛判定态。
+     *
+     * 独立成一步是为了让事件流读得出「验收发生过」——判定结果无论
+     * 通过与否，这一步都留痕。
+     */
+    async markVerifying(taskId: string): Promise<void> {
       const t = await store.getTask(taskId)
       if (!t) throw new Error(`任务不存在：${taskId}`)
-      if (t.state === 'COMPLETED') return
+      if (t.state === 'VERIFYING') return
 
-      // 每一步记各自的事件。全记成 TASK_STARTED 的话，事件流里读不出
-      // 「硬门槛过了没有」——那正是事后复核最想知道的一件事。
-      const eventOf = {
-        VERIFYING: 'HARD_GATE_EVALUATED',
-        REVIEWING: 'REVIEW_STARTED',
-        COMPLETED: 'TASK_COMPLETED',
-      } as const
-
-      for (const to of ['VERIFYING', 'REVIEWING', 'COMPLETED'] as const) {
-        await store.transitionTask({
-          taskId, to, actor: ACTOR,
-          eventType: eventOf[to],
-          idempotencyKey: `${to.toLowerCase()}:${taskId}`,
-        })
-      }
+      await store.transitionTask({
+        taskId, to: 'VERIFYING', actor: ACTOR,
+        eventType: 'HARD_GATE_EVALUATED',
+        idempotencyKey: `verifying:${taskId}`,
+      })
     },
 
     async setMissionState(input: {
@@ -507,6 +504,114 @@ export const createActivities = (deps: ActivityDeps) => {
           eventType: to === 'VERIFYING' ? 'HARD_GATE_EVALUATED' : 'REVIEW_STARTED',
           idempotencyKey: `${to.toLowerCase()}:${taskId}`,
         })
+      }
+    },
+
+    /**
+     * 硬门槛判定：把「验收没过」变成控制面可直接执行的返工决策。
+     *
+     * 刻意**不用 LLM**。验收标准本来就是机读的，比一比就有答案；让模型回答
+     * 「过没过」得到的是主观判断，既不可复现也无法审计，且模型倾向于报告
+     * 乐观结果。软判断（Claude 评审）可以覆盖在这之上，但不得推翻硬指标。
+     *
+     * 放在 Activity 而非 Workflow：要读账本。判定本身是纯函数，
+     * 同一份结果判几次都是同一个结论。
+     */
+    async evaluateHardGate(input: HardGateInput): Promise<HardGateOutput> {
+      const t = await store.getTask(input.taskId)
+      if (!t) throw new Error(`任务不存在：${input.taskId}`)
+      if (!t.result) {
+        throw new Error(`任务 ${input.taskId} 尚未收到结果，无从判定——评审不得凭空进行`)
+      }
+
+      const envelope = t.envelope as TaskEnvelopeV1
+      const criteria = envelope.goal.success_definition
+      const answered = new Map(t.result.criterion_results.map((c) => [c.criterion_id, c]))
+
+      const failed = criteria
+        .filter((c) => answered.get(c.criterion_id)?.passed !== true)
+        .map((c) => {
+          const got = answered.get(c.criterion_id)
+          return {
+            criterion_id: c.criterion_id,
+            expected: `${c.metric} ${c.operator} ${JSON.stringify(c.expected)}`,
+            // 沉默不算通过：漏答与实测未达标要能分辨，否则下一轮不知道该补什么
+            actual: got ? `${c.metric} = ${JSON.stringify(got.actual)}` : '（Agent 未回应该标准）',
+            reason: got
+              ? `实测未达标：期望 ${JSON.stringify(c.expected)}，实测 ${JSON.stringify(got.actual)}`
+              : 'Agent 未回应该标准，沉默不算通过',
+            evidence: [...(got?.evidence_artifact_ids ?? [])],
+          }
+        })
+
+      // Agent 自己就没跑成功时，也要有一条能说清缘由的失败记录，
+      // 否则返工决策里只有「不通过」三个字，下一轮无从下手。
+      if (failed.length === 0 && t.result.status !== 'completed') {
+        failed.push({
+          criterion_id: 'TASK-STATUS',
+          expected: 'status = completed',
+          actual: `status = ${t.result.status}`,
+          reason: t.result.error?.message ?? `Agent 未成功完成（${t.result.status}）`,
+          evidence: t.result.artifacts.map((a) => a.artifact_id),
+        })
+      }
+
+      const m = await store.getMission(t.mission_id)
+      const budget = m?.constraints['max_additional_cycles']
+      const maxCycles = typeof budget === 'number' ? budget : DEFAULT_MAX_CYCLES
+
+      const decision: ReviewDecisionV1 = {
+        schema: 'cmap/review-decision/v1',
+        mission_id: t.mission_id,
+        review_round: input.round + 1,
+        reviewed_task_ids: [t.id],
+        decision: failed.length === 0 ? 'accept' : 'rework',
+        hard_gate_summary: {
+          total: criteria.length,
+          passed: criteria.length - failed.filter((f) => f.criterion_id !== 'TASK-STATUS').length,
+          failed: failed.length,
+        },
+        // 程序化判定的把握是确定的；限制在于它只看硬指标
+        review_confidence: {
+          level: 'high',
+          limitations: ['仅程序化硬门槛判定，未做软判断'],
+        },
+        ...(failed.length > 0
+          ? {
+              failed_criteria: failed,
+              required_followups: [
+                {
+                  capability: t.capability,
+                  task_type: envelope.classification.task_type,
+                  // focus 指明这一轮该收敛哪几条，避免下一轮重复无效尝试
+                  focus: failed.map((f) => `${f.criterion_id}：期望 ${f.expected}，实测 ${f.actual}`),
+                  ...(t.result.artifacts.length > 0
+                    ? { inputs: { artifact_refs: t.result.artifacts.map((a) => a.artifact_id) } }
+                    : {}),
+                },
+              ],
+              stop_conditions: { max_additional_cycles: maxCycles },
+            }
+          : {}),
+      }
+
+      const firstFailedActual = failed[0]
+        ? answered.get(failed[0].criterion_id)?.actual
+        : undefined
+      const metric = Number(firstFailedActual)
+
+      return {
+        decision,
+        progress: {
+          // 没有 patch 可比，用证据内容哈希代替：这一轮的产物与上一轮
+          // 逐字节相同，就是「什么都没动」最直接的证据。
+          patchHash: createHash('sha256')
+            .update(t.result.artifacts.map((a) => a.sha256).sort().join(','))
+            .digest('hex'),
+          failedCriteriaIds: failed.map((f) => f.criterion_id),
+          metricValue: Number.isFinite(metric) ? metric : null,
+          errorFingerprint: t.result.error?.fingerprint ?? null,
+        },
       }
     },
 

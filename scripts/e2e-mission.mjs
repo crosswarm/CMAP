@@ -5,6 +5,10 @@
  * 这个走完整控制面——Temporal Workflow 派发 → codex 真实执行 → 收结果 →
  * 落账本 → 逐条验收，证明「调度系统真的会去调 codex」。两头都在不等于线接上了。
  *
+ * 两种场景：
+ *   node scripts/e2e-mission.mjs            一次过（accept 路径）
+ *   node scripts/e2e-mission.mjs --rework   验收标准故意够不着，验证返工与升级
+ *
  * 前置：
  *   docker compose -f infra/docker-compose/docker-compose.yml up -d
  *   node scripts/verify-temporal.mjs
@@ -36,6 +40,10 @@ const connectionString =
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
 const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
 
+// 返工场景：目标只建 3 个文件，验收却要求 5 个——Agent 无论怎么努力都够不着。
+// 这样才能在真实链路上验证「返工 → 预算耗尽 → 升级给人」，而不是只验证顺利路径。
+const reworkMode = process.argv.includes('--rework')
+
 const step = (n, msg) => console.log(`\n[${n}] ${msg}`)
 const ok = (msg) => console.log(`  ✓ ${msg}`)
 const fail = (msg) => {
@@ -62,14 +70,14 @@ await store.createMission({
     goal:
       '在当前工作目录下新建 sample/ 子目录，并在其中写入 3 个文本文件；' +
       '随后统计 sample/ 下的文件数量，把统计结果写入 evidence/report.json。',
-    constraints: {},
+    constraints: reworkMode ? { max_additional_cycles: 1 } : {},
     // 机读验收标准：由确定性程序比对，不看 Agent 的措辞
     acceptance: [
       {
         criterion_id: 'FILE-COUNT',
         metric: 'sample_file_count',
         operator: 'eq',
-        expected: 3,
+        expected: reworkMode ? 5 : 3,
         hard_gate: true,
       },
     ],
@@ -106,10 +114,43 @@ try {
 }
 const elapsed = ((Date.now() - started) / 1000).toFixed(1)
 
-if (result.state !== 'COMPLETED') {
-  fail(`Mission 未通过：${result.state}，未过标准 ${result.failedCriteria.join(', ')}，摘要「${result.summary}」`)
+if (reworkMode) {
+  // 期望：跑一轮不过 → 派生后继任务 → 再不过 → 预算耗尽 → 升级给人
+  if (result.state !== 'ESCALATED') {
+    fail(`预算耗尽后应升级给人，实际 ${result.state}（返工 ${result.rounds} 轮）`)
+  }
+  ok(`耗时 ${elapsed}s，返工 ${result.rounds} 轮后升级：${result.escalationReason}`)
+
+  if (result.taskIds.length !== 2) fail(`预算 1 轮应产生 2 个任务，实际 ${result.taskIds.length}`)
+  const [firstId, secondId] = result.taskIds
+  const second = await store.getTask(secondId)
+  if (second?.supersedes_task_id !== firstId) {
+    fail('后继任务没有指向被返工的原任务——说不清第几轮卡在哪')
+  }
+  ok(`返工派生新任务 ${secondId}，supersedes ${firstId}`)
+
+  const m = await store.getMission(missionId)
+  if (m?.state !== 'ESCALATED') fail(`账本里的 Mission 状态是 ${m?.state}`)
+
+  const kinds = (await store.listEvents(missionId)).map((e) => e.event_type)
+  for (const need of ['REVIEW_REWORK_REQUESTED', 'MISSION_ESCALATED']) {
+    if (!kinds.includes(need)) fail(`事件流缺少 ${need}`)
+  }
+  ok(`返工与升级都已留痕：${kinds.join(' → ')}`)
+
+  console.log(`\n✅ 返工闭环在真实链路上成立：够不着的标准会返工，预算耗尽即升级，不无限重试。`)
+  await conn.close()
+  await store.close()
+  process.exit(0)
 }
-ok(`Mission 完成，耗时 ${elapsed}s，Agent 摘要：${result.summary}`)
+
+if (result.state !== 'COMPLETED') {
+  fail(
+    `Mission 未通过：${result.state}，未过标准 ${result.failedCriteria.join(', ')}，` +
+      `${result.escalationReason ?? ''}摘要「${result.summary}」`,
+  )
+}
+ok(`Mission 完成，耗时 ${elapsed}s，返工 ${result.rounds} 轮，Agent 摘要：${result.summary}`)
 
 const taskId = result.taskIds[0]
 
@@ -171,7 +212,9 @@ const events = await store.listEvents(missionId)
 const kinds = events.map((e) => e.event_type)
 for (const need of [
   'TASK_CREATED', 'TASK_ASSIGNED', 'TASK_STARTED',
-  'HARD_GATE_EVALUATED', 'TASK_COMPLETED', 'MISSION_COMPLETED',
+  // 通过评审而结束的任务记 REVIEW_ACCEPTED——状态是 COMPLETED，
+  // 事件类型说明的是「为什么结束」
+  'HARD_GATE_EVALUATED', 'REVIEW_ACCEPTED', 'MISSION_COMPLETED',
 ]) {
   if (!kinds.includes(need)) fail(`事件流缺少 ${need}`)
 }

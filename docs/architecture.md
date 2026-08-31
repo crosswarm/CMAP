@@ -196,11 +196,12 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | Workflow 派发接真实 Adapter（codex 真执行） | ✅ P2，实测一次 Mission 无人值守跑完 102s |
 | 任务结果与证据落账本（`setTaskResult` + Artifact 入库） | ✅ P2 |
 | 验收逐条判定（漏答即不通过） | ✅ P2 |
+| 硬门槛判定（确定性，不用 LLM） | ✅ P2 |
+| 自动返工接进主 Workflow（两道刹车 + 升级） | ✅ P2 |
 | 证据哈希由控制面独立复算 | ✅ P2，复算在控制面 Adapter 层，不采信 Agent 自报 |
 | WebUI 原型（3 方案 × 2 轮迭代） | 🟡 P2，PNG 已入库，方案说明与「两类授权同时 pending」帧未交付 |
 | Web UI 前端实现（Mission/审批/证据/返工追踪） | ⬜ P2 |
 | SSE 实时推送 | ⬜ P2 |
-| 评审与返工接进 Workflow（Activity 已实现，未串进主流程） | ⬜ P2 |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 
@@ -213,9 +214,15 @@ codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独�
 只做接线：Store 换成 PgStore、生命周期接信号，Workflow 与 Activity 与测试里
 跑的是同一套。验证方式是实际启停一次并跑真实 Mission，不看进程是否存活。
 
-**还没接进主流程的是评审与返工**：`applyReviewDecision` 及两道刹车都已实现并
-有端到端断言，但 `missionWorkflow` 目前是「验收不过就落 FAILED」，不会自动派生
-后继任务。返工闭环因此还需要外部调用者驱动。
+返工闭环已接进主 Workflow：验收不过 → 硬门槛判定产出 `review-decision` →
+派生后继任务 → 再跑一轮，直到通过，或两道刹车之一触发（轮次耗尽 / 判定无进展）
+后升级给人。判定刻意**不用 LLM**——验收标准本来就是机读的，让模型回答「过没过」
+得到的是不可复现也无法审计的主观判断。软判断（Claude 评审）可以覆盖在其之上，
+但不得推翻硬指标。
+
+**还没接进主流程的是审批闸口**：审批的账本与 API 都在，但 Workflow 不会主动
+请求审批、也不会挂起等批。高风险任务目前直接跑——这是「人只在授权闸口出现」
+尚未兑现的那一半。
 
 P0 出口验证记录在 `scripts/e2e-single-hop.mjs`：信封校验 → codex 真实执行 → 结果 Schema 校验 → 证据哈希独立复算 → 验收标准逐条回应 → 幂等去重。
 
