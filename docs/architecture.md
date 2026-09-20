@@ -207,6 +207,8 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；审批详情已接入建议展示，见 [说明](approval-advisor.md) |
 | 能力路由 | 🟡 P3，启动前按能力/风险/健康及显式首选替补选择；已绑定任务按原 Adapter 收取，不自动二次派发，见 [验证](verification-p3-routing-2026-09-21.md) |
 | kimi-adapter | ✅ 本机 macOS P3；真实单跳与 Temporal → Kimi 完成，见 [运行说明](kimi-adapter.md) 与 [验证](verification-kimi-2026-09-21.md) |
+| DAG 执行 | ⬜ [方案与测试](plans/cmap-dag-plan.md) 已通过 Architect → Critic 技术评审，代码尚未实现 |
+| 自然语言 Planner 桥接 | ⬜ 独立于显式 DAG 执行，仍须接入并真实验证 |
 | yonwork-adapter | ⬜ P3；[Host 传输探测](verification-yonwork-2026-09-21.md) 已通，Agent 派发/终态/证据闭环未实现 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 

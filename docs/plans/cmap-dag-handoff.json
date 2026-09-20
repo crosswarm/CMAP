@@ -1,0 +1,64 @@
+{
+  "planning_state": "complete",
+  "plan_revision": 3,
+  "planning_artifacts": {
+    "prd": "docs/plans/cmap-dag-plan.md",
+    "test_spec": "docs/plans/cmap-dag-tests.md"
+  },
+  "ralplan_architect_review": {
+    "review_kind": "technical_architecture",
+    "reviewer": "dag_architect",
+    "verdict": "APPROVE",
+    "plan_revision": 3,
+    "plan_sha256": "a719a0495a4724ce6c33376768c596a1c56aa330bfab1e01868466bebd76c186",
+    "reviewed_at": "2026-09-20T20:11:13.977944+00:00",
+    "architect_stage_complete": true,
+    "authorizes_actions": false,
+    "accepted_findings": [
+      "explicit-ceiling-and-independent-scopes",
+      "bounded-cancel-with-TTL-retention",
+      "accepted-review-dependency-truth",
+      "idempotent-Task-and-Review",
+      "driver-only-finalization",
+      "legacy-replay-boundary"
+    ]
+  },
+  "ralplan_critic_review": {
+    "review_kind": "technical_plan_critic",
+    "reviewer": "dag_critic",
+    "verdict": "APPROVE",
+    "plan_revision": 3,
+    "plan_sha256": "a719a0495a4724ce6c33376768c596a1c56aa330bfab1e01868466bebd76c186",
+    "reviewed_at": "2026-09-20T20:16:33.004250+00:00",
+    "must_fix_items": [],
+    "authorizes_actions": false
+  },
+  "ralplan_consensus_gate": {
+    "complete": true,
+    "completed_order": [
+      "architect",
+      "critic"
+    ]
+  },
+  "jev_advice": {
+    "available": true,
+    "model": "jev-1.13.0",
+    "choice": "versioned_dag",
+    "confidence": 0.97,
+    "probabilities": {
+      "insufficient": 0.02,
+      "in_place": 0.01,
+      "versioned_dag": 0.97
+    },
+    "usage": {
+      "input_tokens": 559,
+      "output_tokens": 48
+    },
+    "input_sha256": "11186ba9dabd1ddaca1eed2a8c8701e360c9c161646ce3830fbebe337fb1fd8f"
+  },
+  "execution_lane": "existing_codex_goal_native_subagents",
+  "execution_authority": "existing user project development and testing instructions",
+  "next_step": "Implement DAG schema and semantic validation with meaningful red tests; preserve inspect/v1 orchestration.",
+  "implementation_complete": false,
+  "business_approval_grants": []
+}
