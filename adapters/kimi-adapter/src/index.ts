@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { access, readFile, rm } from 'node:fs/promises'
@@ -544,47 +545,6 @@ const verifyCredentialRefs = async (credentialHome?: string): Promise<void> => {
     join(homedir(), '.kimi-code')
   await access(join(home, 'credentials/kimi-code.json'), constants.R_OK)
   await access(join(home, 'oauth'), constants.R_OK)
-}
-
-interface OwnedProcessGroupTermination {
-  confirmAbsent(): boolean
-}
-
-const terminateOwnedProcessGroup = (
-  child: ChildProcess,
-): OwnedProcessGroupTermination | null => {
-  const pid = child.pid
-  if (!pid) return null
-  let confirmed = false
-  let timer: NodeJS.Timeout | null = null
-  const groupAlive = (): boolean => {
-    if (confirmed) return false
-    try {
-      process.kill(-pid, 0)
-      return true
-    } catch {
-      confirmed = true
-      if (timer) clearTimeout(timer)
-      timer = null
-      return false
-    }
-  }
-  const signal = (signal: NodeJS.Signals): void => {
-    try {
-      process.kill(-pid, signal)
-    } catch {
-      child.kill(signal)
-    }
-  }
-  if (!groupAlive()) return { confirmAbsent: () => true }
-  signal('SIGTERM')
-  timer = setTimeout(() => {
-    if (!groupAlive()) return
-    signal('SIGKILL')
-    groupAlive()
-  }, 500)
-  timer.unref()
-  return { confirmAbsent: () => !groupAlive() }
 }
 
 const finalizeState = async (

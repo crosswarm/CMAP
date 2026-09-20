@@ -208,7 +208,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 能力路由 | 🟡 P3，启动前按能力/风险/健康及显式首选替补选择；已绑定任务按原 Adapter 收取，不自动二次派发，见 [验证](verification-p3-routing-2026-09-21.md) |
 | kimi-adapter | ✅ 本机 macOS P3；真实单跳与 Temporal → Kimi 完成，见 [运行说明](kimi-adapter.md) 与 [验证](verification-kimi-2026-09-21.md) |
 | DAG 执行 | ✅ 本机显式 dag/v1；API → Temporal → Codex/Kimi 分叉汇合、依赖产物与节点验收已验证，见 [验证](verification-dag-2026-09-21.md)；不包含自动 Planner |
-| 自然语言 Planner 桥接 | ⬜ 独立于显式 DAG 执行，仍须接入并真实验证 |
+| 自然语言 Planner 桥接 | 🟡 外部 CLI 与契约校验已实现；Claude 真实调用返回 403，端到端验证未完成，见 [Planner](planner.md) |
 | yonwork-adapter | ⬜ P3；[Host 传输探测](verification-yonwork-2026-09-21.md) 已通，Agent 派发/终态/证据闭环未实现 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 

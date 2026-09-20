@@ -11,6 +11,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
+import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
 import { mkdtemp, writeFile, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -524,47 +525,6 @@ const RISK_ORDER: readonly RiskLevel[] = ['read-meta', 'read-sensitive', 'contro
 
 const isRiskWithin = (required: RiskLevel, ceiling: RiskLevel): boolean =>
   RISK_ORDER.indexOf(required) <= RISK_ORDER.indexOf(ceiling)
-
-interface OwnedProcessGroupTermination {
-  confirmAbsent(): boolean
-}
-
-const terminateOwnedProcessGroup = (
-  child: ChildProcess,
-): OwnedProcessGroupTermination | null => {
-  const pid = child.pid
-  if (!pid) return null
-  let confirmed = false
-  let timer: NodeJS.Timeout | null = null
-  const groupAlive = (): boolean => {
-    if (confirmed) return false
-    try {
-      process.kill(-pid, 0)
-      return true
-    } catch {
-      confirmed = true
-      if (timer) clearTimeout(timer)
-      timer = null
-      return false
-    }
-  }
-  const signal = (signal: NodeJS.Signals): void => {
-    try {
-      process.kill(-pid, signal)
-    } catch {
-      child.kill(signal)
-    }
-  }
-  if (!groupAlive()) return { confirmAbsent: () => true }
-  signal('SIGTERM')
-  timer = setTimeout(() => {
-    if (!groupAlive()) return
-    signal('SIGKILL')
-    groupAlive()
-  }, 500)
-  timer.unref()
-  return { confirmAbsent: () => !groupAlive() }
-}
 
 /** codex 事件 → 归一化事件。未知事件降级为 progress，不丢弃。 */
 const normalizeCodexEvent = (raw: unknown, state: RunState): NormalizedAgentEvent => {
