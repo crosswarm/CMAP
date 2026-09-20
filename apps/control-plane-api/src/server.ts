@@ -13,9 +13,11 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { once } from 'node:events'
+import { setTimeout as delay } from 'node:timers/promises'
 
-import { buildEvidencePack, NotFoundError } from '#domain-model'
-import type { Store, Approval, ApprovalScope } from '#domain-model'
+import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError } from '#domain-model'
+import type { Store, Approval, ApprovalScope, MissionEventV1 } from '#domain-model'
 
 export interface ControlPlaneOptions {
   readonly store: Store
@@ -29,6 +31,7 @@ interface Ctx {
   readonly params: Record<string, string>
   readonly store: Store
   readonly tenant: string
+  readonly shutdown: AbortSignal
 }
 
 type Handler = (ctx: Ctx) => Promise<void>
@@ -111,7 +114,65 @@ const pendingApprovalsInTenant = async (ctx: Ctx): Promise<readonly Approval[]> 
   return visible
 }
 
+const streamMissionEvents: Handler = async (ctx) => {
+  const id = ctx.params['id']!
+  if (!(await missionInTenant(ctx, id))) return fail(ctx.res, 404, `Mission 不存在：${id}`)
+  let events = await ctx.store.listEvents(id)
+  const cursor = ctx.req.headers['last-event-id']
+  if (cursor && !events.some((event) => encodeURIComponent(event.event_id) === cursor)) {
+    return fail(ctx.res, 400, 'Last-Event-ID 不属于该 Mission')
+  }
+  const disconnected = new AbortController()
+  const signal = AbortSignal.any([ctx.shutdown, disconnected.signal])
+  const onClose = () => disconnected.abort()
+  ctx.res.on('close', onClose)
+  if (ctx.res.destroyed) disconnected.abort()
+  const write = async (frame: string) => {
+    signal.throwIfAborted()
+    if (!ctx.res.write(frame)) await once(ctx.res, 'drain', { signal })
+  }
+  try {
+    signal.throwIfAborted()
+    ctx.res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      'x-accel-buffering': 'no',
+      'connection': 'close',
+    })
+    await write('retry: 1000\n\n')
+    const seen = new Set<string>()
+    let heartbeat = Date.now()
+    // ponytail: 每秒扫描本 Mission 已提交历史；大规模事件流改为提交有序的持久游标。
+    // sequence/lamport 不等于提交顺序，不能用最大 lamport 跳过晚提交事务。
+    while (!signal.aborted) {
+      for (const event of events) {
+        if (seen.has(event.event_id)) continue
+        const data: MissionEventV1 = {
+          schema: 'cmap/mission-event/v1', event_id: event.event_id,
+          event_type: event.event_type, event_version: event.event_version,
+          occurred_at: event.occurred_at, mission_id: event.mission_id,
+          task_id: event.task_id, lamport: event.lamport,
+        }
+        await write(`id: ${encodeURIComponent(event.event_id)}\nevent: mission-event\ndata: ${JSON.stringify(data)}\n\n`)
+        seen.add(event.event_id)
+      }
+      if (Date.now() - heartbeat >= 15_000) {
+        await write(': heartbeat\n\n')
+        heartbeat = Date.now()
+      }
+      await delay(1000, undefined, { signal })
+      events = await ctx.store.listEvents(id)
+    }
+  } catch (error) {
+    if (!signal.aborted) throw error
+  } finally {
+    ctx.res.off('close', onClose)
+    ctx.res.end()
+  }
+}
+
 const routes: readonly Route[] = [
+  { method: 'GET', pattern: '/v1/missions/:id/events', handler: streamMissionEvents },
   {
     method: 'GET',
     pattern: '/v1/health',
@@ -125,16 +186,7 @@ const routes: readonly Route[] = [
     method: 'GET',
     pattern: '/v1/missions',
     handler: async ({ res, store, tenant }) => {
-      // 没有 listMissions，用任务反查 mission 集合的做法会漏掉无任务的 Mission。
-      // 这里直接遍历——P4 换 PG 实现时应下沉为带 WHERE tenant 的查询。
-      const tasks = await store.queryTasks({})
-      const ids = new Set(tasks.map((t) => t.mission_id))
-      const items = []
-      for (const id of ids) {
-        const m = await store.getMission(id)
-        if (m && m.tenant === tenant) items.push(m)
-      }
-      json(res, 200, { items })
+      json(res, 200, { items: await store.queryMissions({ tenant }) })
     },
   },
 
@@ -217,13 +269,14 @@ const routes: readonly Route[] = [
         return fail(ctx.res, 400, 'decision 必须是 approved 或 rejected')
       }
       // 审计流不能出现「不知道谁批的」记录
-      if (!decidedBy) {
+      if (typeof decidedBy !== 'string' || !decidedBy.trim()) {
         return fail(ctx.res, 400, 'decided_by 必填，审批必须可追溯到具体的人')
       }
 
-      const pending = await pendingApprovalsInTenant(ctx)
-      const target = pending.find((a: Approval) => a.id === id)
-      if (!target) return fail(ctx.res, 404, `待审批不存在：${id}`)
+      const target = await ctx.store.getApproval(id)
+      if (!target || !(await missionInTenant(ctx, target.mission_id))) {
+        return fail(ctx.res, 404, `审批不存在：${id}`)
+      }
 
       // 意图与请求不符说明调用方认知错位，不能放行
       if (target.scope !== (scope as ApprovalScope)) {
@@ -240,6 +293,8 @@ const routes: readonly Route[] = [
         json(ctx.res, 200, updated)
       } catch (e) {
         if (e instanceof NotFoundError) return fail(ctx.res, 404, e.message)
+        if (e instanceof ApprovalDecisionConflictError) return fail(ctx.res, 409, e.message)
+        if (e instanceof RangeError) return fail(ctx.res, 400, e.message)
         throw e
       }
     },
@@ -257,6 +312,7 @@ const routes: readonly Route[] = [
 // ------------------------------------------------------------------ 组装
 
 export const createControlPlane = async (opts: ControlPlaneOptions) => {
+  const shutdown = new AbortController()
   const server = createServer((req, res) => {
     void (async () => {
       try {
@@ -268,6 +324,7 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
         await hit.route.handler({
           req, res, params: hit.params,
           store: opts.store, tenant: opts.tenant,
+          shutdown: shutdown.signal,
         })
       } catch (e) {
         // 未预期的异常也必须返回 JSON——前端按 JSON 解析，
@@ -281,7 +338,10 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
   return {
     listen: (port: number) =>
       new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve)),
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => {
+      shutdown.abort()
+      server.close(() => resolve())
+    }),
     address: (): AddressInfo | string | null => server.address(),
   }
 }

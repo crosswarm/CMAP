@@ -284,6 +284,57 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         const events = await s.listEvents('mis-1')
         assert.ok(events.some((e) => e.event_type === 'MISSION_CREATED'))
       })
+
+      test('按 tenant 查询 Mission，包含还没有 Task 的 Mission 并隔离其他租户', async () => {
+        const s = await createStore()
+        await s.createMission({
+          mission: { ...mission('mis-empty'), created_at: '2026-08-02T00:00:01.000Z' },
+          actor: ACTOR,
+        })
+        await s.createMission({
+          mission: { ...mission('mis-with-task'), created_at: '2026-08-02T00:00:00.000Z' },
+          actor: ACTOR,
+        })
+        await s.createMission({
+          mission: {
+            ...mission('mis-other-tenant'),
+            tenant: 'team-other',
+            created_at: '2026-08-02T00:00:00.000Z',
+          },
+          actor: ACTOR,
+        })
+        await s.createTask({ task: task('tsk-1', 'mis-with-task'), actor: ACTOR })
+
+        const got = await s.queryMissions({ tenant: 'team-ycc' })
+        assert.deepEqual(
+          got.map((m) => m.id),
+          ['mis-with-task', 'mis-empty'],
+          'Mission 列表必须从 missions 表出发，不能因没有 Task 而漏行',
+        )
+      })
+
+      test('Mission 查询按真实创建时刻排序，同一时刻按 id 稳定排序', async () => {
+        const s = await createStore()
+        await s.createMission({
+          mission: { ...mission('mis-a'), created_at: '2026-08-02T00:00:00Z' },
+          actor: ACTOR,
+        })
+        await s.createMission({
+          mission: { ...mission('mis-b'), created_at: '2026-08-02T00:00:00.000Z' },
+          actor: ACTOR,
+        })
+        await s.createMission({
+          mission: { ...mission('mis-d'), created_at: '2026-08-02T00:00:00.001Z' },
+          actor: ACTOR,
+        })
+        await s.createMission({
+          mission: { ...mission('mis-c'), created_at: '2026-08-02T00:00:00.001Z' },
+          actor: ACTOR,
+        })
+
+        const got = await s.queryMissions({ tenant: 'team-ycc' })
+        assert.deepEqual(got.map((m) => m.id), ['mis-a', 'mis-b', 'mis-c', 'mis-d'])
+      })
     })
 
     describe('Task 状态迁移', () => {
@@ -558,6 +609,40 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
     })
 
     describe('审批', () => {
+      test('决定只写一次；同一决定重试保留原时间，其他决定或批准人不能覆盖', async () => {
+        const s = await createStore()
+        await s.createApproval(approval('apr-once', 'controlled'))
+        const first = await s.decideApproval('apr-once', 'approved', 'user:a', T0)
+        assert.deepEqual(await s.decideApproval('apr-once', 'approved', 'user:a', '2026-08-04T00:00:00Z'), first)
+        for (const [decision, actor] of [['rejected', 'user:a'], ['expired', 'system:timeout'], ['approved', 'user:b']] as const) {
+          await assert.rejects(s.decideApproval('apr-once', decision, actor, T0), { name: 'ApprovalDecisionConflictError' })
+          assert.deepEqual(await s.getApproval('apr-once'), first)
+        }
+      })
+
+      test('并发冲突决定只能成功一个，落库结果等于唯一成功的结果', async () => {
+        const s = await createStore()
+        await s.createApproval(approval('apr-race', 'controlled'))
+        const results = await Promise.allSettled([
+          s.decideApproval('apr-race', 'approved', 'user:a', T0),
+          s.decideApproval('apr-race', 'rejected', 'user:b', T0),
+        ])
+        const success = results.filter((r) => r.status === 'fulfilled')
+        assert.equal(success.length, 1)
+        assert.deepEqual(await s.getApproval('apr-race'), success[0]!.value)
+      })
+
+      test('过期边界不能批准，无效身份/时间不能变更审批', async () => {
+        const s = await createStore()
+        const a = approval('apr-expired', 'mutating')
+        await s.createApproval(a)
+        await assert.rejects(s.decideApproval(a.id, 'approved', 'user:a', a.expires_at), { name: 'ApprovalDecisionConflictError' })
+        for (const [actor, at] of [['   ', T0], ['user:a', 'invalid'], ['user:a', '2026-08-01T00:00:00Z']]) {
+          await assert.rejects(s.decideApproval(a.id, 'approved', actor!, at!), RangeError)
+        }
+        assert.equal((await s.getApproval(a.id))?.decision, 'pending')
+      })
+
       test('审批可按 id 读回，已决策记录也不消失', async () => {
         const s = await createStore()
         await s.createApproval(approval('apr-1', 'controlled'))

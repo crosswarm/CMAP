@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/approval-context/v1",
+  "title": "Approval Context v1",
+  "description": "控制面外 Jev 辅助输入。授权字段必须由调用方核验，不能由模型生成。只含脱敏动作摘要，不含原始命令、提示词或证据内容。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["surface", "request_id", "action_summary", "risk", "environment", "reversible", "authorization_verified", "authorization_scope", "requires_human"],
+  "properties": {
+    "surface": { "enum": ["codex_tool", "cmap_approval"] },
+    "request_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "action_summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "risk": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] },
+    "environment": { "enum": ["local", "test", "production"] },
+    "reversible": { "type": "boolean" },
+    "authorization_verified": { "type": "boolean" },
+    "authorization_scope": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating", null] },
+    "requires_human": { "type": "boolean" }
+  }
+}

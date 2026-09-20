@@ -191,7 +191,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | Evidence Pack（聚合 + 血缘） | ✅ P1 |
 | 资源锁接入 Workflow（含续租与失锁自停） | ✅ P1 |
 | 自动返工闭环（两道刹车 + 端到端验证） | ✅ P1 |
-| 控制面 REST API（9 条路由，租户过滤 + 双 scope 审批） | ✅ P2 |
+| 控制面 REST API（租户过滤 + 双 scope 审批，无任务 Mission 也可见） | ✅ P2 |
 | 进程入口（`npm run start:worker` / `start:api`） | ✅ P2 |
 | Workflow 派发接真实 Adapter（codex 真执行） | ✅ P2，实测一次 Mission 无人值守跑完 102s |
 | 任务结果与证据落账本（`setTaskResult` + Artifact 入库） | ✅ P2 |
@@ -200,13 +200,14 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 自动返工接进主 Workflow（两道刹车 + 升级） | ✅ P2 |
 | 审批闸口接进主 Workflow（双 scope + 拒绝终止） | ✅ P2，真实 API → Workflow → Codex 链路通过 |
 | 证据哈希由控制面独立复算 | ✅ P2，复算在控制面 Adapter 层，不采信 Agent 自报 |
-| WebUI 原型（3 方案 × 2 轮迭代） | 🟡 P2，PNG 已入库，方案说明与「两类授权同时 pending」帧未交付 |
+| WebUI 原型（3 方案 × 2 轮迭代） | 🟡 P2，PNG 和方案取舍说明已有；「两类授权同时 pending」帧未交付 |
 | Web UI 前端实现（Mission/审批/证据/返工追踪） | ⬜ P2 |
-| SSE 实时推送 | ⬜ P2 |
+| SSE 实时推送 | ✅ P2，Mission 级租户隔离、历史回放、实时追加、重连去重与断开清理；真实 PostgreSQL/HTTP 验证通过 |
+| Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；前端展示尚未接入，见 [说明](approval-advisor.md) |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 
-P2 出口验证记录在 `scripts/e2e-mission.mjs`：建 Mission → Workflow 派发 →
+P2 后端出口验证记录在 `scripts/e2e-mission.mjs`（不代表 WebUI 或整个 P2 完成）：建 Mission → Workflow 派发 →
 codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独立复算证据哈希 →
 核对事件流。与 P0 的单跳脚本互补：那个证明「能调起 codex」，这个证明
 「调度系统真的会去调 codex」——两头都在不等于线接上了。
@@ -225,6 +226,22 @@ codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独�
 审批并进入 `APPROVAL_REQUIRED`；错 scope 不放行，正确批准后才调用 Adapter，
 拒绝则 Task 落 `REJECTED`、Mission 落 `FAILED`。`scripts/e2e-approval.mjs`
 用真实 REST API、PgStore、Temporal 与 Codex 验证整条链路。
+该脚本使用明确标注的合成测试身份，只证明技术闸口；OIDC/真人身份认证仍属 P4。
+
+审批决定只能从 pending 进入终态。相同决定与身份的重试返回原记录，保留首次时间；
+其他决定或身份不能覆盖它。PG 在行锁内执行与 Memory 相同的转换规则。
+到期（含边界）后批准返回 409；等待 Activity 使用账本的到期时间，重试不延期，
+超时与真人决定并发时重新读回唯一终态。契约见 `schemas/approval-decision-input.v1.schema.json`。
+
+SSE 契约为 `schemas/mission-event.v1.schema.json`，端点为
+`GET /v1/missions/:id/events`。只推送事件类型、时间和关联 ID 等白名单元数据，
+不传任意 payload；页面收到事件后按需读取现有 REST。`Last-Event-ID` 为 SSE `id`
+（event_id 的 URI 编码），未知或不属于本 Mission 的游标返回 400。
+重连完整回放，客户端以 `data.event_id` 去重；lamport 是逻辑顺序，不是 PostgreSQL
+事务提交顺序，直接取最大值会漏掉晚提交事件。当前每连接每秒扫描本 Mission
+事件，适用于本地 P2；事件量或连接数增长后需提交有序的持久游标，不能冒充已具备规模化推送。
+`scripts/e2e-events.mjs` 用隔离 PostgreSQL schema 与两个数据库连接验证真实晚提交、
+实时事件、断线回放、租户隔离和无任务 Mission 列表。
 
 P0 出口验证记录在 `scripts/e2e-single-hop.mjs`：信封校验 → codex 真实执行 → 结果 Schema 校验 → 证据哈希独立复算 → 验收标准逐条回应 → 幂等去重。
 

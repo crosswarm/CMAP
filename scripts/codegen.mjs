@@ -24,6 +24,11 @@ const schemaDir = join(root, 'schemas')
 const outDir = join(root, 'packages/domain-model/src/generated')
 
 const TARGETS = [
+  { schema: 'approval-decision-input.v1.schema.json', out: 'approval-decision-input.ts' },
+  { schema: 'approval-context.v1.schema.json', out: 'approval-context.ts' },
+  { schema: 'approval-advice.v1.schema.json', out: 'approval-advice.ts' },
+  { schema: 'mission-query.v1.schema.json', out: 'mission-query.ts' },
+  { schema: 'mission-event.v1.schema.json', out: 'mission-event.ts' },
   { schema: 'task-envelope.v1.schema.json', out: 'task-envelope.ts' },
   { schema: 'task-result.v1.schema.json', out: 'task-result.ts' },
   { schema: 'review-decision.v1.schema.json', out: 'review-decision.ts' },

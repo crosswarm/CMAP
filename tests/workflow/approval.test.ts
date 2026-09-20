@@ -45,6 +45,44 @@ const readyTask = async (risk: 'controlled' | 'mutating') => {
 }
 
 describe('审批 Activity', () => {
+  test('等待预算耗尽与真人决定并发时，保留已落库的真人决定', async () => {
+    const taskId = await readyTask('controlled')
+    const id = `apr:${taskId}:controlled`
+    await store.createApproval({ ...unrelatedApproval(id, 'controlled'), task_id: taskId })
+    await acts.requestApproval(taskId)
+    const decide = store.decideApproval.bind(store)
+    store.decideApproval = async (approvalId, decision, actor, at) => {
+      if (decision === 'expired') await decide(approvalId, 'approved', 'user:human', at)
+      return decide(approvalId, decision, actor, at)
+    }
+    const expiring = createActivities({ store, adapter, approvalWaitTimeoutMs: 0 })
+    const result = await expiring.waitForApproval({ taskId, approvalId: id, scope: 'controlled' })
+    assert.equal(result.decision, 'approved')
+    assert.equal((await store.getApproval(id))?.decided_by, 'user:human')
+    assert.equal((await store.getTask(taskId))?.state, 'READY')
+  })
+
+  test('重试等待使用账本的到期时间，不重新延长过期审批', async () => {
+    const taskId = await readyTask('controlled')
+    const id = `apr:${taskId}:controlled`
+    await store.createApproval({
+      ...unrelatedApproval(id, 'controlled'), task_id: taskId,
+      expires_at: '2026-09-01T00:00:00.000Z',
+    })
+    await acts.requestApproval(taskId)
+    const get = store.getApproval.bind(store)
+    let pendingReads = 0
+    store.getApproval = async (approvalId) => {
+      const a = await get(approvalId)
+      if (a?.decision === 'pending' && ++pendingReads > 1) throw new Error('没有按账本期限立即过期')
+      return a
+    }
+    const result = await acts.waitForApproval({ taskId, approvalId: id, scope: 'controlled' })
+    assert.equal(result.decision, 'rejected')
+    assert.equal((await store.getApproval(id))?.decision, 'expired')
+    assert.equal(adapter.startCalls.length, 0)
+  })
+
   test('受控任务创建对应 scope 的待审批并暂停', async () => {
     const taskId = await readyTask('controlled')
 
@@ -76,7 +114,7 @@ describe('审批 Activity', () => {
     assert.equal(settled, false, 'controlled 的批准不得放行 mutating')
     assert.equal(adapter.startCalls.length, 0)
 
-    await store.decideApproval(gate.approvalId, 'approved', 'user:human', T0)
+    await store.decideApproval(gate.approvalId, 'approved', 'user:human', new Date().toISOString())
     assert.equal((await waiting).decision, 'approved')
     assert.equal((await store.getTask(taskId))?.state, 'READY')
   })
@@ -86,7 +124,7 @@ describe('审批 Activity', () => {
     const gate = await acts.requestApproval(taskId)
     assert.ok(gate.approvalId && gate.scope)
 
-    await store.decideApproval(gate.approvalId, 'rejected', 'user:human', T0)
+    await store.decideApproval(gate.approvalId, 'rejected', 'user:human', new Date().toISOString())
     const result = await acts.waitForApproval({
       taskId, approvalId: gate.approvalId, scope: gate.scope,
     })

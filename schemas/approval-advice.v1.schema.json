@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/approval-advice/v1",
+  "title": "Approval Advice v1",
+  "description": "模型建议不等于新授权。can_continue 不能覆盖宿主 hooks 或替代 CMAP 真人批准。仅输出输入哈希和决策元数据。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "request_id", "recommendation", "can_continue", "reason_code", "input_sha256", "model", "confidence", "elapsed_ms", "usage"],
+  "properties": {
+    "schema": { "const": "cmap/approval-advice/v1" },
+    "request_id": { "type": "string" },
+    "recommendation": { "enum": ["continue", "review", "reject", "insufficient"] },
+    "can_continue": { "type": "boolean" },
+    "reason_code": { "enum": ["within_existing_authorization", "human_required", "authorization_missing", "scope_mismatch", "production_or_irreversible", "model_review", "model_reject", "uncertain", "unavailable"] },
+    "input_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "model": { "type": ["string", "null"] },
+    "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "elapsed_ms": { "type": "integer", "minimum": 0 },
+    "usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens"],
+      "properties": { "input_tokens": { "type": "integer", "minimum": 0 }, "output_tokens": { "type": "integer", "minimum": 0 } }
+    }
+  }
+}

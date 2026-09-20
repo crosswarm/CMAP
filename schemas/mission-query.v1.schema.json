@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/mission-query/v1",
+  "title": "MissionQueryV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant"],
+  "properties": {
+    "tenant": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

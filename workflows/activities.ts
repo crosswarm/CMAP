@@ -29,7 +29,7 @@ import type {
   ReviewDecisionV1,
   ProgressSnapshot,
 } from '#domain-model'
-import { detectNoProgress, needsApproval, RISK_LEVELS } from '#domain-model'
+import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
 import type { AgentAdapter } from '#adapter-sdk'
 
 /**
@@ -317,8 +317,15 @@ export const createActivities = (deps: ActivityDeps) => {
           return { decision: 'rejected', decidedBy: approval.decided_by ?? 'system:expired' }
         }
 
-        if (Date.now() > deadline) {
-          await store.decideApproval(input.approvalId, 'expired', 'system:timeout', new Date().toISOString())
+        const expires = Date.parse(approval.expires_at)
+        if (!Number.isFinite(expires)) throw new Error('审批到期时间无效')
+        if (Date.now() >= Math.min(deadline, expires)) {
+          try {
+            await store.decideApproval(input.approvalId, 'expired', 'system:timeout', new Date().toISOString())
+          } catch (error) {
+            // 真人决策可能抢先落库。不能覆盖它，重新读取唯一终态。
+            if (!(error instanceof ApprovalDecisionConflictError)) throw error
+          }
           continue
         }
 

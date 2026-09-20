@@ -34,6 +34,7 @@ Temporal（持久化工作流引擎）+ PostgreSQL（任务账本）+ S3 兼容�
 - `docs/architecture.md` — 落地版架构
 - `docs/threat-model.md` — 威胁模型（多人多机跨公网 = 远程代码执行平台）
 - `docs/adr/` — 架构决策记录
+- [Jev 决策辅助](docs/approval-advisor.md) — 工具调用与业务审批的独立建议，保留实际授权来源
 
 ## 本地运行
 
@@ -63,5 +64,12 @@ P0（契约层 + 单跳闭环）、P1（任务账本 + Workflow + 自动返工�
 P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发给 codex、真实执行、
 收结果落账本、逐条核对验收标准、独立复算证据哈希；验收不过会自动派生后继任务
 返工，轮次耗尽或判定无进展则升级给人；高风险任务会暂停等待对应 scope 的真人
-批准，错 scope 不放行。还缺 WebUI（只有原型图）与 SSE 推送。
+批准，错 scope 不放行。Mission 列表包含尚无任务的记录，SSE 事件流支持实时推送与断线历史回放。
+还缺 WebUI（只有原型图）。
 逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。
+
+SSE：`GET /v1/missions/:id/events`，事件名 `mission-event`，按当前 API 租户过滤。
+首次连接和重连均回放历史，再推送新增事件；客户端按 `data.event_id` 去重。
+`Last-Event-ID` 使用原 SSE `id`，不以 `lamport` 高水位过滤晚提交事务。
+浏览器使用 EventSource；服务端每秒读取账本，15 秒发送心跳，不修改 Outbox 投递标记。
+真实 PostgreSQL/HTTP 验证：`node scripts/e2e-events.mjs`（自动创建并清理独立测试 schema）。

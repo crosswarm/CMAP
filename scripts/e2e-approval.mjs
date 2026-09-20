@@ -1,5 +1,6 @@
 /**
- * 审批闸口真实链路：Workflow 暂停 → REST API 决策 → Codex 才执行。
+ * 审批闸口合成测试：真实 Workflow 暂停 → REST API 测试决策 → Codex 才执行。
+ * 只证明技术闸口，不代表真人批准或身份认证；应在隔离测试 schema 与队列运行。
  *
  * 前置：npm run start:worker 与 npm run start:api 都在运行。
  */
@@ -88,7 +89,7 @@ const wrong = await fetch(`${api}/v1/approvals/${encodeURIComponent(approval.id)
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    decision: 'approved', scope: 'mutating', decided_by: 'user:e2e-human',
+    decision: 'approved', scope: 'mutating', decided_by: 'test-harness:synthetic',
   }),
 })
 if (wrong.status !== 409) fail(`错 scope 应返回 409，实际 ${wrong.status}`)
@@ -99,11 +100,11 @@ const approved = await fetch(`${api}/v1/approvals/${encodeURIComponent(approval.
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    decision: 'approved', scope: 'controlled', decided_by: 'user:e2e-human',
+    decision: 'approved', scope: 'controlled', decided_by: 'test-harness:synthetic',
   }),
 })
 if (!approved.ok) fail(`正确批准失败：HTTP ${approved.status} ${await approved.text()}`)
-ok('对应 scope 已由真人身份批准')
+ok('对应 scope 已由合成测试决策放行（不代表真人授权）')
 
 const result = await handle.result()
 if (result.state !== 'COMPLETED') fail(`批准后 Mission 未完成：${result.state}`)

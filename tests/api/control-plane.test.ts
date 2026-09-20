@@ -43,7 +43,7 @@ const approval = (id: string, scope: 'controlled' | 'mutating'): Approval => ({
   scope, requested_by: 'agent:codex', risk_level: scope,
   reason: '需要人工确认', evidence_artifact_ids: ['art-1'],
   decision: 'pending', decided_by: null, decided_at: null,
-  expires_at: '2026-08-06T00:00:00.000Z', created_at: T0,
+  expires_at: '2099-01-01T00:00:00.000Z', created_at: T0,
 })
 
 const artifact = (id: string, taskId: string, role: string): Artifact => ({
@@ -77,6 +77,7 @@ before(async () => {
   store = new MemoryStore()
 
   await store.createMission({ mission: mission('mis-1'), actor: ACTOR })
+  await store.createMission({ mission: mission('mis-without-task'), actor: ACTOR })
   await store.createMission({ mission: mission('mis-other', 'team-other'), actor: ACTOR })
   await store.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
   await store.createTask({ task: task('tsk-2', 'mis-1'), actor: ACTOR })
@@ -110,7 +111,7 @@ describe('Mission', () => {
     const { status, body } = await get('/v1/missions')
     assert.equal(status, 200)
     const items = (body as { items: Mission[] }).items
-    assert.deepEqual(items.map((m) => m.id), ['mis-1'], '跨租户数据泄漏是 T12 明确要拒绝的')
+    assert.deepEqual(items.map((m) => m.id), ['mis-1', 'mis-without-task'], '不能漏掉无任务 Mission，也不能泄漏跨租户数据')
   })
 
   test('详情含目标与机读验收标准', async () => {
@@ -143,6 +144,39 @@ describe('Mission', () => {
 })
 
 describe('审批闸口', () => {
+  test('过期审批不能批准，返回 409 且记录不变', async () => {
+    await store.createApproval({ ...approval('apr-expired', 'controlled'), expires_at: T0 })
+    const result = await post('/v1/approvals/apr-expired/decision', {
+      decision: 'approved', scope: 'controlled', decided_by: 'user:human',
+    })
+    assert.equal(result.status, 409)
+    assert.equal((await store.getApproval('apr-expired'))?.decision, 'pending')
+    // 合成过期请求不参与后续 pending 列表断言。
+    await store.decideApproval('apr-expired', 'expired', 'system:test', new Date().toISOString())
+  })
+
+  test('并发审批只接受一个决定，同一决定重试不改写时间', async () => {
+    await store.createApproval(approval('apr-race', 'mutating'))
+    const bodies = [
+      { decision: 'approved', scope: 'mutating', decided_by: 'user:a' },
+      { decision: 'rejected', scope: 'mutating', decided_by: 'user:b' },
+    ]
+    const responses = await Promise.all(bodies.map((body) => post('/v1/approvals/apr-race/decision', body)))
+    assert.deepEqual(responses.map((r) => r.status).sort(), [200, 409])
+    const winner = responses.findIndex((r) => r.status === 200)
+    const retried = await post('/v1/approvals/apr-race/decision', bodies[winner])
+    assert.equal(retried.status, 200)
+    assert.deepEqual(retried.body, responses[winner]!.body)
+  })
+
+  test('空白或非字符串批准者返回 400', async () => {
+    for (const decidedBy of [' ', 12, {}]) {
+      assert.equal((await post('/v1/approvals/apr-mut/decision', {
+        decision: 'approved', scope: 'mutating', decided_by: decidedBy,
+      })).status, 400)
+    }
+  })
+
   test('待审批列表区分 scope', async () => {
     const { status, body } = await get('/v1/approvals')
     assert.equal(status, 200)

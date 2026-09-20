@@ -11,6 +11,9 @@
 export type { TaskEnvelopeV1 } from './generated/task-envelope.ts'
 export type { TaskResultV1 } from './generated/task-result.ts'
 export type { ReviewDecisionV1 } from './generated/review-decision.ts'
+export type { MissionEventV1 } from './generated/mission-event.ts'
+export type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
+export { ApprovalDecisionConflictError } from './approval-state.ts'
 
 export {
   TASK_STATES,
@@ -39,6 +42,7 @@ export type {
   TransitionTaskInput,
   AppendEventInput,
   TaskQuery,
+  MissionQuery,
 } from './store.ts'
 
 export { buildEvidencePack } from './evidence-pack.ts'

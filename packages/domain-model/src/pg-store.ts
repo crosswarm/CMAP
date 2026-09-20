@@ -32,7 +32,6 @@ import type {
   EventType,
   RemoteTaskBinding,
   Approval,
-  ApprovalDecision,
   ResourceLock,
   Artifact,
   ArtifactEdge,
@@ -45,8 +44,11 @@ import type {
   CreateTaskInput,
   TransitionTaskInput,
   AppendEventInput,
+  MissionQuery,
   TaskQuery,
 } from './store.ts'
+import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
+import { decideApprovalState } from './approval-state.ts'
 import {
   ArtifactConflictError,
   ConcurrentModificationError,
@@ -137,7 +139,7 @@ const toApproval = (r: Record<string, unknown>): Approval => ({
   risk_level: r['risk_level'] as RiskLevel,
   reason: r['reason'] as string,
   evidence_artifact_ids: (r['evidence_artifact_ids'] as string[]) ?? [],
-  decision: r['decision'] as ApprovalDecision,
+  decision: r['decision'] as Approval['decision'],
   decided_by: (r['decided_by'] as string | null) ?? null,
   decided_at: isoOrNull(r['decided_at']),
   expires_at: iso(r['expires_at']),
@@ -323,6 +325,14 @@ export class PgStore implements Store {
   async getMission(id: string): Promise<Mission | null> {
     const { rows } = await this.#pool.query('SELECT * FROM missions WHERE id = $1', [id])
     return rows.length ? toMission(rows[0] as Record<string, unknown>) : null
+  }
+
+  async queryMissions(q: MissionQuery): Promise<readonly Mission[]> {
+    const { rows } = await this.#pool.query(
+      'SELECT * FROM missions WHERE tenant = $1 ORDER BY created_at, id COLLATE "C"',
+      [q.tenant],
+    )
+    return rows.map((r) => toMission(r as Record<string, unknown>))
   }
 
   async setMissionState(
@@ -672,17 +682,23 @@ export class PgStore implements Store {
 
   async decideApproval(
     id: string,
-    decision: ApprovalDecision,
+    decision: ApprovalDecisionInputV1['decision'],
     decidedBy: string,
     at: string,
   ): Promise<Approval> {
-    const { rows, rowCount } = await this.#pool.query(
-      `UPDATE approvals SET decision = $2, decided_by = $3, decided_at = $4
-       WHERE id = $1 RETURNING *`,
-      [id, decision, decidedBy, at],
-    )
-    if (rowCount === 0) throw new NotFoundError('Approval', id)
-    return toApproval(rows[0] as Record<string, unknown>)
+    return this.#tx(async (c) => {
+      const current = await c.query('SELECT * FROM approvals WHERE id = $1 FOR UPDATE', [id])
+      if (!current.rows.length) throw new NotFoundError('Approval', id)
+      const approval = toApproval(current.rows[0] as Record<string, unknown>)
+      const next = decideApprovalState(approval, { decision, decided_by: decidedBy, at })
+      if (next === approval) return approval
+      const { rows } = await c.query(
+        `UPDATE approvals SET decision = $2, decided_by = $3, decided_at = $4
+         WHERE id = $1 RETURNING *`,
+        [id, next.decision, next.decided_by, next.decided_at],
+      )
+      return toApproval(rows[0] as Record<string, unknown>)
+    })
   }
 
   async listPendingApprovals(missionId?: string): Promise<readonly Approval[]> {

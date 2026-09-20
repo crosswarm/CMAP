@@ -20,7 +20,6 @@ import type {
   EventActor,
   RemoteTaskBinding,
   Approval,
-  ApprovalDecision,
   ResourceLock,
   Artifact,
   ArtifactEdge,
@@ -32,8 +31,11 @@ import type {
   CreateTaskInput,
   TransitionTaskInput,
   AppendEventInput,
+  MissionQuery,
   TaskQuery,
 } from './store.ts'
+import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
+import { decideApprovalState } from './approval-state.ts'
 import {
   ArtifactConflictError,
   ConcurrentModificationError,
@@ -130,6 +132,16 @@ export class MemoryStore implements Store {
 
   async getMission(id: string): Promise<Mission | null> {
     return this.#missions.get(id) ?? null
+  }
+
+  async queryMissions(q: MissionQuery): Promise<readonly Mission[]> {
+    return [...this.#missions.values()]
+      .filter((m) => m.tenant === q.tenant)
+      .sort((a, b) => {
+        const byCreatedAt = Date.parse(a.created_at) - Date.parse(b.created_at)
+        if (byCreatedAt !== 0) return byCreatedAt
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+      })
   }
 
   async setMissionState(
@@ -370,14 +382,14 @@ export class MemoryStore implements Store {
 
   async decideApproval(
     id: string,
-    decision: ApprovalDecision,
+    decision: ApprovalDecisionInputV1['decision'],
     decidedBy: string,
     at: string,
   ): Promise<Approval> {
     const a = this.#approvals.get(id)
     if (!a) throw new NotFoundError('Approval', id)
 
-    const next: Approval = { ...a, decision, decided_by: decidedBy, decided_at: at }
+    const next = decideApprovalState(a, { decision, decided_by: decidedBy, at })
     this.#approvals.set(id, next)
 
     const back = this.#approvals.get(id)

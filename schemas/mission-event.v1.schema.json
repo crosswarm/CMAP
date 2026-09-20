@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/mission-event/v1",
+  "title": "Mission Event v1",
+  "description": "GET /v1/missions/:id/events 的 SSE data。id 为 event_id 的 URI 编码，event 为 mission-event。连接先回放已提交历史，再推送新增事件；Last-Event-ID 必须属于本 Mission。重连仍回放完整历史，以免 PostgreSQL 并发事务晚提交的低 lamport 事件被跳过；客户端按 event_id 去重，不能把 lamport 当提交游标。至少一次投递，不修改 Outbox delivered 标记。不公开 payload、提示词或 Agent 原始输出。无权限与不存在均为 404，未知游标为 400。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "event_id", "event_type", "event_version", "occurred_at", "mission_id", "task_id", "lamport"],
+  "properties": {
+    "schema": { "type": "string", "const": "cmap/mission-event/v1" },
+    "event_id": { "type": "string", "minLength": 1 },
+    "event_type": { "type": "string", "minLength": 1 },
+    "event_version": { "type": "integer", "minimum": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "mission_id": { "type": "string", "minLength": 1 },
+    "task_id": { "type": ["string", "null"] },
+    "lamport": { "type": "integer", "minimum": 0 }
+  }
+}

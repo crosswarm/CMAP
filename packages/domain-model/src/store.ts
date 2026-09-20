@@ -23,12 +23,12 @@ import type {
   EventType,
   EventActor,
   Approval,
-  ApprovalDecision,
   ResourceLock,
   Artifact,
   ArtifactEdge,
   Review,
 } from './entities.ts'
+import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 
 // ------------------------------------------------------------ 写入参数
 
@@ -75,6 +75,9 @@ export interface TaskQuery {
   readonly capability?: string
   readonly limit?: number
 }
+
+export type { MissionQueryV1 as MissionQuery } from './generated/mission-query.ts'
+import type { MissionQueryV1 as MissionQuery } from './generated/mission-query.ts'
 
 // -------------------------------------------------------------- 错误
 
@@ -137,6 +140,7 @@ export interface Store {
   // Mission
   createMission(input: CreateMissionInput): Promise<Mission>
   getMission(id: string): Promise<Mission | null>
+  queryMissions(q: MissionQuery): Promise<readonly Mission[]>
   setMissionState(
     id: string,
     state: MissionState,
@@ -204,7 +208,7 @@ export interface Store {
   getApproval(id: string): Promise<Approval | null>
   decideApproval(
     id: string,
-    decision: ApprovalDecision,
+    decision: ApprovalDecisionInputV1['decision'],
     decidedBy: string,
     at: string,
   ): Promise<Approval>
