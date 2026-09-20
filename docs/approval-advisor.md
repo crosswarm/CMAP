@@ -1,6 +1,6 @@
 # Jev 决策辅助
 
-两层审批共用 `scripts/jev-approval.mjs`，运行在控制面之外。它只返回结构化建议，
+两层审批共用 `scripts/jev-approval.mjs`，模型调用运行在独立子进程。它只返回结构化建议，
 不执行工具、不改任务状态、不 POST 审批决定，也不输出宿主 hooks 的 allow 指令。
 Workflow 和硬验收保持确定性。
 
@@ -73,3 +73,15 @@ CMAP_API_PORT=8787 node scripts/jev-approval.mjs --approval <approval-id>
 - 隔离 PostgreSQL + HTTP API 的待提交审批：Jev 返回 review / human_required；
   回读仍为 pending、decided_by=null。测试结束将合成请求标记 expired。
 - 全局 Codex/OMX/Ulanzi hook 未改动；本次没有安装绕过宿主策略的自动批准 hook。
+
+
+## WebUI 接线（2026-09-21）
+
+审批详情通过 `POST /v1/approvals/:id/advice` 请求建议，body 只接受 `{}`。
+API 先检查当前租户与 pending 状态，再调用上述 CLI；20 秒超时、64KiB 输出上限，
+校验返回 schema、request_id 和 `can_continue=false`。服务失败返回通用错误。
+建议显示模型、置信度和原因，不写审批或 Task 状态。真实 Jev 返回 review 后，
+回读两类合成审批仍为 pending；单独批准 controlled 后 mutating 仍未决定。
+
+Codex 宿主当前 `approval_policy=never`，没有安装自动批准 hook 或改变工具安全策略。
+已授权常规可逆动作直接推进；需要语义判断时复用建议 CLI，确定性测试仍由代码执行。

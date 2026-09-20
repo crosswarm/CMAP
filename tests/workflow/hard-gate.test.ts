@@ -111,6 +111,26 @@ describe('硬门槛判定', () => {
     assert.ok((failed[0]?.evidence ?? []).length > 0, '判定必须指向具体证据')
   })
 
+  test('已存旧结果自报通过但 actual 不满足时仍 rework', async () => {
+    await store.createMission({ mission: mission('mis-1'), actor: ACTOR })
+    const taskId = await runTask('mis-1', resultWith([
+      { id: 'PERF-P95', passed: true, actual: 1500 },
+      { id: 'NO-REGRESS', passed: true, actual: '' },
+    ]))
+
+    const t = await store.getTask(taskId)
+    if (t?.result?.criterion_results[1]) {
+      t.result.criterion_results[1] = { ...t.result.criterion_results[1], passed: true }
+    }
+
+    const { decision } = await acts.evaluateHardGate({ taskId, round: 0 })
+
+    assert.equal(decision.decision, 'rework')
+    const failed = decision.failed_criteria ?? []
+    assert.equal(failed.length, 1)
+    assert.equal(failed[0]?.criterion_id, 'NO-REGRESS')
+  })
+
   test('漏答的标准同样算没过，理由要说清是「没答」', async () => {
     await store.createMission({ mission: mission('mis-1'), actor: ACTOR })
     const taskId = await runTask('mis-1', resultWith([

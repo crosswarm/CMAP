@@ -25,5 +25,5 @@
     "isolatedModules": true
   },
   "include": ["packages/**/*.ts", "adapters/**/*.ts", "apps/**/*.ts", "workflows/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "**/dist"]
+  "exclude": ["node_modules", "**/dist", "apps/web"]
 }

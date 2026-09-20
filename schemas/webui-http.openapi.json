@@ -1,0 +1,201 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "CMAP WebUI HTTP Contract",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Serve built WebUI index",
+        "responses": {
+          "200": {
+            "description": "HTML index with no-cache and a restrictive CSP",
+            "headers": {
+              "cache-control": { "schema": { "type": "string", "const": "no-cache" } },
+              "content-security-policy": {
+                "schema": {
+                  "type": "string",
+                  "description": "Must include default-src 'self', img-src 'self' blob:, object-src 'none', frame-ancestors 'none', and base-uri 'self'. Must not include unsafe-inline."
+                }
+              }
+            },
+            "content": { "text/html": { "schema": { "type": "string" } } }
+          },
+          "503": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
+    },
+    "/assets/{assetPath}": {
+      "get": {
+        "summary": "Serve built WebUI assets from dist/assets",
+        "parameters": [
+          {
+            "name": "assetPath",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Static asset with immutable cache headers",
+            "headers": {
+              "cache-control": {
+                "schema": {
+                  "type": "string",
+                  "const": "public, max-age=31536000, immutable"
+                }
+              }
+            },
+            "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } }
+          },
+          "400": { "$ref": "#/components/responses/JsonError" },
+          "403": { "$ref": "#/components/responses/JsonError" },
+          "404": { "$ref": "#/components/responses/JsonError" },
+          "503": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
+    },
+    "/v1/context": {
+      "get": {
+        "summary": "Read local control-plane context",
+        "responses": {
+          "200": {
+            "description": "Local tenant context",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "control-plane-context.v1.schema.json" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "summary": "Tenant-wide Mission event SSE stream",
+        "responses": {
+          "200": {
+            "description": "SSE stream. data frames use mission-event.v1 without payload or actor.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
+    },
+    "/v1/missions/{missionId}/start": {
+      "post": {
+        "summary": "Start or recover an already-created Mission",
+        "description": "Uses the ledger Mission id to derive workflow_id=mission-{id}. Only DRAFT Missions call the configured startMission callback; non-DRAFT Missions return accepted=true idempotently without restarting.",
+        "parameters": [
+          { "name": "missionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": false }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Mission accepted or already started",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "mission-submission.v1.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/JsonError" },
+          "403": { "$ref": "#/components/responses/JsonError" },
+          "404": { "$ref": "#/components/responses/JsonError" },
+          "415": { "$ref": "#/components/responses/JsonError" },
+          "503": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
+    },
+    "/v1/missions/{missionId}/artifacts/{taskId}/{artifactId}": {
+      "get": {
+        "summary": "Download an artifact as raw bytes",
+        "parameters": [
+          { "name": "missionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "artifactId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw artifact bytes. The server accepts artifact://mission/task/path, task-relative paths such as evidence/report.json, and absolute paths only when they resolve inside the Task directory. It verifies tenant, task ownership, file containment, file size with a bounded read, and sha256 before responding.",
+            "headers": {
+              "content-disposition": { "schema": { "type": "string", "pattern": "^attachment; filename=\"[ -~]+\"$" } },
+              "content-type": { "schema": { "type": "string", "const": "application/octet-stream" } },
+              "x-content-type-options": { "schema": { "type": "string", "const": "nosniff" } },
+              "x-content-sha256": { "schema": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" } }
+            },
+            "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } }
+          },
+          "403": { "$ref": "#/components/responses/JsonError" },
+          "404": { "$ref": "#/components/responses/JsonError" },
+          "409": { "$ref": "#/components/responses/JsonError" },
+          "413": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
+    },
+    "/v1/approvals/{approvalId}/advice": {
+      "post": {
+        "summary": "Fetch Jev-assisted advice for a pending approval",
+        "description": "Thin query bridge only. It never approves, rejects, mutates Approval/Task state, starts workflows, or treats model advice as human authorization.",
+        "parameters": [
+          { "name": "approvalId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validated advice. can_continue is always false; recommendation is advisory only.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "approval-advice.v1.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/JsonError" },
+          "404": { "$ref": "#/components/responses/JsonError" },
+          "415": { "$ref": "#/components/responses/JsonError" },
+          "503": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "JsonError": {
+        "description": "JSON error response",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["error"],
+              "properties": { "error": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

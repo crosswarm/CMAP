@@ -14,7 +14,7 @@
   重连会完整回放，按 `data.event_id` 去重；不要把重复事件显示成重复动作。
   SSE 连接成功只表示连接正常，不能据此显示 Agent 在线或任务完成。
 - 当前 API 仅监听本机，租户来自控制面配置；尚未实现 OIDC，不得宣称多用户身份认证完成。
-- React/Vite 前端尚未实现；以下方案分析和交互约束均为设计，不代表可用产品。
+- 本节记录 09-20 状态；React/Vite 前端已于 09-21 交付，范围和证据见下方更新。
 
 ### 2026-09-21：Mission 创建接线
 
@@ -264,3 +264,20 @@ Review  { round, decision: 'accept'|'rework'|'escalate', failed_criteria[], evid
 - API 批错 scope 返回 409；两类授权互不蕴含。他租户审批不可见也不可决策。
 - 正确批准后事件流出现 `APPROVAL_GRANTED` 并继续 `TASK_STARTED`；拒绝后 Task 为
   `REJECTED`、Mission 为 `FAILED`。
+
+
+## 2026-09-21：本机 WebUI 交付
+
+采用验收账本方案，实现 Mission 队列与创建、逐条验收、证据哈希校验和预览、
+返工链、独立 scope 审批、资源状态以及 Jev 建议。租户级 SSE 更新后按需读详情。
+创建不确定时保留原请求键与原输入重试；DRAFT 可按 Mission ID 恢复启动。
+审批列表只进入详情；当前 scope 的结果留在原对话框，不自动打开或批准另一 scope。
+
+双 scope、资源等待、评审和证据使用明确标注的合成数据；创建与 lost-ack 重试
+另用真实 Temporal → Codex 链路完成。390px 无页面横向溢出，键盘焦点循环、
+Escape 返回焦点和跳过导航已验证。详细证据见
+[WebUI 验证](../verification-webui-2026-09-21.md)。
+
+React/Vite 属既有设计栈，按用户自主开发授权推进，不再将额外确认作为阻断；
+没有把未收到的单独依赖回复记为显式批准。未引入路由、状态管理或 UI 组件库。
+当前身份仍是本机配置，资源健康无事实时显示未知；DAG、多用户和远程执行不在本轮交付中。

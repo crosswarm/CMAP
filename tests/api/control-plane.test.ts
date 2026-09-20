@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
 
 import { MemoryStore } from '#domain-model'
-import type { Mission, TaskRecord, Approval, Artifact, EventActor, Store } from '#domain-model'
+import type { Mission, TaskRecord, Approval, Artifact, EventActor, ResourceLock, Store } from '#domain-model'
 import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test' }
@@ -57,6 +57,12 @@ const artifact = (id: string, taskId: string, role: string): Artifact => ({
   created_at: T0,
 })
 
+const lock = (id: string, taskId: string, missionId: string): ResourceLock => ({
+  lock_id: id, resource: `resource:${id}`, task_id: taskId, mission_id: missionId,
+  holder_runner_id: 'runner-1', acquired_at: T0,
+  expires_at: '2099-01-01T00:00:00.000Z', released_at: null,
+})
+
 const get = async (path: string) => {
   const res = await fetch(`${base}${path}`)
   const body = res.headers.get('content-type')?.includes('json') ? await res.json() : await res.text()
@@ -81,7 +87,11 @@ before(async () => {
   await store.createMission({ mission: mission('mis-other', 'team-other'), actor: ACTOR })
   await store.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
   await store.createTask({ task: task('tsk-2', 'mis-1'), actor: ACTOR })
+  await store.createTask({ task: task('tsk-other', 'mis-other'), actor: ACTOR })
   await store.putArtifact(artifact('art-1', 'tsk-1', 'report'))
+  await store.acquireLock(lock('lock-visible', 'tsk-1', 'mis-1'))
+  await store.acquireLock(lock('lock-other', 'tsk-other', 'mis-other'))
+  await store.acquireLock(lock('lock-orphan', 'missing-task', 'mis-1'))
   await store.createApproval(approval('apr-ctl', 'controlled'))
   await store.createApproval(approval('apr-mut', 'mutating'))
   await store.createApproval({
@@ -259,6 +269,15 @@ describe('证据', () => {
   test('他租户的证据不可达', async () => {
     const { status } = await get('/v1/missions/mis-other/evidence')
     assert.equal(status, 404)
+  })
+})
+
+describe('资源锁', () => {
+  test('GET /v1/locks 只公开能经 Task 证明属于当前 tenant 的锁', async () => {
+    const { status, body } = await get('/v1/locks')
+    assert.equal(status, 200)
+    const items = (body as { items: ResourceLock[] }).items
+    assert.deepEqual(items.map((x) => x.lock_id), ['lock-visible'])
   })
 })
 

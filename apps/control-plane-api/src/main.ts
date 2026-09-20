@@ -14,14 +14,20 @@ process.env['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
 process.env['grpc_proxy'] = ''
 
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { PgStore } from '#domain-model'
 import { Client, Connection, WorkflowExecutionAlreadyStartedError } from '@temporalio/client'
 
+import { getApprovalAdviceFromJev } from './approval-advice.ts'
 import { createControlPlane } from './server.ts'
 
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..')
 const port = Number(process.env['CMAP_API_PORT'] ?? 8787)
 const tenant = process.env['CMAP_TENANT'] ?? process.env['RUNNER_TENANT'] ?? 'team-ycc'
 const owner = process.env['CMAP_OWNER'] ?? 'local-operator'
+const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
+const frontendDir = join(repoRoot, 'apps/web/dist')
 const connectionString =
   process.env['CMAP_DATABASE_URL'] ?? 'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
@@ -36,7 +42,8 @@ const getTemporal = () => temporal ??= Connection.connect({
 }).catch((error: unknown) => { temporal = undefined; throw error })
 
 const server = await createControlPlane({
-  store, tenant, owner,
+  store, tenant, owner, workRoot, frontendDir,
+  getApprovalAdvice: (id) => getApprovalAdviceFromJev(id, { repoRoot, port }),
   startMission: async (missionId, workflowId) => {
     const connection = await getTemporal()
     const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })

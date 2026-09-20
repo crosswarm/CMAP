@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/control-plane-context/v1",
+  "title": "Control Plane Context v1",
+  "description": "GET /v1/context 返回给同源 WebUI 的本机控制面上下文。authentication 固定为 local，明确不是 OIDC 身份；tenant 与 owner 只来自服务端配置。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant", "owner", "authentication"],
+  "properties": {
+    "tenant": { "type": "string", "minLength": 1 },
+    "owner": { "type": ["string", "null"] },
+    "authentication": { "type": "string", "const": "local" }
+  }
+}

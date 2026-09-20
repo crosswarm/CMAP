@@ -216,6 +216,24 @@ describe('收结果并落账本', () => {
     assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
   })
 
+  test('Agent 自报通过但 actual 不满足时，控制面复算为未通过并落库', async () => {
+    const taskId = await startTask()
+    adapter.result = {
+      schema: 'cmap/task-result/v1',
+      mission_id: 'x', task_id: 'x', attempt: 1,
+      status: 'completed',
+      summary: '自报通过但数量不对',
+      criterion_results: [{ criterion_id: 'FILE-COUNT', actual: 5, passed: true }],
+      artifacts: [],
+    }
+    await acts.dispatchTask(taskId)
+    const out = await acts.collectTaskResult(taskId)
+
+    assert.equal(out.passed, false)
+    assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
+    assert.equal((await store.getTask(taskId))?.result?.criterion_results[0]?.passed, false)
+  })
+
   test('Agent 漏答某条验收标准即判不通过（沉默不是通过）', async () => {
     const taskId = await startTask()
     adapter.result = {

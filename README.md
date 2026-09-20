@@ -43,7 +43,8 @@ Temporal（持久化工作流引擎）+ PostgreSQL（任务账本）+ S3 兼容�
 docker compose -f infra/docker-compose/docker-compose.yml up -d
 node scripts/verify-temporal.mjs        # 就绪判定的唯一权威判据
 
-# 2. 起 CMAP 自己的两个进程（各占一个终端）
+# 2. 构建 WebUI，再起两个进程（各占一个终端）
+npm run build:web                       # API 同源托管前端
 npm run start:worker                     # Temporal Worker，队列 cmap-main
 npm run start:api                        # 控制面 API，http://127.0.0.1:8787
 
@@ -94,7 +95,10 @@ P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发�
 收结果落账本、逐条核对验收标准、独立复算证据哈希；验收不过会自动派生后继任务
 返工，轮次耗尽或判定无进展则升级给人；高风险任务会暂停等待对应 scope 的真人
 批准，错 scope 不放行。Mission 列表包含尚无任务的记录，SSE 事件流支持实时推送与断线历史回放。
-还缺 WebUI（只有原型图）。
+WebUI 已接入目标创建、验收账本、证据预览、返工追踪、独立 scope 审批和 Jev 建议。
+启动后打开 http://127.0.0.1:8787；开发前端可用 `npm run start:web`（仍需 API）。
+当前只覆盖本机 inspect/v1；DAG、Kimi/YonWork Adapter、OIDC 与远程 runner 尚未完成。
+验证见 [WebUI 交付记录](docs/verification-webui-2026-09-21.md)。
 逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。
 
 SSE：`GET /v1/missions/:id/events`，事件名 `mission-event`，按当前 API 租户过滤。

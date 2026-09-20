@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
 import { request as httpRequest } from 'node:http'
 import { MemoryStore } from '#domain-model'
+import type { Mission } from '#domain-model'
 import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
 
 const input = {
@@ -27,8 +28,20 @@ async function setup(t: TestContext, start?: (id: string) => Promise<void>, stor
     })
     return { status: res.status, body: await res.json() as Record<string, unknown> }
   }
-  return { store, starts, base, post }
+  const postStart = async (id: string, value: unknown = {}, headers: Record<string, string> = {}) => {
+    const res = await fetch(`${base}/v1/missions/${id}/start`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value),
+    })
+    return { status: res.status, body: await res.json() as Record<string, unknown> }
+  }
+  return { store, starts, base, post, postStart }
 }
+
+const mission = (id: string, owner = 'configured-owner', tenant = 'local', state: Mission['state'] = 'DRAFT'): Mission => ({
+  id, tenant, owner, type: 'adhoc', goal: 'Recover existing mission', constraints: { original: true },
+  acceptance: [], workflow_template: 'adhoc/v1', state, revision: 1,
+  created_at: '2026-09-21T00:00:00.000Z', updated_at: '2026-09-21T00:00:00.000Z',
+})
 
 test('创建 Mission：身份来自控制面，复用验收标准并启动 Workflow', async (t) => {
   const { store, starts, post } = await setup(t)
@@ -88,6 +101,71 @@ test('Workflow 启动失败保留 DRAFT，原键重试恢复而非重建', async
   assert.equal(retry.status, 202)
   assert.equal(retry.body['mission_id'], id)
   assert.equal((await store.listEvents(id)).length, 1)
+})
+
+test('已落库 DRAFT 可按 Mission id 恢复启动，不创建或改写 Mission', async (t) => {
+  let attempts = 0
+  const { post, postStart, store, starts } = await setup(t, async () => { if (++attempts === 1) throw new Error('synthetic outage') })
+  const failed = await post(input)
+  assert.equal(failed.status, 503)
+  const id = failed.body['mission_id'] as string
+  const before = await store.getMission(id)
+  assert.equal(before?.state, 'DRAFT')
+
+  const recovered = await postStart(id)
+  assert.equal(recovered.status, 202)
+  assert.deepEqual(recovered.body, { accepted: true, mission_id: id, workflow_id: `mission-${id}` })
+  assert.deepEqual(starts, [id, id])
+  const after = await store.getMission(id)
+  assert.equal(after?.goal, before?.goal)
+  assert.deepEqual(after?.constraints, before?.constraints)
+  assert.equal((await store.queryMissions({ tenant: 'local' })).length, 1)
+})
+
+test('重复 start 对非 DRAFT 幂等返回，不重复启动已终态 Mission', async (t) => {
+  const { post, postStart, store, starts } = await setup(t)
+  const created = await post(input)
+  const id = created.body['mission_id'] as string
+  await store.setMissionState(id, 'COMPLETED', { type: 'system', id: 'test' })
+  const count = starts.length
+  const again = await postStart(id)
+  assert.equal(again.status, 202)
+  assert.deepEqual(again.body, { accepted: true, mission_id: id, workflow_id: `mission-${id}` })
+  assert.equal(starts.length, count)
+})
+
+test('start 校验 tenant 与本机 owner，未知 404、非本人 403', async (t) => {
+  const store = new MemoryStore()
+  await store.createMission({ mission: mission('mine'), actor: { type: 'system', id: 'test' } })
+  await store.createMission({ mission: mission('not-mine', 'other-owner'), actor: { type: 'system', id: 'test' } })
+  await store.createMission({ mission: mission('other-tenant', 'configured-owner', 'other'), actor: { type: 'system', id: 'test' } })
+  const { postStart, starts } = await setup(t, undefined, store)
+
+  assert.equal((await postStart('missing')).status, 404)
+  assert.equal((await postStart('other-tenant')).status, 404)
+  assert.equal((await postStart('not-mine')).status, 403)
+  assert.deepEqual(starts, [])
+})
+
+test('start 缺启动能力或启动未确认返回 503 并保留原记录，body 只能是空对象', async (t) => {
+  const store = new MemoryStore()
+  await store.createMission({ mission: mission('draft-1'), actor: { type: 'system', id: 'test' } })
+  const server = await createControlPlane({ store, tenant: 'local', owner: 'configured-owner' })
+  await server.listen(0)
+  t.after(() => server.close())
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const unavailable = await fetch(`${base}/v1/missions/draft-1/start`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  })
+  assert.equal(unavailable.status, 503)
+  assert.equal((await store.getMission('draft-1'))?.state, 'DRAFT')
+
+  const failingStore = new MemoryStore()
+  await failingStore.createMission({ mission: mission('draft-2'), actor: { type: 'system', id: 'test' } })
+  const failing = await setup(t, async () => { throw new Error('synthetic outage') }, failingStore)
+  assert.equal((await failing.postStart('draft-2')).status, 503)
+  assert.equal((await failing.store.getMission('draft-2'))?.state, 'DRAFT')
+  assert.equal((await failing.postStart('draft-2', { request_id: 'forged' })).status, 400)
 })
 
 test('跨租户相同请求键得到独立 Mission', async (t) => {

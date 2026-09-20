@@ -33,6 +33,9 @@ export interface TaskResultV1 {
     }
     actual?: unknown
     unit?: string
+    /**
+     * Agent 自报该标准是否通过；控制面落库前还会按信封 success_definition 的 expected/operator 与 actual 复算，最终 passed 必须同时满足 Agent 自报 true 与控制面复算 true。
+     */
     passed: boolean
     /**
      * 结论必须可追溯到原始 Artifact

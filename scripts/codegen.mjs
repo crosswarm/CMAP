@@ -29,6 +29,7 @@ const TARGETS = [
   { schema: 'approval-decision-input.v1.schema.json', out: 'approval-decision-input.ts' },
   { schema: 'approval-context.v1.schema.json', out: 'approval-context.ts' },
   { schema: 'approval-advice.v1.schema.json', out: 'approval-advice.ts' },
+  { schema: 'control-plane-context.v1.schema.json', out: 'control-plane-context.ts' },
   { schema: 'mission-query.v1.schema.json', out: 'mission-query.ts' },
   { schema: 'mission-event.v1.schema.json', out: 'mission-event.ts' },
   { schema: 'task-envelope.v1.schema.json', out: 'task-envelope.ts' },

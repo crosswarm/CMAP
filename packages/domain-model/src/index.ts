@@ -12,6 +12,8 @@ export type { TaskEnvelopeV1 } from './generated/task-envelope.ts'
 export type { TaskResultV1 } from './generated/task-result.ts'
 export type { ReviewDecisionV1 } from './generated/review-decision.ts'
 export type { MissionEventV1 } from './generated/mission-event.ts'
+export type { ControlPlaneContextV1 } from './generated/control-plane-context.ts'
+export type { ApprovalAdviceV1 } from './generated/approval-advice.ts'
 export type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 export { ApprovalDecisionConflictError } from './approval-state.ts'
 export { MissionConflictError } from './mission-input.ts'
@@ -48,6 +50,8 @@ export type {
 
 export { buildEvidencePack } from './evidence-pack.ts'
 export type { EvidencePack, EvidencePackTask } from './evidence-pack.ts'
+
+export { recomputeCriterionPassed } from './criterion-check.ts'
 
 export { detectNoProgress, NO_PROGRESS_REASONS } from './no-progress.ts'
 export type { ProgressSnapshot, NoProgressResult, NoProgressReason } from './no-progress.ts'

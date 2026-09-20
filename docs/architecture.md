@@ -201,10 +201,10 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 自动返工接进主 Workflow（两道刹车 + 升级） | ✅ P2 |
 | 审批闸口接进主 Workflow（双 scope + 拒绝终止） | ✅ P2，真实 API → Workflow → Codex 链路通过 |
 | 证据哈希由控制面独立复算 | ✅ P2，复算在控制面 Adapter 层，不采信 Agent 自报 |
-| WebUI 原型（3 方案 × 2 轮迭代） | 🟡 P2，PNG 和方案取舍说明已有；「两类授权同时 pending」帧未交付 |
-| Web UI 前端实现（Mission/审批/证据/返工追踪） | ⬜ P2 |
-| SSE 实时推送 | ✅ P2，Mission 级租户隔离、历史回放、实时追加、重连去重与断开清理；真实 PostgreSQL/HTTP 验证通过 |
-| Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；前端展示尚未接入，见 [说明](approval-advisor.md) |
+| WebUI 原型（3 方案 × 2 轮迭代） | ✅ P2，原型已有；双 scope 同时 pending 已用合成数据验证实际 UI |
+| Web UI 前端实现（Mission/审批/证据/返工追踪） | ✅ 本机 P2；真实创建与重试验证，见 [交付记录](verification-webui-2026-09-21.md) |
+| SSE 实时推送 | ✅ P2，租户级与 Mission 级事件流，租户隔离、历史回放、实时追加、重连去重与断开清理；真实 PostgreSQL/HTTP 验证通过 |
+| Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；审批详情已接入建议展示，见 [说明](approval-advisor.md) |
 | kimi-adapter、yonwork-adapter、能力路由 | ⬜ P3 |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 

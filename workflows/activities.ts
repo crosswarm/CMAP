@@ -30,6 +30,7 @@ import type {
   ProgressSnapshot,
 } from '#domain-model'
 import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
+import { recomputeCriterionPassed } from '#domain-model'
 import type { AgentAdapter } from '#adapter-sdk'
 
 /**
@@ -53,10 +54,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * 那正是无证据即失败要防的情形。
  */
 const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectOutput => {
-  const answered = new Map(result.criterion_results.map((c) => [c.criterion_id, c.passed]))
+  const answered = new Map(result.criterion_results.map((c) => [c.criterion_id, c]))
   const failedCriteria = (envelope.goal.success_definition ?? [])
+    .filter((c) => !recomputeCriterionPassed(c, answered.get(c.criterion_id)))
     .map((c) => c.criterion_id)
-    .filter((id) => answered.get(id) !== true)
 
   return {
     status: result.status,
@@ -453,16 +454,22 @@ export const createActivities = (deps: ActivityDeps) => {
           ...art,
           artifact_id: ledgerIds.get(art.artifact_id) ?? art.artifact_id,
         })),
-        criterion_results: raw.criterion_results.map((c) => ({
-          ...c,
-          ...(c.evidence_artifact_ids
-            ? {
-                evidence_artifact_ids: c.evidence_artifact_ids.map(
-                  (x) => ledgerIds.get(x) ?? x,
-                ),
-              }
-            : {}),
-        })),
+        criterion_results: raw.criterion_results.map((c) => {
+          const criterion = envelope.goal.success_definition.find(
+            (x) => x.criterion_id === c.criterion_id,
+          )
+          return {
+            ...c,
+            ...(criterion ? { passed: recomputeCriterionPassed(criterion, c) } : {}),
+            ...(c.evidence_artifact_ids
+              ? {
+                  evidence_artifact_ids: c.evidence_artifact_ids.map(
+                    (x) => ledgerIds.get(x) ?? x,
+                  ),
+                }
+              : {}),
+          }
+        }),
       }
       await store.setTaskResult(taskId, result)
 
@@ -658,7 +665,7 @@ export const createActivities = (deps: ActivityDeps) => {
       const answered = new Map(t.result.criterion_results.map((c) => [c.criterion_id, c]))
 
       const failed = criteria
-        .filter((c) => answered.get(c.criterion_id)?.passed !== true)
+        .filter((c) => !recomputeCriterionPassed(c, answered.get(c.criterion_id)))
         .map((c) => {
           const got = answered.get(c.criterion_id)
           return {

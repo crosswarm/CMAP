@@ -22,9 +22,9 @@ async function setup(t: TestContext) {
   return { store, server, base: `http://127.0.0.1:${(server.address() as AddressInfo).port}` }
 }
 
-async function connect(base: string, cursor?: string) {
+async function connect(base: string, cursor?: string, path = '/v1/missions/visible/events') {
   const abort = new AbortController()
-  const res = await fetch(`${base}/v1/missions/visible/events`, {
+  const res = await fetch(`${base}${path}`, {
     headers: cursor ? { 'Last-Event-ID': cursor } : {}, signal: abort.signal,
   })
   assert.equal(res.status, 200)
@@ -120,4 +120,46 @@ test('SSE server.close 会关闭活跃连接，不等待客户端断开', { time
   t.after(a.close)
   await a.next()
   await server.close()
+})
+
+test('租户级 SSE 回放本租户所有 Mission，隔离他租户事件', { timeout: 6000 }, async (t) => {
+  const { store, base } = await setup(t)
+  await store.createMission({ mission: mission('second'), actor })
+  await store.setMissionState('second', 'RUNNING', actor)
+  const stream = await connect(base, undefined, '/v1/events')
+  t.after(stream.close)
+  const seen = [await stream.next(), await stream.next(), await stream.next()]
+  assert.deepEqual(
+    seen.map((e) => e.data['mission_id']).sort(),
+    ['second', 'second', 'visible'],
+  )
+  assert.equal(seen.some((e) => e.data['mission_id'] === 'hidden'), false)
+})
+
+test('租户级 SSE 空租户连接后新增 Mission 不漏事件', { timeout: 6000 }, async (t) => {
+  const store = new MemoryStore()
+  const server = await createControlPlane({ store, tenant: 'local' })
+  await server.listen(0)
+  t.after(() => server.close())
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const stream = await connect(base, undefined, '/v1/events')
+  t.after(stream.close)
+  await store.createMission({ mission: mission('created-late'), actor })
+  const first = await stream.next()
+  assert.equal(first.data['event_type'], 'MISSION_CREATED')
+  assert.equal(first.data['mission_id'], 'created-late')
+})
+
+test('租户级 SSE Last-Event-ID 必须属于当前租户，且重连仍完整回放交给客户端去重', { timeout: 6000 }, async (t) => {
+  const { store, base } = await setup(t)
+  const first = (await store.listEvents('visible'))[0]!
+  const stream = await connect(base, first.event_id, '/v1/events')
+  t.after(stream.close)
+  assert.equal((await stream.next()).id, first.event_id)
+
+  const hidden = (await store.listEvents('hidden'))[0]!
+  for (const cursor of ['unknown', hidden.event_id]) {
+    const res = await fetch(`${base}/v1/events`, { headers: { 'Last-Event-ID': cursor } })
+    assert.equal(res.status, 400)
+  }
 })
