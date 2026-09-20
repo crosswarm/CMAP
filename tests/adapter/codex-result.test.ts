@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, realpath, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -29,7 +29,9 @@ const envelope: TaskEnvelopeV1 = {
 }
 
 test('Agent 缺必需证据时返回 failed 结果，而不是抛异常炸掉 Workflow', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cmap-codex-result-'))
+  const root = await mkdtemp(join(tmpdir(), 'cmap-codex-result-'))
+  const dir = join(root, 'workspace-alias')
+  await symlink(await realpath(root), dir)
   const bin = join(dir, 'fake-codex')
   await writeFile(
     bin,
@@ -38,7 +40,7 @@ const args = process.argv.slice(2)
 const out = args[args.indexOf('-o') + 1]
 require('node:fs').writeFileSync(out, JSON.stringify({
   status: 'failed', summary: process.env.TMPDIR,
-  criterion_results: [{ criterion_id: 'C1', actual: '未执行', passed: false, evidence_artifact_ids: [] }],
+  criterion_results: [{ criterion_id: 'C1', actual: args[args.indexOf('-C') + 1], passed: false, evidence_artifact_ids: [] }],
   artifacts: [], findings: [],
   error: { code: 'FILESYSTEM_BLOCKED', message: '不能写文件', retryable: true }
 }))
@@ -63,6 +65,7 @@ require('node:fs').writeFileSync(out, JSON.stringify({
 
   const result = await adapter.collectResult(binding)
   assert.equal(result.summary, await realpath(tmpdir()), '传给 Codex 的 TMPDIR 必须是无符号链接的物理路径')
+  assert.equal(result.criterion_results[0]?.actual, await realpath(dir), 'Codex 的工作目录也必须使用物理路径')
   assert.equal(result.status, 'failed')
   assert.equal(result.error?.code, 'EVIDENCE_MISSING')
   assert.match(result.error?.message ?? '', /report/)

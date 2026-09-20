@@ -40,7 +40,7 @@ export class FakeAdapter implements AgentAdapter {
   async discover(): Promise<AdapterDescriptor> {
     return {
       adapter_id: this.adapterId, agent_id: this.agentId, provider: 'fake',
-      version: '0.0.1', capabilities: ['code.analyze'], risk_ceiling: 'read-meta',
+      version: '0.0.1', capabilities: ['code.analyze', 'realdevice-validation', 'perf.optimize', 'codex.performance.root_cause'], risk_ceiling: 'mutating',
       supports_session_resume: false, supports_worktree_isolation: true, execution_level: 'B',
     }
   }

@@ -14,7 +14,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtemp, writeFile, readFile, realpath, rm } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { join, isAbsolute } from 'node:path'
+import { join, isAbsolute, relative, resolve, sep } from 'node:path'
 
 import type {
   TaskEnvelopeV1,
@@ -141,6 +141,7 @@ interface RunState {
   readonly child: ChildProcess
   readonly resultFile: string
   readonly workDir: string
+  readonly ownsWorkDir: boolean
   readonly envelope: TaskEnvelopeV1
   readonly events: NormalizedAgentEvent[]
   readonly listeners: Set<(e: NormalizedAgentEvent) => Promise<void>>
@@ -241,14 +242,17 @@ export class CodexAdapter implements AgentAdapter {
       throw new RiskCeilingExceededError(risk, ceiling, ADAPTER_ID)
     }
 
+    const ownsWorkDir = ctx.worktree === undefined
     const workDir = ctx.worktree ?? (await mkdtemp(join(tmpdir(), 'cmap-codex-')))
-    const resultFile = join(workDir, `.cmap-result-${envelope.identity.task_id}.json`)
-    const promptFile = join(workDir, `.cmap-prompt-${envelope.identity.task_id}.md`)
+    // TMPDIR 与 -C 都可能含 macOS 卷别名；沙箱可写根必须是物理路径。
+    const physicalWorkDir = await realpath(workDir)
+    const resultFile = join(physicalWorkDir, `.cmap-result-${envelope.identity.task_id}.json`)
+    const promptFile = join(physicalWorkDir, `.cmap-prompt-${envelope.identity.task_id}.md`)
 
     await writeFile(promptFile, renderPrompt(envelope), 'utf8')
 
     const args = buildCodexArgs(envelope, {
-      workDir,
+      workDir: physicalWorkDir,
       resultFile,
       outputSchemaPath: this.#outputSchemaPath,
       prompt: await readFile(promptFile, 'utf8'),
@@ -274,6 +278,7 @@ export class CodexAdapter implements AgentAdapter {
       child,
       resultFile,
       workDir,
+      ownsWorkDir,
       envelope,
       events: [],
       listeners: new Set(),
@@ -458,7 +463,7 @@ export class CodexAdapter implements AgentAdapter {
     // 证据真实性：文件必须存在，且哈希由控制面独立复算
     const artifacts: TaskResultV1['artifacts'] = []
     for (const a of out.artifacts ?? []) {
-      const path = isAbsolute(a.uri) ? a.uri : join(state.workDir, a.uri)
+      const path = await resolveEvidencePath(state.workDir, a.uri, a.role)
       let bytes: Buffer
       try {
         bytes = await readFile(path)
@@ -560,7 +565,7 @@ export class CodexAdapter implements AgentAdapter {
   async cleanup(binding: RemoteTaskBinding): Promise<void> {
     const state = this.#runs.get(binding.remote_task_id)
     if (!state) return
-    if (state.workDir.startsWith(tmpdir())) {
+    if (state.ownsWorkDir) {
       await rm(state.workDir, { recursive: true, force: true })
     }
     this.#runs.delete(binding.remote_task_id)
@@ -583,6 +588,49 @@ export class CodexAdapter implements AgentAdapter {
 // ------------------------------------------------------------------ 辅助
 
 const RISK_ORDER: readonly RiskLevel[] = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
+
+const isPathInside = (root: string, target: string): boolean => {
+  const rel = relative(root, target)
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
+const evidenceOutsideWorktree = (uri: string): AdapterError =>
+  new AdapterError(
+    'EVIDENCE_OUTSIDE_WORKTREE',
+    `证据文件不在任务工作区内：${uri}`,
+    false,
+    'evidence-outside-worktree',
+  )
+
+const evidenceFileMissing = (uri: string, role: string): AdapterError =>
+  new AdapterError(
+    'EVIDENCE_FILE_MISSING',
+    `声明的证据文件不存在：${uri}（角色 ${role}）`,
+    false,
+    `evidence-file-missing:${role}`,
+  )
+
+const resolveEvidencePath = async (workDir: string, uri: string, role: string): Promise<string> => {
+  const logicalRoot = resolve(workDir)
+  const physicalRoot = await realpath(workDir)
+  const candidate = isAbsolute(uri) ? resolve(uri) : resolve(logicalRoot, uri)
+
+  if (!isPathInside(logicalRoot, candidate) && !isPathInside(physicalRoot, candidate)) {
+    throw evidenceOutsideWorktree(uri)
+  }
+
+  let physicalCandidate: string
+  try {
+    physicalCandidate = await realpath(candidate)
+  } catch {
+    throw evidenceFileMissing(uri, role)
+  }
+
+  if (!isPathInside(physicalRoot, physicalCandidate)) {
+    throw evidenceOutsideWorktree(uri)
+  }
+  return physicalCandidate
+}
 
 const isRiskWithin = (required: RiskLevel, ceiling: RiskLevel): boolean =>
   RISK_ORDER.indexOf(required) <= RISK_ORDER.indexOf(ceiling)

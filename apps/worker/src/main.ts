@@ -65,9 +65,9 @@ const worker = await Worker.create({
     store,
     // 传给 codex 的是 OpenAI structured outputs 兼容子集，
     // 不是控制面校验账本用的严格 schema（见 ADR-0003）。
-    adapter: new CodexAdapter({
+    adapters: [new CodexAdapter({
       outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
-    }),
+    })],
     runnerId,
     workRoot,
   }),

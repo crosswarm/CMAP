@@ -166,8 +166,8 @@
       "additionalProperties": false,
       "properties": {
         "assigned_role": { "type": "string" },
-        "preferred_agent": { "type": "string" },
-        "fallback_agents": { "type": "array", "items": { "type": "string" } },
+        "preferred_agent": { "type": "string", "description": "首选 Agent ID；设置时只允许该 Agent 及显式 fallback_agents 候选，按声明顺序在启动前检查能力、风险上限和健康。" },
+        "fallback_agents": { "type": "array", "items": { "type": "string" }, "description": "显式替补 Agent ID。无首选时按此列表选择；均未设置时按 runner 注册顺序。任务启动后不得自动切换，后续操作严格使用已落账 binding.adapter。" },
         "model_policy": {
           "type": "object",
           "required": ["model", "effort", "source"],

@@ -124,7 +124,13 @@ export interface TaskEnvelopeV1 {
   }
   execution_policy: {
     assigned_role?: string
+    /**
+     * 首选 Agent ID；设置时只允许该 Agent 及显式 fallback_agents 候选，按声明顺序在启动前检查能力、风险上限和健康。
+     */
     preferred_agent?: string
+    /**
+     * 显式替补 Agent ID。无首选时按此列表选择；均未设置时按 runner 注册顺序。任务启动后不得自动切换，后续操作严格使用已落账 binding.adapter。
+     */
     fallback_agents?: string[]
     /**
      * 派发时解析出的模型与努力度快照。信封必须自洽——runner 不回查 Agent 注册表，因此携带的是解析后的最终值。

@@ -91,6 +91,8 @@ export interface ActivityDeps {
    * 一条「任务已 RUNNING」却根本没人干活的绿色轨迹。
    */
   readonly adapter?: AgentAdapter
+  /** 注册顺序是无显式首选时的稳定路由顺序；不能与 adapter 同时传入。 */
+  readonly adapters?: readonly AgentAdapter[]
   readonly runnerId?: string
   /**
    * 工作目录根。每个任务分一个子目录，避免并发任务互相污染。
@@ -186,18 +188,46 @@ export interface ApplyReviewOutput {
 
 export const createActivities = (deps: ActivityDeps) => {
   const { store, adapter, workRoot } = deps
+  if (adapter && deps.adapters) throw new Error('adapter 与 adapters 不能同时配置')
+  const adapters = deps.adapters ?? (adapter ? [adapter] : [])
+  if (new Set(adapters.map((a) => a.adapterId)).size !== adapters.length ||
+      new Set(adapters.map((a) => a.agentId)).size !== adapters.length) {
+    throw new Error('Adapter / Agent ID 重复')
+  }
   const runnerId = deps.runnerId ?? DEFAULT_RUNNER_ID
   const pollIntervalMs = deps.pollIntervalMs ?? 2_000
   const approvalPollIntervalMs = deps.approvalPollIntervalMs ?? 5_000
   const approvalWaitTimeoutMs = deps.approvalWaitTimeoutMs ?? 24 * 3600 * 1000
 
-  const requireAdapter = (): AgentAdapter => {
-    if (!adapter) {
-      throw new Error(
-        '未注入 Adapter：控制面没有可派发的目标。Worker 启动时须传入 adapter。',
-      )
+  const boundAdapter = (adapterId: string): AgentAdapter => {
+    const selected = adapters.find((a) => a.adapterId === adapterId)
+    if (!selected) throw new Error(`已绑定 Adapter 不可用：${adapterId}；不自动换 Agent`)
+    return selected
+  }
+
+  const selectAdapter = async (envelope: TaskEnvelopeV1): Promise<AgentAdapter> => {
+    if (!adapters.length) throw new Error('未注入 Adapter：控制面没有可派发的目标')
+    const policy = envelope.execution_policy
+    const ids = [...(policy.preferred_agent ? [policy.preferred_agent] : []), ...(policy.fallback_agents ?? [])]
+    const candidates = ids.length
+      ? [...new Set(ids)].flatMap((id) => adapters.filter((a) => a.agentId === id))
+      : adapters
+    const risks = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
+    for (const candidate of candidates) {
+      try {
+        const descriptor = await candidate.discover()
+        if (descriptor.adapter_id !== candidate.adapterId || descriptor.agent_id !== candidate.agentId) continue
+        if (!descriptor.capabilities.includes(envelope.classification.requested_capability)) continue
+        const required = risks.indexOf(envelope.classification.risk_level)
+        const ceiling = risks.indexOf(descriptor.risk_ceiling)
+        if (required < 0 || ceiling < required) continue
+        if ((await candidate.health()).state !== 'healthy') continue
+        return candidate
+      } catch {
+        // 仅启动前探测允许转向下一候选；startTask 的不确定结果不得触发替补。
+      }
     }
-    return adapter
+    throw new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`)
   }
 
   let seq = 0
@@ -353,12 +383,14 @@ export const createActivities = (deps: ActivityDeps) => {
         return { dispatched: false, remoteTaskId: existing.binding.remote_task_id }
       }
 
+      const envelope = existing.envelope as TaskEnvelopeV1
+      const selectedAdapter = await selectAdapter(envelope)
+
       await store.transitionTask({
         taskId, to: 'QUEUED', actor: ACTOR,
         eventType: 'TASK_ASSIGNED', idempotencyKey: `queued:${taskId}`,
       })
 
-      const envelope = existing.envelope as TaskEnvelopeV1
       const timeoutMs = (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
 
       // 工作目录由 runner 侧准备。不存在时 spawn 会直接失败，
@@ -366,7 +398,7 @@ export const createActivities = (deps: ActivityDeps) => {
       const worktree = workRoot ? join(workRoot, taskId) : null
       if (worktree) await mkdir(worktree, { recursive: true })
 
-      const binding = await requireAdapter().startTask(envelope, {
+      const binding = await selectedAdapter.startTask(envelope, {
         // P4 接入鉴权后换成短期、受众绑定的令牌。现在是本机单租户，
         // 但字段先占住位置，免得那时才发现调用方根本没有令牌可传。
         token: process.env['CMAP_RUNNER_TOKEN'] ?? 'local-dev-token',
@@ -376,6 +408,10 @@ export const createActivities = (deps: ActivityDeps) => {
         ...(worktree ? { worktree } : {}),
         deadline_at: new Date(Date.now() + timeoutMs).toISOString(),
       })
+
+      if (binding.adapter !== selectedAdapter.adapterId) {
+        throw new Error(`Adapter binding mismatch: selected ${selectedAdapter.adapterId}, got ${binding.adapter}`)
+      }
 
       // 先写库再返回：Activity 内部保证「调用与记录」不分离。
       // 顺序反过来的话，进程在这两步之间崩溃就会留下一个已在跑、
@@ -409,7 +445,7 @@ export const createActivities = (deps: ActivityDeps) => {
       if (t.result) return judge(envelope, t.result)
 
       if (!t.binding) throw new Error(`任务 ${taskId} 尚未派发，无结果可收`)
-      const a = requireAdapter()
+      const a = boundAdapter(t.binding.adapter)
 
       const waitMs =
         deps.waitTimeoutMs ?? (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
