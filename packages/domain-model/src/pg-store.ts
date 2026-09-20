@@ -49,6 +49,7 @@ import type {
 } from './store.ts'
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
+import { assertSameMissionInput } from './mission-input.ts'
 import {
   ArtifactConflictError,
   ConcurrentModificationError,
@@ -297,20 +298,31 @@ export class PgStore implements Store {
   async createMission(input: CreateMissionInput): Promise<Mission> {
     const m = input.mission
     return this.#tx(async (c) => {
-      await c.query(
+      const inserted = await c.query(
         `INSERT INTO missions (id, tenant, owner, type, goal, constraints, acceptance,
                                workflow_template, state, revision, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING *`,
         [
           m.id, m.tenant, m.owner, m.type, m.goal,
           JSON.stringify(m.constraints), JSON.stringify(m.acceptance),
           m.workflow_template, m.state, m.revision, m.created_at, m.updated_at,
         ],
       )
+      if (inserted.rowCount === 0) {
+        const { rows } = await c.query('SELECT * FROM missions WHERE id = $1 FOR UPDATE', [m.id])
+        if (rows.length !== 1) {
+          throw new WriteVerificationError('Mission', m.id, '冲突后回读为空')
+        }
+        const existing = toMission(rows[0] as Record<string, unknown>)
+        assertSameMissionInput(existing, m)
+        return existing
+      }
+
       await this.#insertEvent(c, {
         missionId: m.id, taskId: null, type: 'MISSION_CREATED',
         actor: input.actor, idempotencyKey: `mission-created:${m.id}`,
-        payload: { goal: m.goal },
       })
 
       // 写入即回读校验，且在同一事务内——出问题整体回滚

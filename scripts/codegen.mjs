@@ -24,6 +24,8 @@ const schemaDir = join(root, 'schemas')
 const outDir = join(root, 'packages/domain-model/src/generated')
 
 const TARGETS = [
+  { schema: 'mission-create.v1.schema.json', out: 'mission-create.ts' },
+  { schema: 'mission-submission.v1.schema.json', out: 'mission-submission.ts' },
   { schema: 'approval-decision-input.v1.schema.json', out: 'approval-decision-input.ts' },
   { schema: 'approval-context.v1.schema.json', out: 'approval-context.ts' },
   { schema: 'approval-advice.v1.schema.json', out: 'approval-advice.ts' },
@@ -48,6 +50,7 @@ for (const { schema: schemaFile, out } of TARGETS) {
     : ''
 
   const ts = await compile(structural, structural.title ?? out, {
+    cwd: schemaDir,
     bannerComment: `/* eslint-disable */
 /**
  * 本文件由 schemas/${schemaFile} 自动生成，请勿手改。

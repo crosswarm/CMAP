@@ -26,6 +26,7 @@ import {
   ConcurrentModificationError,
   LockUnavailableError,
 } from '#domain-model'
+import { MissionConflictError } from '../../packages/domain-model/src/mission-input.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test-runner' }
 const T0 = '2026-08-02T00:00:00.000Z'
@@ -283,6 +284,50 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
         const events = await s.listEvents('mis-1')
         assert.ok(events.some((e) => e.event_type === 'MISSION_CREATED'))
+        assert.equal(events.find((e) => e.event_type === 'MISSION_CREATED')?.payload['goal'], undefined)
+      })
+
+      test('同一 Mission 创建请求语义相同则幂等返回既有记录且不重复写事件', async () => {
+        const s = await createStore()
+        const first = {
+          ...mission('mis-1'),
+          constraints: { a: true, b: { x: 1, y: 2 } },
+        }
+        await s.createMission({ mission: first, actor: ACTOR })
+        await s.setMissionState('mis-1', 'RUNNING', ACTOR)
+        const existing = await s.getMission('mis-1')
+        const before = await s.listEvents('mis-1')
+
+        const again = await s.createMission({
+          mission: {
+            ...first,
+            constraints: { b: { y: 2, x: 1 }, a: true },
+            state: 'DRAFT',
+            revision: 99,
+            created_at: '2026-08-03T00:00:00.000Z',
+            updated_at: '2026-08-03T00:00:00.000Z',
+          },
+          actor: ACTOR,
+        })
+
+        assert.equal(again.state, 'RUNNING')
+        assert.equal(again.revision, 1)
+        assert.equal(again.updated_at, existing?.updated_at)
+        assert.equal((await s.listEvents('mis-1')).length, before.length)
+      })
+
+      test('同一 Mission 创建请求语义不同则冲突且不覆盖既有记录', async () => {
+        const s = await createStore()
+        const first = mission('mis-1')
+        await s.createMission({ mission: first, actor: ACTOR })
+        const before = await s.listEvents('mis-1')
+
+        await assert.rejects(
+          () => s.createMission({ mission: { ...first, goal: '换一个目标' }, actor: ACTOR }),
+          MissionConflictError,
+        )
+        assert.equal((await s.getMission('mis-1'))?.goal, first.goal)
+        assert.equal((await s.listEvents('mis-1')).length, before.length)
       })
 
       test('按 tenant 查询 Mission，包含还没有 Task 的 Mission 并隔离其他租户', async () => {

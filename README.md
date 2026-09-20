@@ -57,6 +57,35 @@ node scripts/e2e-approval.mjs
 两个进程都会幂等建表，空库首次启动即可用。环境变量见 `.env.example`，
 存在 `.env` 时自动加载。
 
+### 创建 Mission
+
+本机 `POST /v1/missions` 接受 JSON；`tenant` 与 `owner` 由 API 配置填写，
+分别来自 `CMAP_TENANT` 和 `CMAP_OWNER`（后者默认 `local-operator`，不是 OIDC 身份）。
+
+```json
+{
+  "request_id": "local-inspect-001",
+  "goal": "在沙箱中创建 3 个 sample 文本文件，统计数量并写入 evidence/report.json。",
+  "acceptance": [{ "criterion_id": "FILE-COUNT", "metric": "sample_file_count", "operator": "eq", "expected": 3 }],
+  "risk_level": "read-meta",
+  "max_additional_cycles": 0
+}
+```
+
+返回 202 和 `mission_id`、`workflow_id`，表示接收，不表示完成。
+相同请求键与字段内容可重试；改变目标或约束返回 409。启动 Workflow 暂时失败时
+返回 503，但账本保留同一 Mission，使用**原 request_id**重试即可恢复。
+运行中请求复用 Workflow，已结束的 Mission 不重新启动；新目标使用新请求键。
+`controlled`/`mutating` 仍分别进入审批闸口。
+
+写入要求同源或本机 CLI、`application/json`、请求体不超过 64KiB；
+跨来源网页及非本机 Host 均拒绝。当前仍只允许本机使用，不具备多人身份认证。
+创建接口启动既有 `inspect/v1` 流程，尚不执行自动 DAG 规划。
+
+真实创建链路验证：给 API、Worker 和验证脚本配置相同的独立 `CMAP_DB_SCHEMA`、
+`TEMPORAL_TASK_QUEUE`、`CMAP_WORK_ROOT`、`CMAP_OWNER`，然后运行
+`node scripts/e2e-mission-create.mjs`（会实际调用 Codex；不允许使用 public schema）。
+
 ## 状态
 
 P0（契约层 + 单跳闭环）、P1（任务账本 + Workflow + 自动返工闭环）已完成。

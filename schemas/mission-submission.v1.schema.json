@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/mission-submission/v1",
+  "title": "Mission Submission v1",
+  "description": "POST /v1/missions 的 202 响应。accepted 表示 Workflow 已接收（或此请求此前已被接收），不代表开始执行或完成。后续读取 Mission/SSE；相同请求键永不重跑已结束的 Mission。",
+  "type": "object", "additionalProperties": false,
+  "required": ["accepted", "mission_id", "workflow_id"],
+  "properties": {
+    "accepted": { "type": "boolean", "const": true },
+    "mission_id": { "type": "string", "minLength": 1 },
+    "workflow_id": { "type": "string", "minLength": 1 }
+  }
+}

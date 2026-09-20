@@ -192,6 +192,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 资源锁接入 Workflow（含续租与失锁自停） | ✅ P1 |
 | 自动返工闭环（两道刹车 + 端到端验证） | ✅ P1 |
 | 控制面 REST API（租户过滤 + 双 scope 审批，无任务 Mission 也可见） | ✅ P2 |
+| Mission 创建 API（目标/验收/风险/预算 → 既有 Workflow） | ✅ P2，幂等请求键、启动失败原键重试、真实 API → Codex 验证；不是 DAG Planner |
 | 进程入口（`npm run start:worker` / `start:api`） | ✅ P2 |
 | Workflow 派发接真实 Adapter（codex 真执行） | ✅ P2，实测一次 Mission 无人值守跑完 102s |
 | 任务结果与证据落账本（`setTaskResult` + Artifact 入库） | ✅ P2 |
@@ -215,6 +216,12 @@ codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独�
 两个进程入口（`apps/worker/src/main.ts`、`apps/control-plane-api/src/main.ts`）
 只做接线：Store 换成 PgStore、生命周期接信号，Workflow 与 Activity 与测试里
 跑的是同一套。验证方式是实际启停一次并跑真实 Mission，不看进程是否存活。
+
+`POST /v1/missions` 先写账本，再按固定 Workflow ID 启动；无法确认启动时返回 503，
+客户端用原键恢复。Mission ID 由 tenant/owner/request_id 的哈希派生，语义输入不符则 409。
+Store 重试不覆盖状态、时间或已写事件；Temporal 对运行实例 USE_EXISTING、对关闭历史
+REJECT_DUPLICATE。账本已离开 DRAFT 时不再次启动。输入契约复用派发验收定义，
+创建事件不再携带目标正文。API 只接受本机 Host，并对所有 POST 校验来源、JSON 类型及大小。
 
 返工闭环已接进主 Workflow：验收不过 → 硬门槛判定产出 `review-decision` →
 派生后继任务 → 再跑一轮，直到通过，或两道刹车之一触发（轮次耗尽 / 判定无进展）

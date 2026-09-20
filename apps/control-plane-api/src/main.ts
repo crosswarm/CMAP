@@ -12,13 +12,16 @@
 // 永远等不到有效响应（静默挂起）。
 process.env['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
+process.env['grpc_proxy'] = ''
 
 import { PgStore } from '#domain-model'
+import { Client, Connection, WorkflowExecutionAlreadyStartedError } from '@temporalio/client'
 
 import { createControlPlane } from './server.ts'
 
 const port = Number(process.env['CMAP_API_PORT'] ?? 8787)
 const tenant = process.env['CMAP_TENANT'] ?? process.env['RUNNER_TENANT'] ?? 'team-ycc'
+const owner = process.env['CMAP_OWNER'] ?? 'local-operator'
 const connectionString =
   process.env['CMAP_DATABASE_URL'] ?? 'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
@@ -27,16 +30,40 @@ const store = new PgStore({ connectionString, schema })
 // 幂等建表：与 Worker 用同一套 schema，谁先起都能把表建好。
 await store.migrate()
 
-const server = await createControlPlane({ store, tenant })
+let temporal: Promise<Connection> | undefined
+const getTemporal = () => temporal ??= Connection.connect({
+  address: process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233', connectTimeout: 5000,
+}).catch((error: unknown) => { temporal = undefined; throw error })
+
+const server = await createControlPlane({
+  store, tenant, owner,
+  startMission: async (missionId, workflowId) => {
+    const connection = await getTemporal()
+    const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
+    try {
+      await connection.withDeadline(Date.now() + 15_000, () => client.workflow.start('missionWorkflow', {
+        workflowId, taskQueue: process.env['TEMPORAL_TASK_QUEUE'] ?? 'cmap-main',
+        args: [{ missionId }], workflowIdReusePolicy: 'REJECT_DUPLICATE', workflowIdConflictPolicy: 'USE_EXISTING',
+      }))
+    } catch (error) {
+      // 同请求的关闭历史也不得启动新 run；网络/服务错误则由 API 返回 503 供原键重试。
+      if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error
+    }
+  },
+})
 await server.listen(port)
 
 // 租户打进日志：跨租户请求一律 404，配错时症状是「什么都查不到」，
 // 不打出来会被当成数据没写进去。
 console.log(`控制面 API 就绪：http://127.0.0.1:${port}/v1/health tenant=${tenant} db.schema=${schema}`)
 
+let stopping = false
 const stop = (): void => {
+  if (stopping) return
+  stopping = true
   void (async () => {
     await server.close()
+    await temporal?.then((connection) => connection.close(), () => {})
     await store.close()
   })()
 }

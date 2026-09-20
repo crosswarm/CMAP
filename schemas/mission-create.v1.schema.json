@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/mission-create.v1.schema.json",
+  "title": "Mission Create v1",
+  "description": "本机 POST /v1/missions 请求。request_id 为客户端重试键；控制面按 tenant/owner/request_id 派生 Mission ID。相同键和语义输入幂等，修改目标/约束返回 409。先入账本再启动 Workflow；启动失败返回 503，客户端使用原键重试恢复，不能更换键重建。只接受 JSON（最多 64KiB），跨来源浏览器写入拒绝。tenant/owner/state/id 不接受调用方自述。本阶段启动既有 inspect/v1 单任务返工流程，不宣称 DAG 规划已实现。",
+  "type": "object",
+  "required": ["request_id", "goal", "acceptance", "risk_level"],
+  "additionalProperties": false,
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{8,128}$" },
+    "goal": { "type": "string", "minLength": 1, "maxLength": 6000, "pattern": "\\S" },
+    "acceptance": {
+      "type": "array", "minItems": 1, "maxItems": 50,
+      "description": "criterion_id 必须互异；复用派发契约的验收标准定义。",
+      "items": { "$ref": "task-envelope.v1.schema.json#/properties/goal/properties/success_definition/items" }
+    },
+    "risk_level": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] },
+    "max_additional_cycles": { "type": "integer", "minimum": 0, "maximum": 10, "default": 2 }
+  }
+}

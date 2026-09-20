@@ -129,6 +129,8 @@ export const findSecretsByFile = (patch) =>
  * 完整比对由 `npm run codegen && git diff --exit-code` 承担。
  */
 const GENERATED_MAP = [
+  { schema: 'mission-create.v1.schema.json', generated: 'mission-create.ts' },
+  { schema: 'mission-submission.v1.schema.json', generated: 'mission-submission.ts' },
   { schema: 'approval-decision-input.v1.schema.json', generated: 'approval-decision-input.ts' },
   { schema: 'approval-context.v1.schema.json', generated: 'approval-context.ts' },
   { schema: 'approval-advice.v1.schema.json', generated: 'approval-advice.ts' },

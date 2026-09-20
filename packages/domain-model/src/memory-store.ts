@@ -36,6 +36,7 @@ import type {
 } from './store.ts'
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
+import { assertSameMissionInput } from './mission-input.ts'
 import {
   ArtifactConflictError,
   ConcurrentModificationError,
@@ -117,10 +118,14 @@ export class MemoryStore implements Store {
 
   async createMission(input: CreateMissionInput): Promise<Mission> {
     const m = { ...input.mission }
+    const existing = this.#missions.get(m.id)
+    if (existing) {
+      assertSameMissionInput(existing, m)
+      return existing
+    }
+
     this.#missions.set(m.id, m)
-    this.#record(m.id, null, 'MISSION_CREATED', input.actor, `mission-created:${m.id}`, {
-      goal: m.goal,
-    })
+    this.#record(m.id, null, 'MISSION_CREATED', input.actor, `mission-created:${m.id}`)
 
     // 写入即回读校验：不信写入本身
     const back = this.#missions.get(m.id)

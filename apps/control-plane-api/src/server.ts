@@ -1,8 +1,7 @@
 /**
  * 控制面 REST API。
  *
- * 用 Node 内置 http，不引框架——路由规模小，加一个框架换不来等值的收益，
- * 而项目目前只有一个运行时依赖（pg），这份克制值得保持。
+ * 用 Node 内置 http 处理路由，输入校验复用已有 Ajv 与 Schema。
  *
  * 两条贯穿全局的规则：
  *  1. **租户过滤是默认行为**，不是可选参数。跨租户请求一律 404，不返回 403——
@@ -16,13 +15,19 @@ import type { AddressInfo } from 'node:net'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 
-import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError } from '#domain-model'
+import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError } from '#domain-model'
 import type { Store, Approval, ApprovalScope, MissionEventV1 } from '#domain-model'
+import { missionFromRequest } from './mission-submission.ts'
+import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/generated/mission-submission.ts'
 
 export interface ControlPlaneOptions {
   readonly store: Store
   /** 当前请求上下文的租户。P4 接入鉴权后改为从令牌解析。 */
   readonly tenant: string
+  /** P2 本机操作人配置。不是 OIDC 身份，也不接受浏览器填写。 */
+  readonly owner?: string
+  /** 必须按 workflowId 幂等启动，运行中与已关闭的 Workflow 均不得重复。 */
+  readonly startMission?: (missionId: string, workflowId: string) => Promise<void>
 }
 
 interface Ctx {
@@ -32,6 +37,7 @@ interface Ctx {
   readonly store: Store
   readonly tenant: string
   readonly shutdown: AbortSignal
+  readonly config: ControlPlaneOptions
 }
 
 type Handler = (ctx: Ctx) => Promise<void>
@@ -57,16 +63,27 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
 const fail = (res: ServerResponse, status: number, error: string): void =>
   json(res, status, { error })
 
-const readBody = async (req: IncomingMessage): Promise<unknown> => {
-  const chunks: Buffer[] = []
-  for await (const c of req) chunks.push(c as Buffer)
-  if (chunks.length === 0) return {}
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } catch {
-    return null // 交给调用方判定为 400
-  }
-}
+class PayloadTooLargeError extends Error {}
+
+const readBody = (req: IncomingMessage): Promise<unknown> => new Promise((resolve, reject) => {
+  let chunks: Buffer[] | null = []
+  let size = 0
+  req.on('data', (chunk: Buffer) => {
+    if (chunks === null) return
+    size += chunk.length
+    if (size > 64 * 1024) {
+      chunks = null
+      reject(new PayloadTooLargeError('请求体超过 64KiB'))
+    } else chunks?.push(chunk)
+  })
+  req.once('error', reject)
+  req.once('aborted', () => reject(new Error('请求已断开')))
+  req.once('end', () => {
+    if (chunks === null) return
+    try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}) }
+    catch { resolve(null) }
+  })
+})
 
 // -------------------------------------------------------------- 路由匹配
 
@@ -172,6 +189,36 @@ const streamMissionEvents: Handler = async (ctx) => {
 }
 
 const routes: readonly Route[] = [
+  {
+    method: 'POST', pattern: '/v1/missions',
+    handler: async (ctx) => {
+      const { owner, startMission } = ctx.config
+      if (!owner?.trim() || !startMission) return fail(ctx.res, 503, 'Mission 创建入口未配置')
+      let mission
+      try {
+        mission = missionFromRequest(await readBody(ctx.req), ctx.tenant, owner)
+      } catch (error) {
+        if (error instanceof RangeError) return fail(ctx.res, 400, error.message)
+        throw error
+      }
+      let saved
+      try {
+        saved = await ctx.store.createMission({ mission, actor: { type: 'system', id: 'control-plane-api' } })
+      } catch (error) {
+        if (error instanceof MissionConflictError) return fail(ctx.res, 409, error.message)
+        throw error
+      }
+      const result: MissionSubmissionV1 = { accepted: true, mission_id: saved.id, workflow_id: `mission-${saved.id}` }
+      if (saved.state === 'DRAFT') {
+        try { await startMission(saved.id, result.workflow_id) }
+        catch {
+          json(ctx.res, 503, { error: 'Workflow 启动未确认，请使用原 request_id 重试', mission_id: saved.id })
+          return
+        }
+      }
+      json(ctx.res, 202, result)
+    },
+  },
   { method: 'GET', pattern: '/v1/missions/:id/events', handler: streamMissionEvents },
   {
     method: 'GET',
@@ -316,6 +363,20 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
   const server = createServer((req, res) => {
     void (async () => {
       try {
+        const port = (server.address() as AddressInfo).port
+        const host = req.headers.host
+        if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+          return fail(res, 403, '仅接受本机 Host')
+        }
+        if (req.method === 'POST') {
+          const origin = req.headers.origin
+          if ((origin && origin !== `http://${host}`) || req.headers['sec-fetch-site'] === 'cross-site') {
+            return fail(res, 403, '跨来源写入被拒绝')
+          }
+          if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
+            return fail(res, 415, '写入必须使用 application/json')
+          }
+        }
         const url = new URL(req.url ?? '/', 'http://localhost')
         const hit = matchRoute(routes, req.method ?? 'GET', url.pathname)
 
@@ -325,8 +386,14 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
           req, res, params: hit.params,
           store: opts.store, tenant: opts.tenant,
           shutdown: shutdown.signal,
+          config: opts,
         })
       } catch (e) {
+        if (res.destroyed) return
+        if (e instanceof PayloadTooLargeError) {
+          res.shouldKeepAlive = false
+          return fail(res, 413, e.message)
+        }
         // 未预期的异常也必须返回 JSON——前端按 JSON 解析，
         // 返回 HTML 或空响应会变成解析异常而非清晰报错。
         if (!res.headersSent) fail(res, 500, `内部错误：${(e as Error).message}`)
