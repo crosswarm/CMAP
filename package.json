@@ -28,7 +28,8 @@
     "test:api": "node --test --test-concurrency=1 tests/api/*.test.ts",
     "user-stories:verify": "node scripts/verify-user-stories.mjs",
     "start:web": "vite --config apps/web/vite.config.ts",
-    "build:web": "tsc -p tsconfig.web.json --noEmit && vite build --config apps/web/vite.config.ts"
+    "build:web": "tsc -p tsconfig.web.json --noEmit && vite build --config apps/web/vite.config.ts",
+    "probe:yonwork": "node scripts/probe-yonwork.mjs"
   },
   "devDependencies": {
     "@temporalio/activity": "^1.21.1",

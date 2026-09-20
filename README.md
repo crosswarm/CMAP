@@ -34,6 +34,7 @@ Temporal（持久化工作流引擎）+ PostgreSQL（任务账本）+ S3 兼容�
 - `docs/architecture.md` — 落地版架构
 - `docs/threat-model.md` — 威胁模型（多人多机跨公网 = 远程代码执行平台）
 - `docs/adr/` — 架构决策记录
+- [YonWork Host 诊断](docs/verification-yonwork-2026-09-21.md) — `npm run probe:yonwork`，只读传输状态
 - [Jev 决策辅助](docs/approval-advisor.md) — 工具调用与业务审批的独立建议，保留实际授权来源
 
 ## 本地运行

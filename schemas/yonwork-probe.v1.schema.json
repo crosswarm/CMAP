@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/yonwork-probe/v1",
+  "title": "YonWork Probe v1",
+  "description": "Sanitized transport-only observations from the YonWork CLI adapter. This is not a business health assertion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "observation_scope", "availability", "cli_version", "host_state", "gateway_state", "registry_state", "runtime_source", "override_present", "probes"],
+  "properties": {
+    "schema": { "const": "cmap/yonwork-probe/v1" },
+    "observation_scope": { "const": "transport_only" },
+    "availability": { "enum": ["available", "unavailable", "blocked", "error"] },
+    "cli_version": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+    "host_state": { "enum": ["running", "not-running", "auth-failed", "timeout", "blocked", "unknown"] },
+    "gateway_state": { "enum": ["reachable", "not-running", "auth-failed", "timeout", "blocked", "unknown"] },
+    "registry_state": { "enum": ["reported", "not-running", "auth-failed", "timeout", "blocked", "unknown"] },
+    "runtime_source": { "enum": ["explicit", "environment", "yonwork", "yonclaw", "platform_default"] },
+    "override_present": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_api_url", "host_api_token"],
+      "properties": {
+        "host_api_url": { "type": "boolean" },
+        "host_api_token": { "type": "boolean" }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bridge": { "$ref": "#/$defs/probe" },
+        "routes": { "$ref": "#/$defs/probe" },
+        "status": { "$ref": "#/$defs/probe" },
+        "gateway_status": { "$ref": "#/$defs/probe" },
+        "gateway_health": { "$ref": "#/$defs/probe" },
+        "skill_registry_status": { "$ref": "#/$defs/probe" }
+      }
+    }
+  },
+  "$defs": {
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "error", "hash"],
+      "properties": {
+        "code": { "type": ["integer", "null"], "minimum": 0 },
+        "error": { "type": ["string", "null"], "enum": ["cli-usage", "host-api-auth", "host-resource-not-found", "host-protocol-or-response", "command-timeout", "host-runtime-not-running", "cli-execution-error", "cli-spawn-error", "host-api-override-detected", "bridge-timeout", "bridge-error", "invalid-json", "unknown", null] },
+        "hash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}
