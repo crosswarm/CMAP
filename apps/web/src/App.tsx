@@ -12,6 +12,7 @@ import type {
 import { request, post } from './api.ts'
 import {
   acceptanceRows,
+  dagNodeRows,
   needsAction,
   missionDisplayState,
   operatorLabels,
@@ -236,6 +237,9 @@ export default function App() {
   )
   const rows = selected
     ? acceptanceRows(selected.mission, selected.tasks, selected.reviews)
+    : []
+  const dagRows = selected
+    ? dagNodeRows(selected.mission, selected.tasks, selected.reviews)
     : []
   const openApproval = (value: Approval) =>
     setModal({ type: 'approval', value })
@@ -676,6 +680,11 @@ export default function App() {
                               <span className="cell-note">
                                 {row.criterion.metric}
                               </span>
+                              {'nodeId' in row && typeof row.nodeId === 'string' && row.nodeId && (
+                                <span className="cell-note">
+                                  节点 {row.nodeId}
+                                </span>
+                              )}
                             </td>
                             <td>
                               {operatorLabels[row.criterion.operator]}{' '}
@@ -719,6 +728,48 @@ export default function App() {
                     </table>
                   </div>
                 </section>
+                {dagRows.length > 0 && (
+                  <section className="panel">
+                    <div className="section-title">
+                      <h2>DAG 节点</h2>
+                      <span className="muted">按计划节点归集任务与依赖</span>
+                    </div>
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>节点</th>
+                            <th>依赖</th>
+                            <th>状态</th>
+                            <th>尝试</th>
+                            <th>执行端</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {dagRows.map((row) => (
+                            <tr key={row.nodeId}>
+                              <td>
+                                <strong>{row.nodeId}</strong>
+                                <span className="cell-note">{row.goal}</span>
+                              </td>
+                              <td>{row.deps.length ? row.deps.join('、') : '—'}</td>
+                              <td><Badge state={row.status} /></td>
+                              <td>
+                                {row.attempt ? `第 ${row.attempt} 轮` : '尚未生成'}
+                                {row.taskId && (
+                                  <span className="cell-note identifier">
+                                    {row.taskId}
+                                  </span>
+                                )}
+                              </td>
+                              <td>{row.agent}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
                 <section className="panel">
                   <div className="section-title">
                     <h2>当前执行</h2>

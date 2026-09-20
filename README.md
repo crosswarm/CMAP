@@ -82,7 +82,8 @@ node scripts/e2e-approval.mjs
 
 写入要求同源或本机 CLI、`application/json`、请求体不超过 64KiB；
 跨来源网页及非本机 Host 均拒绝。当前仍只允许本机使用，不具备多人身份认证。
-创建接口启动既有 `inspect/v1` 流程，尚不执行自动 DAG 规划。
+不带 `plan` 的请求启动既有 `inspect/v1`；带显式计划则校验后启动 `dag/v1`。
+计划契约见 [mission-plan](schemas/mission-plan.v1.schema.json)，尚不自动生成自然语言计划。
 
 真实创建链路验证：给 API、Worker 和验证脚本配置相同的独立 `CMAP_DB_SCHEMA`、
 `TEMPORAL_TASK_QUEUE`、`CMAP_WORK_ROOT`、`CMAP_OWNER`，然后运行
@@ -98,7 +99,8 @@ P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发�
 批准，错 scope 不放行。Mission 列表包含尚无任务的记录，SSE 事件流支持实时推送与断线历史回放。
 WebUI 已接入目标创建、验收账本、证据预览、返工追踪、独立 scope 审批和 Jev 建议。
 启动后打开 http://127.0.0.1:8787；开发前端可用 `npm run start:web`（仍需 API）。
-当前只覆盖本机 inspect/v1；本机 Kimi Adapter 已接入（[运行说明](docs/kimi-adapter.md)）；DAG、YonWork Adapter、OIDC 与远程 runner 尚未完成。
+本机支持 inspect/v1 与显式 dag/v1；Codex＋Kimi 分叉汇合的真实执行、产物传递和历史重放已验证（[DAG 验证](docs/verification-dag-2026-09-21.md)）。
+本机 Kimi Adapter 见[运行说明](docs/kimi-adapter.md)；自然语言 Planner、YonWork Adapter、OIDC 与远程 runner 尚未完成。
 验证见 [WebUI 交付记录](docs/verification-webui-2026-09-21.md)。
 逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。
 

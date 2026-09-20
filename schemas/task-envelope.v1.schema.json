@@ -16,6 +16,11 @@
       "properties": {
         "mission_id": { "type": "string", "minLength": 1 },
         "task_id": { "type": "string", "minLength": 1 },
+        "plan_node_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+          "description": "DAG Mission 中的逻辑节点标识。物理 Task/Review ID 仍由控制面派生。"
+        },
         "parent_task_id": { "type": ["string", "null"] },
         "supersedes_task_id": {
           "type": ["string", "null"],

@@ -28,6 +28,7 @@ import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { parseAdapterNames } from './adapter-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
+import { createDagActivities } from '../../../workflows/dag-activities.ts'
 
 const address = process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233'
 const namespace = process.env['TEMPORAL_NAMESPACE'] ?? 'default'
@@ -72,15 +73,23 @@ const worker = await Worker.create({
   connection,
   namespace,
   taskQueue,
-  workflowsPath: join(repoRoot, 'workflows/mission.workflow.ts'),
-  activities: createActivities({
-    store,
-    // 传给 codex 的是 OpenAI structured outputs 兼容子集，
-    // 不是控制面校验账本用的严格 schema（见 ADR-0003）。
-    adapters,
-    runnerId,
-    workRoot,
-  }),
+  workflowsPath: join(repoRoot, 'workflows/index.ts'),
+  activities: {
+    ...createActivities({
+      store,
+      // 传给 codex 的是 OpenAI structured outputs 兼容子集，
+      // 不是控制面校验账本用的严格 schema（见 ADR-0003）。
+      adapters,
+      runnerId,
+      workRoot,
+    }),
+    ...createDagActivities({
+      store,
+      adapters,
+      runnerId,
+      workRoot,
+    }),
+  },
 })
 
 // shutdown 让 worker.run() 正常返回，正在执行的 Activity 得以收尾；

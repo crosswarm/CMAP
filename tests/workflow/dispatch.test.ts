@@ -10,7 +10,7 @@ import { test, describe, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { MemoryStore } from '#domain-model'
-import type { Mission, RemoteTaskBinding, Store, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
+import type { Artifact, Mission, RemoteTaskBinding, Store, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter } from './fake-adapter.ts'
@@ -75,6 +75,34 @@ class TerminalTaskCollectErrorAdapter extends FakeAdapter {
       false,
       this.#code.toLowerCase().replace('_', '-'),
     )
+  }
+}
+
+class CountingAdapter extends FakeAdapter {
+  statusCalls = 0
+  collectCalls = 0
+
+  override async getStatus(binding?: RemoteTaskBinding) {
+    void binding
+    this.statusCalls += 1
+    return super.getStatus()
+  }
+
+  override async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
+    this.collectCalls += 1
+    return super.collectResult(binding)
+  }
+}
+
+class FailingArtifactStore extends MemoryStore {
+  failPutArtifactOnce = true
+
+  override async putArtifact(a: Artifact): Promise<Artifact> {
+    if (this.failPutArtifactOnce) {
+      this.failPutArtifactOnce = false
+      throw new Error('putArtifact failed once')
+    }
+    return super.putArtifact(a)
   }
 }
 
@@ -163,6 +191,30 @@ describe('派发真的调用 Adapter', () => {
     assert.equal(ctx?.runner_id, 'runner-test')
     assert.ok(ctx && Date.parse(ctx.deadline_at) > Date.now(), '截止时间必须是将来的时刻')
   })
+
+  test('等待资源解除后可直接派发，不回退到 QUEUED', async () => {
+    const taskId = await startTask()
+    await store.transitionTask({
+      taskId,
+      to: 'QUEUED',
+      actor: ACTOR,
+      eventType: 'TASK_ASSIGNED',
+      idempotencyKey: `queued-before-waiting:${taskId}`,
+    })
+    await store.transitionTask({
+      taskId,
+      to: 'WAITING_RESOURCE',
+      actor: ACTOR,
+      eventType: 'RESOURCE_LOCK_REQUESTED',
+      idempotencyKey: `waiting-before-dispatch:${taskId}`,
+    })
+
+    const out = await acts.dispatchTask(taskId)
+
+    assert.equal(out.dispatched, true)
+    assert.equal(adapter.startCalls.length, 1)
+    assert.equal((await store.getTask(taskId))?.state, 'RUNNING')
+  })
 })
 
 describe('收结果并落账本', () => {
@@ -238,6 +290,39 @@ describe('收结果并落账本', () => {
     await newActs().collectTaskResult(taskId)
 
     assert.equal((await store.listArtifacts(taskId)).length, 1)
+  })
+
+  test('结果已缓存但证据落库失败时，重试只修复 registry，不重跑 Adapter', async () => {
+    store = new FailingArtifactStore()
+    const counting = new CountingAdapter()
+    adapter = counting
+    acts = newActs()
+    await store.createMission({ mission: mission('mis-1'), actor: ACTOR })
+    const taskId = await startTask()
+    await acts.dispatchTask(taskId)
+
+    await assert.rejects(
+      () => acts.collectTaskResult(taskId),
+      /putArtifact failed once/,
+    )
+    const cached = await store.getTask(taskId)
+    assert.equal(cached?.result?.artifacts[0]?.artifact_id, `${taskId}:report`)
+    assert.equal((await store.listArtifacts(taskId)).length, 0)
+    const statusCalls = counting.statusCalls
+    const collectCalls = counting.collectCalls
+
+    const out = await acts.collectTaskResult(taskId)
+
+    assert.equal(out.passed, true)
+    assert.equal(counting.statusCalls, statusCalls, '缓存结果修复不得重新轮询 Adapter')
+    assert.equal(counting.collectCalls, collectCalls, '缓存结果修复不得重新 collect Adapter')
+    const artifacts = await store.listArtifacts(taskId)
+    assert.equal(artifacts.length, 1)
+    assert.equal(artifacts[0]?.artifact_id, `${taskId}:report`)
+    assert.equal(
+      (await store.getTask(taskId))?.result?.criterion_results[0]?.evidence_artifact_ids?.[0],
+      `${taskId}:report`,
+    )
   })
 
   test('验收未通过时 passed 为 false，并列出失败标准', async () => {

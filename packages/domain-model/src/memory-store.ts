@@ -43,6 +43,8 @@ import {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  assertSameReviewInput,
+  assertSameTaskInput,
 } from './store.ts'
 
 const missionEventType = (state: MissionState): EventType => {
@@ -57,6 +59,9 @@ const missionEventType = (state: MissionState): EventType => {
       return 'MISSION_STATE_CHANGED'
   }
 }
+
+const cloneTask = (task: TaskRecord): TaskRecord => structuredClone(task) as TaskRecord
+const cloneReview = (review: Review): Review => structuredClone(review) as Review
 
 export class MemoryStore implements Store {
   readonly #missions = new Map<string, Mission>()
@@ -179,7 +184,13 @@ export class MemoryStore implements Store {
   // ------------------------------------------------------------- Task
 
   async createTask(input: CreateTaskInput): Promise<TaskRecord> {
-    const t = { ...input.task }
+    const t = cloneTask(input.task)
+    const existing = this.#tasks.get(t.id)
+    if (existing) {
+      assertSameTaskInput(existing, t)
+      return cloneTask(existing)
+    }
+
     this.#tasks.set(t.id, t)
     this.#record(
       t.mission_id, t.id, 'TASK_CREATED', input.actor,
@@ -191,11 +202,12 @@ export class MemoryStore implements Store {
     if (!back || back.id !== t.id) {
       throw new WriteVerificationError('Task', t.id, '回读为空或 id 不符')
     }
-    return back
+    return cloneTask(back)
   }
 
   async getTask(id: string): Promise<TaskRecord | null> {
-    return this.#tasks.get(id) ?? null
+    const task = this.#tasks.get(id)
+    return task ? cloneTask(task) : null
   }
 
   async transitionTask(input: TransitionTaskInput): Promise<TaskRecord> {
@@ -206,7 +218,7 @@ export class MemoryStore implements Store {
     if (this.#seenKeys.has(input.idempotencyKey)) {
       const existing = this.#tasks.get(input.taskId)
       if (!existing) throw new NotFoundError('Task', input.taskId)
-      return existing
+      return cloneTask(existing)
     }
 
     const t = this.#tasks.get(input.taskId)
@@ -238,35 +250,35 @@ export class MemoryStore implements Store {
     if (back?.state !== input.to) {
       throw new WriteVerificationError('Task', t.id, `回读状态为 ${back?.state}`)
     }
-    return back
+    return cloneTask(back)
   }
 
   async setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord> {
     const t = this.#tasks.get(taskId)
     if (!t) throw new NotFoundError('Task', taskId)
 
-    const next: TaskRecord = { ...t, binding, updated_at: new Date().toISOString() }
+    const next: TaskRecord = { ...t, binding: structuredClone(binding), updated_at: new Date().toISOString() }
     this.#tasks.set(taskId, next)
 
     const back = this.#tasks.get(taskId)
     if (back?.binding?.remote_task_id !== binding.remote_task_id) {
       throw new WriteVerificationError('Task', taskId, 'binding 回读不符')
     }
-    return back
+    return cloneTask(back)
   }
 
   async setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord> {
     const t = this.#tasks.get(taskId)
     if (!t) throw new NotFoundError('Task', taskId)
 
-    const next: TaskRecord = { ...t, result, updated_at: new Date().toISOString() }
+    const next: TaskRecord = { ...t, result: structuredClone(result), updated_at: new Date().toISOString() }
     this.#tasks.set(taskId, next)
 
     const back = this.#tasks.get(taskId)
     if (back?.result?.status !== result.status) {
       throw new WriteVerificationError('Task', taskId, 'result 回读不符')
     }
-    return back
+    return cloneTask(back)
   }
 
   async queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]> {
@@ -274,7 +286,7 @@ export class MemoryStore implements Store {
     if (q.missionId) out = out.filter((t) => t.mission_id === q.missionId)
     if (q.states) out = out.filter((t) => q.states!.includes(t.state))
     if (q.capability) out = out.filter((t) => t.capability === q.capability)
-    return q.limit ? out.slice(0, q.limit) : out
+    return (q.limit ? out.slice(0, q.limit) : out).map(cloneTask)
   }
 
   async findReadyTasks(missionId: string): Promise<readonly TaskRecord[]> {
@@ -286,7 +298,7 @@ export class MemoryStore implements Store {
       // 依赖必须全部 COMPLETED。缺失的依赖视为未满足——
       // 宁可不调度，也不能在依赖缺失的情况下执行。
       return t.deps.every((d) => byId.get(d)?.state === 'COMPLETED')
-    })
+    }).map(cloneTask)
   }
 
   // ------------------------------------------------------------ Event
@@ -360,8 +372,15 @@ export class MemoryStore implements Store {
   // ----------------------------------------------------------- Review
 
   async putReview(r: Review): Promise<Review> {
-    this.#reviews.push(r)
-    return r
+    const review = cloneReview(r)
+    const existing = this.#reviews.find((review) => review.id === r.id)
+    if (existing) {
+      assertSameReviewInput(existing, review)
+      return cloneReview(existing)
+    }
+
+    this.#reviews.push(review)
+    return cloneReview(review)
   }
 
   async listReviews(missionId: string): Promise<readonly Review[]> {
@@ -370,6 +389,7 @@ export class MemoryStore implements Store {
     return this.#reviews
       .filter((r) => r.mission_id === missionId)
       .sort((a, b) => a.round - b.round)
+      .map(cloneReview)
   }
 
   // --------------------------------------------------------- Approval

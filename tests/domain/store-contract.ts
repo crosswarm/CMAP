@@ -27,6 +27,7 @@ import {
   LockUnavailableError,
 } from '#domain-model'
 import { MissionConflictError } from '../../packages/domain-model/src/mission-input.ts'
+import { ReviewConflictError, TaskConflictError } from '../../packages/domain-model/src/store.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test-runner' }
 const T0 = '2026-08-02T00:00:00.000Z'
@@ -383,6 +384,115 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
     })
 
     describe('Task 状态迁移', () => {
+      test('同一 Task 创建请求语义相同则幂等返回既有记录且不重复写事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = task('tsk-1', 'mis-1', { deps: ['dep-1'] })
+        await s.createTask({ task: first, actor: ACTOR })
+        await s.transitionTask({
+          taskId: 'tsk-1',
+          to: 'READY',
+          actor: ACTOR,
+          eventType: 'TASK_READY',
+          idempotencyKey: 'tsk-1:ready',
+        })
+        await s.setTaskBinding('tsk-1', {
+          adapter: 'codex-adapter',
+          remote_task_id: 'codex:tsk-1:1',
+          protocol: 'codex-exec',
+          protocol_version: '0.1.0',
+          runner_id: 'runner-1',
+        })
+        await s.setTaskResult('tsk-1', taskResult('tsk-1', 'mis-1'))
+        const before = await s.listEvents('mis-1')
+
+        const again = await s.createTask({
+          task: {
+            ...first,
+            state: 'DRAFT',
+            result: null,
+            binding: null,
+            lamport: 999,
+            created_at: '2026-08-03T00:00:00.000Z',
+            updated_at: '2026-08-03T00:00:00.000Z',
+          },
+          actor: ACTOR,
+        })
+
+        assert.equal(again.state, 'READY')
+        assert.equal(again.binding?.remote_task_id, 'codex:tsk-1:1')
+        assert.equal(again.result?.status, 'completed')
+        assert.deepEqual(again.deps, ['dep-1'])
+        assert.equal((await s.listEvents('mis-1')).length, before.length)
+        assert.equal(
+          (await s.listEvents('mis-1')).filter((e) => e.event_type === 'TASK_CREATED').length,
+          1,
+        )
+      })
+
+      test('同一 Task 创建请求语义不同则冲突且不覆盖既有记录', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = task('tsk-1', 'mis-1')
+        await s.createTask({ task: first, actor: ACTOR })
+        const before = await s.listEvents('mis-1')
+
+        await assert.rejects(
+          () => s.createTask({ task: { ...first, capability: 'code.modify' }, actor: ACTOR }),
+          TaskConflictError,
+        )
+        await assert.rejects(
+          () =>
+            s.createTask({
+              task: {
+                ...first,
+                envelope: {
+                  ...first.envelope,
+                  identity: { ...first.envelope.identity, revision: 2 },
+                },
+              },
+              actor: ACTOR,
+            }),
+          TaskConflictError,
+        )
+        assert.equal((await s.getTask('tsk-1'))?.capability, first.capability)
+        assert.equal((await s.listEvents('mis-1')).length, before.length)
+      })
+
+      test('Task 写入后不保留调用方 envelope 引用，返回值也不能改内部快照', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = task('tsk-1', 'mis-1')
+        const created = await s.createTask({ task: first, actor: ACTOR })
+
+        ;(created.envelope as { identity: { revision: number } }).identity.revision = 9
+        ;(first.envelope as { identity: { revision: number } }).identity.revision = 2
+
+        assert.equal((await s.getTask('tsk-1'))?.envelope.identity.revision, 1)
+        await assert.rejects(
+          () => s.createTask({ task: first, actor: ACTOR }),
+          TaskConflictError,
+        )
+        assert.equal((await s.getTask('tsk-1'))?.envelope.identity.revision, 1)
+      })
+
+      test('并发重复创建同一 Task 只产生一条记录和一条创建事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = task('tsk-1', 'mis-1')
+
+        const created = await Promise.all(
+          Array.from({ length: 8 }, () => s.createTask({ task: first, actor: ACTOR })),
+        )
+
+        assert.deepEqual(created.map((t) => t.id), Array(8).fill('tsk-1'))
+        assert.equal((await s.queryTasks({ missionId: 'mis-1' })).length, 1)
+        assert.equal(
+          (await s.listEvents('mis-1')).filter((e) => e.event_type === 'TASK_CREATED').length,
+          1,
+        )
+      })
+
       test('合法迁移成功并更新状态', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
@@ -1053,6 +1163,64 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
           'C1',
           'failed_criteria 丢失会导致无法据以创建后继 Task',
         )
+      })
+
+      test('同一 Review 写入语义相同则幂等返回既有记录', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = review('rev-1', 'mis-1', 1, 'accept')
+        await s.putReview(first)
+
+        const again = await s.putReview({
+          ...first,
+          created_at: '2026-08-03T00:00:00.000Z',
+        })
+
+        assert.equal(again.created_at, T0)
+        assert.equal((await s.listReviews('mis-1')).length, 1)
+      })
+
+      test('同一 Review 写入语义不同则冲突且不覆盖既有记录', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = review('rev-1', 'mis-1', 1, 'accept')
+        await s.putReview(first)
+
+        await assert.rejects(
+          () => s.putReview({ ...first, decision: review('rev-1', 'mis-1', 1, 'rework').decision }),
+          ReviewConflictError,
+        )
+        const got = await s.listReviews('mis-1')
+        assert.equal(got.length, 1)
+        assert.equal(got[0]!.decision.decision, 'accept')
+      })
+
+      test('Review 写入后不保留调用方 decision 引用，返回值也不能改内部快照', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = review('rev-1', 'mis-1', 1, 'accept')
+        const written = await s.putReview(first)
+
+        ;(written.decision as unknown as { decision: string }).decision = 'escalate'
+        ;(first.decision as unknown as { decision: string }).decision = 'rework'
+
+        assert.equal((await s.listReviews('mis-1'))[0]!.decision.decision, 'accept')
+        await assert.rejects(
+          () => s.putReview(first),
+          ReviewConflictError,
+        )
+        assert.equal((await s.listReviews('mis-1'))[0]!.decision.decision, 'accept')
+      })
+
+      test('并发重复写入同一 Review 只保留一条记录', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = review('rev-1', 'mis-1', 1, 'accept')
+
+        const written = await Promise.all(Array.from({ length: 8 }, () => s.putReview(first)))
+
+        assert.deepEqual(written.map((r) => r.id), Array(8).fill('rev-1'))
+        assert.equal((await s.listReviews('mis-1')).length, 1)
       })
     })
 

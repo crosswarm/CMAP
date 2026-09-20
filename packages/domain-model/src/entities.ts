@@ -109,6 +109,9 @@ export const EVENT_TYPES = [
   'MISSION_CREATED',
   'PLAN_PROPOSED',
   'PLAN_ACCEPTED',
+  /** DAG 逻辑节点终态与未派发节点的阻塞原因，仅含关联元数据。 */
+  'DAG_NODE_FINISHED',
+  'DAG_NODE_BLOCKED',
   'TASK_CREATED',
   'TASK_READY',
   'TASK_ASSIGNED',
@@ -134,6 +137,7 @@ export const EVENT_TYPES = [
   'NO_PROGRESS_DETECTED',
   'TASK_RETRY_SCHEDULED',
   'TASK_FAILED',
+  'TASK_CANCELED',
   'TASK_COMPLETED',
   'MISSION_COMPLETED',
   /** 需要人介入。与 MISSION_FAILED 分开：一个要人来救，一个只是结果不达标。 */

@@ -8,6 +8,7 @@ const read = (name) => JSON.parse(readFileSync(new URL(`../../schemas/${name}.v1
 const ajv = new Ajv({ strict: true })
 addFormats(ajv)
 ajv.addSchema(read('task-envelope'), 'https://cmap.local/schemas/task-envelope.v1.schema.json')
+ajv.addSchema(read('mission-plan'), 'https://cmap.local/schemas/mission-plan.v1.schema.json')
 const validate = ajv.compile(read('mission-create'))
 const validateResponse = ajv.compile(read('mission-submission'))
 

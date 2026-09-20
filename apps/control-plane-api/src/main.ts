@@ -21,6 +21,7 @@ import { Client, Connection, WorkflowExecutionAlreadyStartedError } from '@tempo
 
 import { getApprovalAdviceFromJev } from './approval-advice.ts'
 import { createControlPlane } from './server.ts'
+import { workflowTypeForTemplate } from './workflow-routing.ts'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../../..')
 const port = Number(process.env['CMAP_API_PORT'] ?? 8787)
@@ -47,8 +48,11 @@ const server = await createControlPlane({
   startMission: async (missionId, workflowId) => {
     const connection = await getTemporal()
     const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
+    const mission = await store.getMission(missionId)
+    if (!mission) throw new Error(`Mission 不存在：${missionId}`)
+    const workflowType = workflowTypeForTemplate(mission.workflow_template)
     try {
-      await connection.withDeadline(Date.now() + 15_000, () => client.workflow.start('missionWorkflow', {
+      await connection.withDeadline(Date.now() + 15_000, () => client.workflow.start(workflowType, {
         workflowId, taskQueue: process.env['TEMPORAL_TASK_QUEUE'] ?? 'cmap-main',
         args: [{ missionId }], workflowIdReusePolicy: 'REJECT_DUPLICATE', workflowIdConflictPolicy: 'USE_EXISTING',
       }))

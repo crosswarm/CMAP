@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '#domain-model'
-import type { Mission, TaskEnvelopeV1 } from '#domain-model'
+import type { Mission, RiskLevel, TaskEnvelopeV1 } from '#domain-model'
 import type { AdapterHealth } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter } from './fake-adapter.ts'
@@ -16,16 +16,23 @@ const candidate = (id: string, caps = ['code.analyze'], state: AdapterHealth['st
   adapter.health = async () => ({ state, checked_at: new Date().toISOString() })
   return adapter
 }
-async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['execution_policy']> = {}) {
+async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['execution_policy']> = {}, risk: RiskLevel = 'read-meta') {
   const store = new MemoryStore()
   const now = new Date().toISOString()
   const mission: Mission = { id: 'routing-mission', tenant: 'local', owner: 'test', type: 'inspect', goal: 'routing', constraints: {}, acceptance: [{ criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: true, hard_gate: true }], workflow_template: 'inspect/v1', state: 'DRAFT', revision: 1, created_at: now, updated_at: now }
   await store.createMission({ mission, actor: ACTOR })
   const acts = createActivities({ store, adapters, pollIntervalMs: 1 })
-  const { taskId } = await acts.createTask({ missionId: mission.id, capability: 'code.analyze' })
-  // 输入来源仍是已验证信封；只改变测试的路由策略。
-  const task = (await store.getTask(taskId))!
-  Object.assign((task.envelope as TaskEnvelopeV1).execution_policy, policy)
+  const taskId = 'routing-task'
+  const envelope: TaskEnvelopeV1 = {
+    schema:'cmap/task-envelope/v1',
+    identity:{mission_id:mission.id,task_id:taskId,idempotency_key:taskId,revision:1},
+    classification:{task_type:'inspect',requested_capability:'code.analyze',risk_level:risk},
+    goal:{statement:mission.goal,success_definition:[{criterion_id:'C1',metric:'ok',operator:'eq',expected:true}]},
+    environment:{},execution_policy:{timeout_seconds:30,max_attempts:1,...policy},
+    permissions:{forbidden:[]},evidence_requirements:{required_artifact_roles:['report']},
+    output_contract:{schema_uri:'https://cmap.local/schemas/task-result/v1'},
+  }
+  await store.createTask({actor:ACTOR,task:{id:taskId,mission_id:mission.id,parent_task_id:null,supersedes_task_id:null,capability:'code.analyze',risk,state:'DRAFT',attempt:1,max_attempts:1,lamport:0,envelope,result:null,binding:null,deps:[],created_at:now,updated_at:now}})
   await acts.markReady(taskId)
   return { acts, store, taskId }
 }
@@ -76,9 +83,7 @@ test('风险上限不足或健康探测抛错都不派发', async () => {
   low.discover = async () => ({ ...await desc(), risk_ceiling: 'read-meta' })
   const broken = candidate('broken')
   broken.health = async () => { throw new Error('probe failed') }
-  const { acts, store, taskId } = await fixture([low, broken])
-  const task = (await store.getTask(taskId))!
-  Object.assign((task.envelope as TaskEnvelopeV1).classification, { risk_level: 'controlled' })
+  const { acts, store, taskId } = await fixture([low, broken], {}, 'controlled')
   await assert.rejects(acts.dispatchTask(taskId), /没有可用 Adapter/)
   assert.equal(low.startCalls.length + broken.startCalls.length, 0)
   assert.equal((await store.getTask(taskId))!.state, 'READY')

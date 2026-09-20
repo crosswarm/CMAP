@@ -4,6 +4,7 @@ import type {
   TaskRecord,
   Review,
   AcceptanceCriterion,
+  MissionPlanV1,
 } from '#domain-model'
 import { recomputeCriterionPassed } from '#domain-model/criterion-check'
 
@@ -26,6 +27,7 @@ export const statusLabels: Record<string, string> = {
   FAILED_TERMINAL: '终止失败',
   FAILED: '未通过',
   ESCALATED: '等待介入',
+  BLOCKED: '已阻塞',
   CANCELED: '已取消',
   REJECTED: '已拒绝',
 }
@@ -49,6 +51,7 @@ export const stateTone = (state: string) => {
       'AUTH_REQUIRED',
       'ESCALATED',
       'REWORK',
+      'BLOCKED',
     ].includes(state)
   )
     return 'attention'
@@ -105,36 +108,110 @@ export const showTime = (value: string) => {
       }).format(date)
 }
 
+const FINAL_TASK_STATES = [
+  'COMPLETED',
+  'FAILED_TERMINAL',
+  'CANCELED',
+  'REJECTED',
+] as const
+type DagNode = MissionPlanV1['nodes'][number]
+
+const dagPlan = (mission: Mission): MissionPlanV1 | null => {
+  const plan = mission.constraints?.['plan']
+  return mission.workflow_template === 'dag/v1' &&
+    plan &&
+    typeof plan === 'object' &&
+    (plan as { schema?: unknown }).schema === 'cmap/mission-plan/v1' &&
+    Array.isArray((plan as { nodes?: unknown }).nodes)
+    ? (plan as MissionPlanV1)
+    : null
+}
+
+const taskNodeId = (task: TaskRecord): string | undefined =>
+  task.envelope.identity.plan_node_id
+
+const taskSort = (a: TaskRecord, b: TaskRecord): number =>
+  b.attempt - a.attempt ||
+  Date.parse(b.created_at) - Date.parse(a.created_at) ||
+  b.id.localeCompare(a.id)
+
+const nodeTasks = (
+  tasks: readonly TaskRecord[],
+  nodeId: string,
+  finalOnly = false,
+): TaskRecord[] =>
+  tasks
+    .filter((task) =>
+      taskNodeId(task) === nodeId &&
+      (!finalOnly || (FINAL_TASK_STATES as readonly string[]).includes(task.state))
+    )
+    .sort(taskSort)
+
+const owningNode = (plan: MissionPlanV1, criterionId: string): DagNode | undefined =>
+  plan.nodes.find((node) => node.criterion_ids.includes(criterionId))
+
+const reviewFor = (reviews: readonly Review[], taskId: string): Review | undefined =>
+  [...reviews]
+    .filter((r) => r.reviewed_task_ids.includes(taskId))
+    .sort((a, b) => b.round - a.round)[0]
+
+const acceptanceState = (
+  criterion: AcceptanceCriterion,
+  source: TaskRecord | undefined,
+  review: Review | undefined,
+  requireAcceptReview = false,
+) => {
+  const answer = source?.result?.criterion_results.find(
+    (r) => r.criterion_id === criterion.criterion_id,
+  )
+  const failed = review?.decision.failed_criteria?.find(
+    (f) => f.criterion_id === criterion.criterion_id,
+  )
+  const state = !source
+    ? 'pending'
+    : !answer
+      ? 'unanswered'
+      : !review
+        ? 'pending'
+        : requireAcceptReview && review.decision.decision !== 'accept'
+          ? 'failed'
+          : failed || !recomputeCriterionPassed(criterion, answer)
+          ? 'failed'
+          : 'passed'
+  return { answer, failed, state }
+}
+
 export function acceptanceRows(
   mission: Mission,
   tasks: readonly TaskRecord[],
   reviews: readonly Review[],
 ) {
+  const plan = dagPlan(mission)
+  if (plan) {
+    return mission.acceptance.map((criterion) => {
+      const owner = owningNode(plan, criterion.criterion_id)
+      const latestAny = owner ? nodeTasks(tasks, owner.node_id)[0] : undefined
+      const source = owner ? nodeTasks(tasks, owner.node_id, true)[0] : undefined
+      const review = source ? reviewFor(reviews, source.id) : undefined
+      const { answer, failed, state } = acceptanceState(criterion, source, review, true)
+      return {
+        criterion,
+        actual: answer?.actual,
+        state,
+        reason: failed?.reason,
+        sourceTask: source?.id,
+        previousRound: Boolean(source && source.id !== latestAny?.id),
+        nodeId: owner?.node_id,
+      }
+    })
+  }
   const ordered = [...tasks].sort(
     (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
   )
   const source = ordered.find((task) => task.result)
-  const review =
-    source &&
-    [...reviews]
-      .filter((r) => r.reviewed_task_ids.includes(source.id))
-      .sort((a, b) => b.round - a.round)[0]
+  const review = source && reviewFor(reviews, source.id)
   return mission.acceptance.map((criterion) => {
-    const answer = source?.result?.criterion_results.find(
-      (r) => r.criterion_id === criterion.criterion_id,
-    )
-    const failed = review?.decision.failed_criteria?.find(
-      (f) => f.criterion_id === criterion.criterion_id,
-    )
-    const state = !source
-      ? 'pending'
-      : !answer
-        ? 'unanswered'
-        : !review
-          ? 'pending'
-          : failed || !recomputeCriterionPassed(criterion, answer)
-            ? 'failed'
-            : 'passed'
+    const { answer, failed, state } = acceptanceState(criterion, source, review)
     return {
       criterion,
       actual: answer?.actual,
@@ -142,6 +219,48 @@ export function acceptanceRows(
       reason: failed?.reason,
       sourceTask: source?.id,
       previousRound: Boolean(source && source.id !== ordered[0]?.id),
+    }
+  })
+}
+
+export function dagNodeRows(
+  mission: Mission,
+  tasks: readonly TaskRecord[],
+  reviews: readonly Review[],
+) {
+  const plan = dagPlan(mission)
+  if (!plan) return []
+  return plan.nodes.map((node) => {
+    const latest = nodeTasks(tasks, node.node_id)[0]
+    const review = latest ? reviewFor(reviews, latest.id) : undefined
+    const stoppedWithoutTask =
+      !latest && ['FAILED', 'ESCALATED', 'CANCELED'].includes(mission.state)
+    const status = stoppedWithoutTask
+      ? 'BLOCKED'
+      : review?.decision.decision === 'rework'
+        ? 'REWORK'
+        : review?.decision.decision === 'escalate'
+          ? 'ESCALATED'
+          : latest?.state ?? 'DRAFT'
+    const agent = latest?.binding
+      ? `${latest.binding.adapter} / ${latest.binding.runner_id}`
+      : node.preferred_agent
+        ? `preferred ${node.preferred_agent}`
+        : node.fallback_agents?.length
+          ? `fallback ${node.fallback_agents.join('、')}`
+          : '尚未派发'
+    return {
+      nodeId: node.node_id,
+      goal: node.goal,
+      capability: node.capability,
+      deps: node.deps,
+      criterionIds: node.criterion_ids,
+      status,
+      actualTaskState: latest?.state,
+      attempt: latest?.attempt ?? 0,
+      taskId: latest?.id,
+      agent,
+      reviewDecision: review?.decision.decision,
     }
   })
 }

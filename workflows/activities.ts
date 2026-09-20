@@ -24,7 +24,9 @@ import type {
   EventActor,
   EventType,
   RiskLevel,
+  RemoteTaskBinding,
   TaskEnvelopeV1,
+  TaskRecord,
   TaskResultV1,
   ReviewDecisionV1,
   ProgressSnapshot,
@@ -417,10 +419,12 @@ export const createActivities = (deps: ActivityDeps) => {
       const envelope = existing.envelope as TaskEnvelopeV1
       const selectedAdapter = await selectAdapter(envelope)
 
-      await store.transitionTask({
-        taskId, to: 'QUEUED', actor: ACTOR,
-        eventType: 'TASK_ASSIGNED', idempotencyKey: `queued:${taskId}`,
-      })
+      if (existing.state === 'READY') {
+        await store.transitionTask({
+          taskId, to: 'QUEUED', actor: ACTOR,
+          eventType: 'TASK_ASSIGNED', idempotencyKey: `queued:${taskId}`,
+        })
+      }
 
       const timeoutMs = (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
 
@@ -473,7 +477,10 @@ export const createActivities = (deps: ActivityDeps) => {
       if (!t) throw new Error(`任务不存在：${taskId}`)
 
       const envelope = t.envelope as TaskEnvelopeV1
-      if (t.result) return judge(envelope, t.result)
+      if (t.result) {
+        if (t.binding) await recordResultArtifacts(t, t.result, boundAdapter(t.binding.adapter), t.binding)
+        return judge(envelope, t.result)
+      }
 
       if (!t.binding) throw new Error(`任务 ${taskId} 尚未派发，无结果可收`)
       const a = boundAdapter(t.binding.adapter)
@@ -546,44 +553,7 @@ export const createActivities = (deps: ActivityDeps) => {
       }
       await store.setTaskResult(taskId, result)
 
-      // 证据落库。已存在的不重写——重复收取会生成重复记录，
-      // 让「这个结论基于哪些证据」多出几条同名副本。
-      const seen = new Set((await store.listArtifacts(taskId)).map((x) => x.artifact_id))
-      const now = new Date()
-      for (const art of result.artifacts) {
-        if (seen.has(art.artifact_id)) continue
-        const record: Artifact = {
-          artifact_id: art.artifact_id,
-          mission_id: t.mission_id,
-          task_id: taskId,
-          role: art.role,
-          uri: art.uri,
-          media_type: art.media_type ?? 'application/octet-stream',
-          size_bytes: art.size_bytes ?? 0,
-          sha256: art.sha256,
-          version: 1,
-          state: 'AVAILABLE',
-          producer: {
-            agent_id: a.agentId,
-            adapter_version: t.binding.protocol_version,
-            execution_session_id:
-              result.session?.provider_session_id ?? t.binding.remote_task_id,
-          },
-          provenance: { runner_id: t.binding.runner_id },
-          retention: {
-            retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(),
-            immutable: true,
-          },
-          security: {
-            classification: 'internal',
-            contains_secrets: false,
-            contains_pii: false,
-            allowed_roles: [],
-          },
-          created_at: now.toISOString(),
-        }
-        await store.putArtifact(record)
-      }
+      await recordResultArtifacts(t, result, a, t.binding)
 
       return judge(envelope, result)
     },
@@ -1072,6 +1042,53 @@ export const createActivities = (deps: ActivityDeps) => {
     })
 
     return { taskId }
+  }
+
+  async function recordResultArtifacts(
+    t: TaskRecord,
+    result: TaskResultV1,
+    adapter: AgentAdapter,
+    binding: RemoteTaskBinding,
+  ): Promise<void> {
+    // 证据落库可重入。结果先落账本，artifact 写入可能因瞬时存储错误失败；
+    // Activity 重试必须用已验证的缓存结果补齐 registry，而不是重跑 Agent。
+    const seen = new Set((await store.listArtifacts(t.id)).map((x) => x.artifact_id))
+    const now = new Date()
+    for (const art of result.artifacts) {
+      if (seen.has(art.artifact_id)) continue
+      const record: Artifact = {
+        artifact_id: art.artifact_id,
+        mission_id: t.mission_id,
+        task_id: t.id,
+        role: art.role,
+        uri: art.uri,
+        media_type: art.media_type ?? 'application/octet-stream',
+        size_bytes: art.size_bytes ?? 0,
+        sha256: art.sha256,
+        version: 1,
+        state: 'AVAILABLE',
+        producer: {
+          agent_id: adapter.agentId,
+          adapter_version: binding.protocol_version,
+          execution_session_id:
+            result.session?.provider_session_id ?? binding.remote_task_id,
+        },
+        provenance: { runner_id: binding.runner_id },
+        retention: {
+          retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(),
+          immutable: true,
+        },
+        security: {
+          classification: 'internal',
+          contains_secrets: false,
+          contains_pii: false,
+          allowed_roles: [],
+        },
+        created_at: now.toISOString(),
+      }
+      await store.putArtifact(record)
+      seen.add(art.artifact_id)
+    }
   }
 }
 

@@ -12,6 +12,8 @@
  * P1 用内存实现跑通；P4 换 PostgreSQL 时调用方代码不应改动。
  */
 
+import { isDeepStrictEqual } from 'node:util'
+
 import type { TaskResultV1 } from './generated/task-result.ts'
 import type { TaskState } from './task-state.ts'
 import type {
@@ -119,6 +121,52 @@ export class ArtifactConflictError extends Error {
   constructor(artifactId: string, detail: string) {
     super(`证据 ${artifactId} 写入冲突：${detail}`)
     this.name = 'ArtifactConflictError'
+  }
+}
+
+export class TaskConflictError extends Error {
+  constructor(taskId: string) {
+    super(`Task ${taskId} 创建参数与既有记录不一致`)
+    this.name = 'TaskConflictError'
+  }
+}
+
+export class ReviewConflictError extends Error {
+  constructor(reviewId: string) {
+    super(`Review ${reviewId} 写入参数与既有记录不一致`)
+    this.name = 'ReviewConflictError'
+  }
+}
+
+const comparableTaskInput = (task: TaskRecord) => ({
+  id: task.id,
+  mission_id: task.mission_id,
+  parent_task_id: task.parent_task_id,
+  supersedes_task_id: task.supersedes_task_id,
+  capability: task.capability,
+  risk: task.risk,
+  max_attempts: task.max_attempts,
+  envelope: task.envelope,
+  deps: task.deps,
+})
+
+export const assertSameTaskInput = (existing: TaskRecord, incoming: TaskRecord): void => {
+  if (!isDeepStrictEqual(comparableTaskInput(existing), comparableTaskInput(incoming))) {
+    throw new TaskConflictError(existing.id)
+  }
+}
+
+const comparableReviewInput = (review: Review) => ({
+  id: review.id,
+  mission_id: review.mission_id,
+  reviewed_task_ids: review.reviewed_task_ids,
+  round: review.round,
+  decision: review.decision,
+})
+
+export const assertSameReviewInput = (existing: Review, incoming: Review): void => {
+  if (!isDeepStrictEqual(comparableReviewInput(existing), comparableReviewInput(incoming))) {
+    throw new ReviewConflictError(existing.id)
   }
 }
 

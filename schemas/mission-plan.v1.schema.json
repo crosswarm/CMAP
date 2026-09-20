@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/mission-plan.v1.schema.json",
+  "title": "Mission Plan v1",
+  "description": "DAG Mission 的显式执行计划。只描述逻辑节点、依赖、验收覆盖、风险上限内的节点风险和声明式资源锁；不接受 owner/tenant/binding/approval 等控制面事实。资源锁 TTL 限定为 15..3600 秒，给续租与取消留出余量，同时避免 runner 崩溃后长期占用资源。",
+  "type": "object",
+  "required": ["schema", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "cmap/mission-plan/v1" },
+    "concurrency": { "type": "integer", "minimum": 1, "maximum": 4, "default": 2 },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "required": ["node_id", "goal", "capability", "deps", "criterion_ids", "risk_level"],
+        "additionalProperties": false,
+        "properties": {
+          "node_id": { "$ref": "#/$defs/safe_id" },
+          "goal": { "type": "string", "minLength": 1, "maxLength": 6000, "pattern": "\\S" },
+          "capability": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" },
+          "deps": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/safe_id" }
+          },
+          "criterion_ids": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S" }
+          },
+          "risk_level": { "$ref": "task-envelope.v1.schema.json#/properties/classification/properties/risk_level" },
+          "required_resource_locks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["resource", "ttl_seconds"],
+              "additionalProperties": false,
+              "properties": {
+                "resource": {
+                  "$ref": "task-envelope.v1.schema.json#/properties/execution_policy/properties/required_resource_locks/items/properties/resource",
+                  "type": "string",
+                  "maxLength": 512,
+                  "pattern": "\\S"
+                },
+                "ttl_seconds": { "type": "integer", "minimum": 15, "maximum": 3600 }
+              }
+            }
+          },
+          "preferred_agent": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+          "fallback_agents": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    }
+  }
+}

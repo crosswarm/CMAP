@@ -56,6 +56,8 @@ import {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  assertSameReviewInput,
+  assertSameTaskInput,
 } from './store.ts'
 
 const { Pool } = pg
@@ -381,11 +383,13 @@ export class PgStore implements Store {
   async createTask(input: CreateTaskInput): Promise<TaskRecord> {
     const t = input.task
     return this.#tx(async (c) => {
-      await c.query(
+      const inserted = await c.query(
         `INSERT INTO tasks (id, mission_id, parent_task_id, supersedes_task_id, capability,
                             risk, state, attempt, max_attempts, lamport, envelope, result,
                             binding, deps, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING *`,
         [
           t.id, t.mission_id, t.parent_task_id, t.supersedes_task_id, t.capability,
           t.risk, t.state, t.attempt, t.max_attempts, t.lamport,
@@ -395,6 +399,16 @@ export class PgStore implements Store {
           t.deps, t.created_at, t.updated_at,
         ],
       )
+      if (inserted.rowCount === 0) {
+        const { rows } = await c.query('SELECT * FROM tasks WHERE id = $1 FOR UPDATE', [t.id])
+        if (rows.length !== 1) {
+          throw new WriteVerificationError('Task', t.id, '冲突后回读为空')
+        }
+        const existing = toTask(rows[0] as Record<string, unknown>)
+        assertSameTaskInput(existing, t)
+        return existing
+      }
+
       await this.#insertEvent(c, {
         missionId: t.mission_id, taskId: t.id, type: 'TASK_CREATED',
         actor: input.actor, idempotencyKey: `task-created:${t.id}`,
@@ -652,12 +666,25 @@ export class PgStore implements Store {
   // ----------------------------------------------------------- Review
 
   async putReview(r: Review): Promise<Review> {
-    const { rows } = await this.#pool.query(
-      `INSERT INTO reviews (id, mission_id, reviewed_task_ids, round, decision, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [r.id, r.mission_id, r.reviewed_task_ids, r.round, JSON.stringify(r.decision), r.created_at],
-    )
-    return toReview(rows[0] as Record<string, unknown>)
+    return this.#tx(async (c) => {
+      const inserted = await c.query(
+        `INSERT INTO reviews (id, mission_id, reviewed_task_ids, round, decision, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING *`,
+        [r.id, r.mission_id, r.reviewed_task_ids, r.round, JSON.stringify(r.decision), r.created_at],
+      )
+      if (inserted.rowCount === 0) {
+        const { rows } = await c.query('SELECT * FROM reviews WHERE id = $1 FOR UPDATE', [r.id])
+        if (rows.length !== 1) {
+          throw new WriteVerificationError('Review', r.id, '冲突后回读为空')
+        }
+        const existing = toReview(rows[0] as Record<string, unknown>)
+        assertSameReviewInput(existing, r)
+        return existing
+      }
+      return toReview(inserted.rows[0] as Record<string, unknown>)
+    })
   }
 
   async listReviews(missionId: string): Promise<readonly Review[]> {

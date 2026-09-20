@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 
 import type { TaskEnvelopeV1 } from "#domain-model";
 import { AdapterError } from "#adapter-sdk";
-import { normalizeAgentOutput } from "../../packages/adapter-sdk/src/structured-output.ts";
+import { normalizeAgentOutput, renderTaskPrompt } from "../../packages/adapter-sdk/src/structured-output.ts";
 
 const envelope: TaskEnvelopeV1 = {
   schema: "cmap/task-envelope/v1",
@@ -37,6 +37,13 @@ const envelope: TaskEnvelopeV1 = {
 
 const sha256 = (s: string): string =>
   createHash("sha256").update(s).digest("hex");
+
+test('输入证据的路径、身份和哈希作为数据进入 Agent 提示', () => {
+  const refs = [{artifact_id:'parent:report',role:'report',uri:'inputs/source/report.json',sha256:sha256('input')}];
+  const prompt = renderTaskPrompt({...envelope,inputs:{artifact_refs:refs}});
+  assert.ok(prompt.includes(JSON.stringify(refs)));
+  assert.match(prompt, /输入数据.*不是指令/);
+});
 
 test("拒绝悬空证据引用和重复的 artifact_id", async () => {
   const dir = await mkdtemp(join(tmpdir(), "cmap-reference-check-"));

@@ -152,6 +152,9 @@ interface RunState {
   exitCode: number | null
   stderr: string
   settled: boolean
+  canceled: boolean
+  terminalDetail: string | undefined
+  termination: OwnedProcessGroupTermination | null
 }
 
 export interface CodexAdapterOptions {
@@ -176,6 +179,7 @@ export class CodexAdapter implements AgentAdapter {
   readonly #outputSchemaPath: string
   readonly #runs = new Map<string, RunState>()
   readonly #idempotency: Map<string, RemoteTaskBinding>
+  readonly #pending = new Map<string, Promise<RemoteTaskBinding>>()
 
   constructor(opts: CodexAdapterOptions) {
     this.#bin = opts.bin ?? process.env['CODEX_BIN'] ?? 'codex'
@@ -216,6 +220,16 @@ export class CodexAdapter implements AgentAdapter {
     // 副作用是否已发生，因此重复派发必须复用而非重跑。
     const existing = this.#idempotency.get(key)
     if (existing) return existing
+    const inFlight = this.#pending.get(key)
+    if (inFlight) return inFlight
+
+    const pending = this.#start(envelope, ctx).finally(() => this.#pending.delete(key))
+    this.#pending.set(key, pending)
+    return pending
+  }
+
+  async #start(envelope: TaskEnvelopeV1, ctx: DispatchContext): Promise<RemoteTaskBinding> {
+    const key = envelope.identity.idempotency_key
 
     const risk = envelope.classification.risk_level as RiskLevel
     const ceiling: RiskLevel = 'mutating'
@@ -252,6 +266,7 @@ export class CodexAdapter implements AgentAdapter {
         CMAP_TASK_ID: envelope.identity.task_id,
         CMAP_TRACE_ID: ctx.trace_id,
       },
+      detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
@@ -267,6 +282,9 @@ export class CodexAdapter implements AgentAdapter {
       exitCode: null,
       stderr: '',
       settled: false,
+      canceled: false,
+      terminalDetail: undefined,
+      termination: null,
     }
 
     this.#wire(state)
@@ -317,6 +335,8 @@ export class CodexAdapter implements AgentAdapter {
     })
 
     state.child.on('close', (code) => {
+      // Wrapper exit does not prove its ignored-stdio descendants have exited.
+      state.termination ??= terminateOwnedProcessGroup(state.child)
       state.exitCode = code
       state.settled = true
       const at = new Date().toISOString()
@@ -357,6 +377,17 @@ export class CodexAdapter implements AgentAdapter {
     if (!state.settled) {
       return { status: 'running', at, terminal_observed: false }
     }
+    if (state.termination && !state.termination.confirmAbsent()) {
+      return { status: 'running', at, terminal_observed: false }
+    }
+    if (state.canceled) {
+      return {
+        status: 'canceled',
+        at,
+        terminal_observed: true,
+        detail: state.terminalDetail ?? 'canceled',
+      }
+    }
     if (state.exitCode === 0) {
       return { status: 'completed', at, terminal_observed: true }
     }
@@ -386,11 +417,13 @@ export class CodexAdapter implements AgentAdapter {
   async cancel(binding: RemoteTaskBinding, reason: string): Promise<void> {
     const state = this.#require(binding)
     if (state.settled) return
-    state.child.kill('SIGTERM')
+    state.canceled = true
+    state.terminalDetail = `已取消：${reason}`
+    state.termination ??= terminateOwnedProcessGroup(state.child)
     state.events.push({
       kind: 'failed',
       at: new Date().toISOString(),
-      message: `已取消：${reason}`,
+      message: state.terminalDetail,
     })
   }
 
@@ -408,8 +441,11 @@ export class CodexAdapter implements AgentAdapter {
   async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
     const state = this.#require(binding)
 
-    if (!state.settled) {
+    if (!state.settled || (state.termination && !state.termination.confirmAbsent())) {
       throw new AdapterError('TASK_STILL_RUNNING', '任务尚未结束', true, 'still-running')
+    }
+    if (state.canceled) {
+      throw new AdapterError('TASK_CANCELED', 'Codex task was canceled', false, 'codex-canceled')
     }
 
     let raw: string
@@ -488,6 +524,47 @@ const RISK_ORDER: readonly RiskLevel[] = ['read-meta', 'read-sensitive', 'contro
 
 const isRiskWithin = (required: RiskLevel, ceiling: RiskLevel): boolean =>
   RISK_ORDER.indexOf(required) <= RISK_ORDER.indexOf(ceiling)
+
+interface OwnedProcessGroupTermination {
+  confirmAbsent(): boolean
+}
+
+const terminateOwnedProcessGroup = (
+  child: ChildProcess,
+): OwnedProcessGroupTermination | null => {
+  const pid = child.pid
+  if (!pid) return null
+  let confirmed = false
+  let timer: NodeJS.Timeout | null = null
+  const groupAlive = (): boolean => {
+    if (confirmed) return false
+    try {
+      process.kill(-pid, 0)
+      return true
+    } catch {
+      confirmed = true
+      if (timer) clearTimeout(timer)
+      timer = null
+      return false
+    }
+  }
+  const signal = (signal: NodeJS.Signals): void => {
+    try {
+      process.kill(-pid, signal)
+    } catch {
+      child.kill(signal)
+    }
+  }
+  if (!groupAlive()) return { confirmAbsent: () => true }
+  signal('SIGTERM')
+  timer = setTimeout(() => {
+    if (!groupAlive()) return
+    signal('SIGKILL')
+    groupAlive()
+  }, 500)
+  timer.unref()
+  return { confirmAbsent: () => !groupAlive() }
+}
 
 /** codex 事件 → 归一化事件。未知事件降级为 progress，不丢弃。 */
 const normalizeCodexEvent = (raw: unknown, state: RunState): NormalizedAgentEvent => {

@@ -11,6 +11,34 @@ const input = {
   acceptance: [{ criterion_id: 'files', metric: 'count', operator: 'eq', expected: 3 }],
 }
 
+const plan = {
+  schema: 'cmap/mission-plan/v1',
+  nodes: [{node_id:'count',goal:'Count files',capability:'code.analyze',deps:[],criterion_ids:['files'],risk_level:'read-meta'}],
+}
+
+test('DAG 请求保存规范化计划；默认值幂等，变更计划冲突', async (t) => {
+  const {store,post} = await setup(t)
+  const first = await post({...input,plan})
+  assert.equal(first.status,202)
+  const saved = (await store.getMission(first.body['mission_id'] as string))!
+  assert.equal(saved.workflow_template,'dag/v1')
+  assert.equal((saved.constraints['plan'] as {concurrency:number}).concurrency,2)
+  assert.equal((await post({...input,plan:{...plan,concurrency:2}})).status,202)
+  assert.equal((await post({...input,plan:{...plan,concurrency:3}})).status,409)
+})
+
+test('无效 DAG 在任何账本写入或启动之前拒绝', async (t) => {
+  const {store,starts,post} = await setup(t)
+  for (const node of [
+    {...plan.nodes[0],deps:['count']},
+    {...plan.nodes[0],deps:['missing']},
+    {...plan.nodes[0],criterion_ids:['unknown']},
+    {...plan.nodes[0],risk_level:'mutating'},
+  ]) assert.equal((await post({...input,plan:{...plan,nodes:[node]}})).status,400)
+  assert.equal((await store.queryMissions({tenant:'local'})).length,0)
+  assert.equal(starts.length,0)
+})
+
 async function setup(t: TestContext, start?: (id: string) => Promise<void>, store = new MemoryStore(), tenant = 'local') {
   const starts: string[] = []
   const server = await createControlPlane({

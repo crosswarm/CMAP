@@ -58,7 +58,7 @@ interface RunState {
   readonly events: NormalizedAgentEvent[]
   readonly listeners: Set<(event: NormalizedAgentEvent) => Promise<void>>
   readonly timeout: NodeJS.Timeout
-  killTimer: NodeJS.Timeout | null
+  termination: OwnedProcessGroupTermination | null
   exitCode: number | null
   signal: NodeJS.Signals | null
   settled: boolean
@@ -186,9 +186,9 @@ export class KimiAdapter implements AgentAdapter {
       listeners: new Set(),
       timeout: setTimeout(() => {
         state.timedOut = true
-        state.killTimer = terminateGroup(child)
+        state.termination ??= terminateOwnedProcessGroup(child)
       }, deadlineMs),
-      killTimer: null,
+      termination: null,
       exitCode: null,
       signal: null,
       settled: false,
@@ -245,7 +245,7 @@ export class KimiAdapter implements AgentAdapter {
       state.outputBytes += chunk.byteLength
       if (state.outputBytes > MAX_OUTPUT_BYTES) {
         state.outputOverflow = true
-        state.killTimer = terminateGroup(state.child)
+        state.termination ??= terminateOwnedProcessGroup(state.child)
         return
       }
       buffer += decoder.write(chunk)
@@ -260,8 +260,9 @@ export class KimiAdapter implements AgentAdapter {
     })
 
     state.child.on('close', (code, signal) => {
+      // Wrapper exit does not prove its ignored-stdio descendants have exited.
+      state.termination ??= terminateOwnedProcessGroup(state.child)
       clearTimeout(state.timeout)
-      if (state.killTimer) clearTimeout(state.killTimer)
       buffer += decoder.end()
       consumeLine(buffer)
       state.exitCode = code
@@ -271,7 +272,6 @@ export class KimiAdapter implements AgentAdapter {
 
     state.child.on('error', () => {
       clearTimeout(state.timeout)
-      if (state.killTimer) clearTimeout(state.killTimer)
       state.exitCode = -1
       state.resultError = new AdapterError(
         'TASK_FAILED',
@@ -305,7 +305,7 @@ export class KimiAdapter implements AgentAdapter {
   async getStatus(binding: RemoteTaskBinding): Promise<NormalizedAgentStatus> {
     const state = this.#require(binding)
     const at = new Date().toISOString()
-    if (!state.settled)
+    if (!state.settled || (state.termination && !state.termination.confirmAbsent()))
       return { status: 'running', at, terminal_observed: false }
     return {
       status: state.terminalStatus ?? 'failed',
@@ -334,7 +334,7 @@ export class KimiAdapter implements AgentAdapter {
     if (state.settled) return
     state.canceled = true
     state.terminalDetail = `canceled: ${reason}`
-    state.killTimer = terminateGroup(state.child)
+    state.termination ??= terminateOwnedProcessGroup(state.child)
     state.events.push({
       kind: 'failed',
       at: new Date().toISOString(),
@@ -344,7 +344,7 @@ export class KimiAdapter implements AgentAdapter {
 
   async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
     const state = this.#require(binding)
-    if (!state.settled) {
+    if (!state.settled || (state.termination && !state.termination.confirmAbsent())) {
       throw new AdapterError(
         'TASK_STILL_RUNNING',
         '任务尚未结束',
@@ -546,23 +546,45 @@ const verifyCredentialRefs = async (credentialHome?: string): Promise<void> => {
   await access(join(home, 'oauth'), constants.R_OK)
 }
 
-const terminateGroup = (child: ChildProcess): NodeJS.Timeout | null => {
+interface OwnedProcessGroupTermination {
+  confirmAbsent(): boolean
+}
+
+const terminateOwnedProcessGroup = (
+  child: ChildProcess,
+): OwnedProcessGroupTermination | null => {
   const pid = child.pid
   if (!pid) return null
-  try {
-    process.kill(-pid, 'SIGTERM')
-  } catch {
-    child.kill('SIGTERM')
-  }
-  const timer = setTimeout(() => {
+  let confirmed = false
+  let timer: NodeJS.Timeout | null = null
+  const groupAlive = (): boolean => {
+    if (confirmed) return false
     try {
-      process.kill(-pid, 'SIGKILL')
+      process.kill(-pid, 0)
+      return true
     } catch {
-      child.kill('SIGKILL')
+      confirmed = true
+      if (timer) clearTimeout(timer)
+      timer = null
+      return false
     }
+  }
+  const signal = (signal: NodeJS.Signals): void => {
+    try {
+      process.kill(-pid, signal)
+    } catch {
+      child.kill(signal)
+    }
+  }
+  if (!groupAlive()) return { confirmAbsent: () => true }
+  signal('SIGTERM')
+  timer = setTimeout(() => {
+    if (!groupAlive()) return
+    signal('SIGKILL')
+    groupAlive()
   }, 500)
   timer.unref()
-  return timer
+  return { confirmAbsent: () => !groupAlive() }
 }
 
 const finalizeState = async (

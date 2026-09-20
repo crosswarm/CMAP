@@ -9,6 +9,8 @@
  */
 
 export type { TaskEnvelopeV1 } from './generated/task-envelope.ts'
+export type { MissionPlanV1 } from './generated/mission-plan.ts'
+export { normalizeMissionPlan } from './mission-plan.ts'
 export type { TaskResultV1 } from './generated/task-result.ts'
 export type { ReviewDecisionV1 } from './generated/review-decision.ts'
 export type { MissionEventV1 } from './generated/mission-event.ts'
@@ -37,6 +39,8 @@ export {
   WriteVerificationError,
   LockUnavailableError,
   ArtifactConflictError,
+  TaskConflictError,
+  ReviewConflictError,
 } from './store.ts'
 export type {
   Store,

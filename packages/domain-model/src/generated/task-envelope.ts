@@ -12,6 +12,10 @@ export interface TaskEnvelopeV1 {
   identity: {
     mission_id: string
     task_id: string
+    /**
+     * DAG Mission 中的逻辑节点标识。物理 Task/Review ID 仍由控制面派生。
+     */
+    plan_node_id?: string
     parent_task_id?: string | null
     /**
      * 返工时指向被取代的前一轮 Task。返工创建新 Task 而非复用，以保留证据历史与因果链。
