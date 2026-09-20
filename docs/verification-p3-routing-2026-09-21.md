@@ -57,3 +57,25 @@ network-outbound deny 导致网络失败，allow 可请求模型所需网络。
 
 Jev 对本轮混合摘要的辅助判断返回 reject、reason_code=uncertain、confidence=0.56，
 仅作不确定性记录，没有把建议转换成授权。已有自主开发授权下由确定性测试和独立复核继续推进。
+
+
+### 后续定位与可行路径（同日）
+
+官方 2.0.1 源码确认：`oauth/kimi-code` 是刷新锁文件，真实凭据位置是
+`credentials/kimi-code.json`。此前引用了错误文件，不能据此推断隔离模式不可行。
+修正为单文件只读引用后，实际在写入 `credentials/kimi-code.json.tmp.*` 时 EPERM：
+凭据需要正常原子轮换，单文件只读引用不能完成本次启动。
+
+第二次合成探针使用私有 KIMI_CODE_HOME，将 **credentials 目录和 oauth 锁目录**
+引用到原 Kimi home；配置、会话、日志、工作区留在私有目录。没有复制或输出凭据。
+外层 sandbox-exec 只允许写私有目录和既有认证存储；`tools: []`、空 skills 目录。
+真实输出为 assistant `CMAP_ISOLATED_HOME_OK`，退出 0。这是有限的无工具模型调用，
+不是完整 Kimi Adapter，也不证明读路径白名单、网络域名限制或代码工具沙箱已通过。
+共享认证存储是有意保留的例外，不应描述为“所有状态完全隔离”。
+
+依据：[官方数据位置](https://moonshotai.github.io/kimi-code/en/configuration/data-locations)、
+[命令参考](https://moonshotai.github.io/kimi-code/en/reference/kimi-command)；源码固定
+`caf7d4e2fef06967280b325da06e44a4b0516eba`，重点为
+`packages/oauth/src/{toolkit,storage,oauth-manager}.ts`。
+下一步是将这条已验证的运行方式接入 Adapter SPI，并验证工具边界和结构化结果，
+无需先要求用户重新登录。
