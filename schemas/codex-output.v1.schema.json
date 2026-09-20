@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmap.local/schemas/codex-output/v1",
   "title": "Codex Output v1",
-  "description": "传给 codex exec --output-schema 的输出契约。这不是账本格式，而是「Agent 只报告它知道的事实」——mission_id/task_id/attempt 等身份字段由控制面补全，因为账本归控制面所有，Agent 无权自述身份。Adapter 收到本结构后合成完整 TaskResultV1，再经严格 Schema 校验入账本。",
+  "description": "Agent 输出契约：Codex 通过 --output-schema 强制输出，Kimi 在提示中使用同一结构并由 Adapter 在运行时严格校验。这不是账本格式，而是「Agent 只报告它知道的事实」——mission_id/task_id/attempt 等身份字段由控制面补全，因为账本归控制面所有，Agent 无权自述身份。Adapter 收到本结构后合成完整 TaskResultV1，再经严格 Schema 校验入账本。",
 
   "type": "object",
   "additionalProperties": false,
@@ -44,7 +44,7 @@
 
     "artifacts": {
       "type": "array",
-      "description": "证据产物。必须是真实写入磁盘的文件，sha256 必须是文件内容的真实哈希——控制面会独立复算，对不上即判失败。",
+      "description": "证据产物。同一输出的 artifact_id 不得重复，criterion_results 中的证据引用必须指向本列表。必须是真实写入磁盘的文件，sha256 必须是文件内容的真实哈希——控制面会独立复算，对不上即判失败。",
       "items": {
         "type": "object",
         "additionalProperties": false,

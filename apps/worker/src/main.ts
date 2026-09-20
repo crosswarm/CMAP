@@ -8,7 +8,7 @@
  * 启动前先确认 Temporal 真的可用：node scripts/verify-temporal.mjs。
  * 容器 Up、端口 LISTEN 都不作数。
  *
- * 这里注入的是真 codex-adapter：Worker 一旦收到任务就会真的 spawn codex。
+ * 这里注入真实 Adapter：默认 Codex，CMAP_AGENTS 可显式注册 Kimi。
  * 想只验证编排而不真跑 Agent，用 tests/workflow 里的假 Adapter。
  */
 
@@ -25,13 +25,16 @@ import { Worker, NativeConnection } from '@temporalio/worker'
 
 import { PgStore } from '#domain-model'
 import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
+import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
+import { parseAdapterNames } from './adapter-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
 
 const address = process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233'
 const namespace = process.env['TEMPORAL_NAMESPACE'] ?? 'default'
 const taskQueue = process.env['TEMPORAL_TASK_QUEUE'] ?? 'cmap-main'
 const connectionString =
-  process.env['CMAP_DATABASE_URL'] ?? 'postgres://temporal:temporal@localhost:5433/cmap'
+  process.env['CMAP_DATABASE_URL'] ??
+  'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
 const runnerId = process.env['RUNNER_ID'] ?? 'local-dev'
 
@@ -39,6 +42,15 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '../../..')
 // 每个任务一个子目录，避免并发任务互相污染工作区。
 const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
+
+const adapterNames = parseAdapterNames(process.env['CMAP_AGENTS'])
+const adapters = adapterNames.map((name) =>
+  name === 'kimi'
+    ? new KimiAdapter()
+    : new CodexAdapter({
+        outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
+      }),
+)
 
 const store = new PgStore({ connectionString, schema })
 // 幂等建表：空库首次启动即可用，不需要额外的迁移步骤。
@@ -65,9 +77,7 @@ const worker = await Worker.create({
     store,
     // 传给 codex 的是 OpenAI structured outputs 兼容子集，
     // 不是控制面校验账本用的严格 schema（见 ADR-0003）。
-    adapters: [new CodexAdapter({
-      outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
-    })],
+    adapters,
     runnerId,
     workRoot,
   }),
@@ -86,7 +96,7 @@ process.on('SIGTERM', stop)
 
 console.log(
   `Worker 就绪：temporal=${address} ns=${namespace} queue=${taskQueue} ` +
-    `db.schema=${schema} runner=${runnerId} 工作区=${workRoot}`,
+    `db.schema=${schema} runner=${runnerId} adapters=${adapterNames.join(',')} 工作区=${workRoot}`,
 )
 
 await worker.run()

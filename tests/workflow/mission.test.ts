@@ -24,7 +24,8 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 import { MemoryStore } from '#domain-model'
-import type { Mission, Store } from '#domain-model'
+import type { Mission, RemoteTaskBinding, Store, TaskResultV1 } from '#domain-model'
+import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter } from './fake-adapter.ts'
 
@@ -386,6 +387,44 @@ describe('Mission Workflow', () => {
       1,
       '一次升级只能发一个 Mission 级信号，否则界面和通知会重复报警',
     )
+  })
+
+  test('终态收结果失败在预算 0 时如实升级，不让 Mission 卡 RUNNING', async () => {
+    await store.createMission({
+      mission: mission('mis-collect-terminal-1', { max_additional_cycles: 0 }),
+      actor: { type: 'system', id: 'test' },
+    })
+
+    const originalCollect = adapter.collectResult
+    adapter.collectResult = async (_binding: RemoteTaskBinding): Promise<TaskResultV1> => {
+      throw new AdapterError(
+        'RESULT_UNPARSABLE',
+        'raw provider output with prompt and stack',
+        false,
+        'result-unparsable',
+      )
+    }
+
+    try {
+      const result = await run('mis-collect-terminal-1')
+
+      assert.equal(result.state, 'ESCALATED')
+      assert.match(result.summary, /RESULT_UNPARSABLE/)
+      assert.deepEqual(result.failedCriteria, ['C1'])
+      assert.equal((await store.getMission('mis-collect-terminal-1'))?.state, 'ESCALATED')
+
+      const taskId = result.taskIds[0]!
+      const task = await store.getTask(taskId)
+      assert.equal(task?.state, 'FAILED_TERMINAL')
+      assert.equal(task?.result?.status, 'failed')
+      assert.equal(task?.result?.error?.code, 'RESULT_UNPARSABLE')
+      assert.equal(task?.result?.error?.fingerprint, 'result-unparsable')
+      assert.deepEqual(task?.result?.criterion_results, [])
+      assert.deepEqual(task?.result?.artifacts, [])
+      assert.doesNotMatch(task?.result?.error?.message ?? '', /raw provider output|prompt|stack/)
+    } finally {
+      adapter.collectResult = originalCollect
+    }
   })
 
   test('mutating 任务批准前不派发，批准 controlled 也不放行', async () => {

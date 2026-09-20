@@ -2,8 +2,8 @@
  * P2 出口验证：一次 Mission 无人值守跑完，Agent 真的干活。
  *
  * 与 e2e-single-hop.mjs 的区别：那个直接调 Adapter，证明「能调起 codex」；
- * 这个走完整控制面——Temporal Workflow 派发 → codex 真实执行 → 收结果 →
- * 落账本 → 逐条验收，证明「调度系统真的会去调 codex」。两头都在不等于线接上了。
+ * 这个走完整控制面——Temporal Workflow 派发 → Agent 真实执行 → 收结果 →
+ * 落账本 → 逐条验收，证明「调度系统真的会去调注册的 Agent」。两头都在不等于线接上了。
  *
  * 两种场景：
  *   node scripts/e2e-mission.mjs            一次过（accept 路径）
@@ -93,7 +93,7 @@ ok(`Mission ${missionId} 已入账本（schema=${schema}）`)
 
 // -------------------------------------------- 2. 交给控制面无人值守跑
 
-step(2, `启动 Workflow（队列 ${taskQueue}，codex 真实执行，耗时约 1-3 分钟）`)
+step(2, `启动 Workflow（队列 ${taskQueue}，Agent 真实执行，耗时约 1-3 分钟）`)
 
 const conn = await Connection.connect({ address, connectTimeout: 15_000 })
 const client = new Client({ connection: conn, namespace })
@@ -168,6 +168,9 @@ ok('Mission 状态 COMPLETED')
 const task = await store.getTask(taskId)
 if (task?.state !== 'COMPLETED') fail(`任务状态是 ${task?.state}`)
 if (!task.binding) fail('任务没有 binding —— 派发没落库')
+if (process.env['CMAP_EXPECT_ADAPTER'] && task.binding.adapter !== process.env['CMAP_EXPECT_ADAPTER']) {
+  fail('实际 Adapter 与 CMAP_EXPECT_ADAPTER 不一致：' + task.binding.adapter)
+}
 ok(`任务 ${taskId} 状态 COMPLETED，binding=${task.binding.remote_task_id}`)
 
 if (!task.result) fail('任务没有结果 —— Agent 干了活但没落账')
@@ -226,7 +229,7 @@ if (kinds.includes('MISSION_ESCALATED')) {
 }
 ok(`共 ${events.length} 条事件：${kinds.join(' → ')}`)
 
-console.log(`\n✅ P2 出口达成：控制面无人值守跑完一次 Mission，codex 真实执行并留下可复核的证据。`)
+console.log(`\n✅ P2 出口达成：控制面无人值守跑完一次 Mission，Agent 真实执行并留下可复核的证据。`)
 
 await conn.close()
 await store.close()

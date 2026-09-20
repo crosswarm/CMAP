@@ -31,7 +31,7 @@ import type {
 } from '#domain-model'
 import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
 import { recomputeCriterionPassed } from '#domain-model'
-import type { AgentAdapter } from '#adapter-sdk'
+import { AdapterError, type AgentAdapter } from '#adapter-sdk'
 
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -66,6 +66,37 @@ const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectOutput =>
     summary: result.summary,
   }
 }
+
+const TERMINAL_TASK_COLLECT_ERROR_CODES = new Set(['TASK_FAILED', 'TASK_CANCELED'])
+
+const isTerminalCollectError = (e: unknown): e is AdapterError =>
+  e instanceof AdapterError &&
+  !e.retryable &&
+  (
+    e.code.startsWith('RESULT_') ||
+    e.code.startsWith('EVIDENCE_') ||
+    TERMINAL_TASK_COLLECT_ERROR_CODES.has(e.code)
+  )
+
+const failedResultFromCollectError = (
+  e: AdapterError,
+  envelope: TaskEnvelopeV1,
+): TaskResultV1 => ({
+  schema: 'cmap/task-result/v1',
+  mission_id: envelope.identity.mission_id,
+  task_id: envelope.identity.task_id,
+  attempt: envelope.identity.revision,
+  status: 'failed',
+  summary: `Adapter 终态结果收取失败：${e.code}`,
+  criterion_results: [],
+  artifacts: [],
+  error: {
+    code: e.code,
+    message: `Adapter 终态结果收取失败：${e.code}`,
+    retryable: false,
+    fingerprint: e.fingerprint,
+  },
+})
 
 const ACTOR: EventActor = { type: 'system', id: 'mission-workflow' }
 const DEFAULT_RUNNER_ID = process.env['RUNNER_ID'] ?? 'local-dev'
@@ -466,7 +497,13 @@ export const createActivities = (deps: ActivityDeps) => {
         await sleep(pollIntervalMs)
       }
 
-      const raw = await a.collectResult(t.binding)
+      let raw: TaskResultV1
+      try {
+        raw = await a.collectResult(t.binding)
+      } catch (e) {
+        if (!isTerminalCollectError(e)) throw e
+        raw = failedResultFromCollectError(e, envelope)
+      }
 
       // Agent 自报的 artifact_id 只是它自己的叫法，实测常是 `report` 这种
       // 大众名字——落到账本的全局主键上，第二个任务就会跟第一个撞车。

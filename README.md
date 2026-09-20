@@ -97,7 +97,7 @@ P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发�
 批准，错 scope 不放行。Mission 列表包含尚无任务的记录，SSE 事件流支持实时推送与断线历史回放。
 WebUI 已接入目标创建、验收账本、证据预览、返工追踪、独立 scope 审批和 Jev 建议。
 启动后打开 http://127.0.0.1:8787；开发前端可用 `npm run start:web`（仍需 API）。
-当前只覆盖本机 inspect/v1；DAG、Kimi/YonWork Adapter、OIDC 与远程 runner 尚未完成。
+当前只覆盖本机 inspect/v1；本机 Kimi Adapter 已接入（[运行说明](docs/kimi-adapter.md)）；DAG、YonWork Adapter、OIDC 与远程 runner 尚未完成。
 验证见 [WebUI 交付记录](docs/verification-webui-2026-09-21.md)。
 逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。
 

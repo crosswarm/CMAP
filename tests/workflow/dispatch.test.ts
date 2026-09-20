@@ -10,7 +10,8 @@ import { test, describe, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { MemoryStore } from '#domain-model'
-import type { Mission, Store, TaskEnvelopeV1 } from '#domain-model'
+import type { Mission, RemoteTaskBinding, Store, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
+import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter } from './fake-adapter.ts'
 
@@ -36,6 +37,46 @@ const mission = (id: string): Mission => ({
 let store: Store
 let adapter: FakeAdapter
 let acts: ReturnType<typeof createActivities>
+
+class TerminalCollectErrorAdapter extends FakeAdapter {
+  override async collectResult(_binding: RemoteTaskBinding): Promise<TaskResultV1> {
+    throw new AdapterError(
+      'RESULT_UNPARSABLE',
+      'raw provider output with prompt and stack',
+      false,
+      'result-unparsable',
+    )
+  }
+}
+
+class TransientCollectErrorAdapter extends FakeAdapter {
+  override async collectResult(_binding: RemoteTaskBinding): Promise<TaskResultV1> {
+    throw new AdapterError(
+      'TASK_STILL_RUNNING',
+      '任务尚未结束',
+      true,
+      'still-running',
+    )
+  }
+}
+
+class TerminalTaskCollectErrorAdapter extends FakeAdapter {
+  readonly #code: 'TASK_FAILED' | 'TASK_CANCELED'
+
+  constructor(code: 'TASK_FAILED' | 'TASK_CANCELED') {
+    super()
+    this.#code = code
+  }
+
+  override async collectResult(_binding: RemoteTaskBinding): Promise<TaskResultV1> {
+    throw new AdapterError(
+      this.#code,
+      'raw provider output with prompt and stack',
+      false,
+      this.#code.toLowerCase().replace('_', '-'),
+    )
+  }
+}
 
 const newActs = () =>
   createActivities({ store, adapter, runnerId: 'runner-test', pollIntervalMs: 1 })
@@ -250,6 +291,65 @@ describe('收结果并落账本', () => {
     assert.equal(out.passed, false)
     assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
   })
+
+  test('终态收结果的受控 AdapterError 落成 failed TaskResult，不让任务卡 RUNNING', async () => {
+    adapter = new TerminalCollectErrorAdapter()
+    acts = newActs()
+    const taskId = await startTask()
+    await acts.dispatchTask(taskId)
+
+    const out = await acts.collectTaskResult(taskId)
+    const t = await store.getTask(taskId)
+
+    assert.equal(out.status, 'failed')
+    assert.equal(out.passed, false)
+    assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
+    assert.equal(t?.state, 'RUNNING', '收结果只落结果，状态推进仍交给后续硬门槛路径')
+    assert.equal(t?.result?.mission_id, 'mis-1')
+    assert.equal(t?.result?.task_id, taskId)
+    assert.equal(t?.result?.attempt, t?.attempt)
+    assert.equal(t?.result?.status, 'failed')
+    assert.equal(t?.result?.summary, 'Adapter 终态结果收取失败：RESULT_UNPARSABLE')
+    assert.deepEqual(t?.result?.criterion_results, [], '不得伪造任何验收标准通过')
+    assert.deepEqual(t?.result?.artifacts, [])
+    assert.equal(t?.result?.error?.code, 'RESULT_UNPARSABLE')
+    assert.equal(t?.result?.error?.fingerprint, 'result-unparsable')
+    assert.doesNotMatch(t?.result?.error?.message ?? '', /raw provider output|prompt|stack/)
+  })
+
+  test('非终态 collectResult AdapterError 继续抛出，不落 failed 结果', async () => {
+    adapter = new TransientCollectErrorAdapter()
+    acts = newActs()
+    const taskId = await startTask()
+    await acts.dispatchTask(taskId)
+
+    await assert.rejects(
+      () => acts.collectTaskResult(taskId),
+      (err) => err instanceof AdapterError && err.code === 'TASK_STILL_RUNNING',
+    )
+    assert.equal((await store.getTask(taskId))?.result, null)
+  })
+
+  for (const code of ['TASK_FAILED', 'TASK_CANCELED'] as const) {
+    test(`已确认终态的 ${code} 落成 failed TaskResult`, async () => {
+      adapter = new TerminalTaskCollectErrorAdapter(code)
+      acts = newActs()
+      const taskId = await startTask()
+      await acts.dispatchTask(taskId)
+
+      const out = await acts.collectTaskResult(taskId)
+      const result = (await store.getTask(taskId))?.result
+
+      assert.equal(out.status, 'failed')
+      assert.equal(out.passed, false)
+      assert.equal(result?.status, 'failed')
+      assert.equal(result?.error?.code, code)
+      assert.equal(result?.error?.fingerprint, code.toLowerCase().replace('_', '-'))
+      assert.deepEqual(result?.criterion_results, [])
+      assert.deepEqual(result?.artifacts, [])
+      assert.doesNotMatch(result?.error?.message ?? '', /raw provider output|prompt|stack/)
+    })
+  }
 
   test('等不到终态时明确超时失败，不静默挂起', async () => {
     const taskId = await startTask()
