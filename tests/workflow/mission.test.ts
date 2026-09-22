@@ -22,12 +22,14 @@ import { Worker, NativeConnection } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 
 import { MemoryStore } from '#domain-model'
 import type { Mission, RemoteTaskBinding, Store, TaskResultV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
+import { FakeAdapter, FileFakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // 每次测试进程用独立队列。Temporal 会保留失败用例留下的 Workflow；固定队列
@@ -41,6 +43,7 @@ let client: Client
 let conn: Connection
 let store: Store
 let adapter: FakeAdapter
+let workRoot: string
 
 const mission = (id: string, constraints: Record<string, unknown> = {}): Mission => ({
   id,
@@ -59,7 +62,8 @@ const mission = (id: string, constraints: Record<string, unknown> = {}): Mission
 
 before(async () => {
   store = new MemoryStore()
-  adapter = new FakeAdapter()
+  adapter = new FileFakeAdapter()
+  workRoot = await mkdtemp(join(tmpdir(), 'cmap-mission-input-fixture-'))
 
   try {
     conn = await Connection.connect({ address: ADDRESS, connectTimeout: 15_000 })
@@ -72,7 +76,7 @@ before(async () => {
       // Activity 注入 Store 与假 Adapter：这里验证的是编排逻辑，
       // 真实 Agent 调用由 scripts/e2e-single-hop.mjs 覆盖。
       activities: createActivities(syntheticActivityDeps({
-        store, adapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1,
+        store, adapter, workRoot, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1,
       })),
     })
     workerRun = worker.run()
@@ -95,6 +99,7 @@ after(async () => {
   worker?.shutdown()
   await workerRun?.catch(() => {})
   await conn?.close()
+  if(workRoot)await rm(workRoot,{recursive:true,force:true})
 })
 
 const run = async (missionId: string) => {

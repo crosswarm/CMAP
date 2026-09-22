@@ -1,8 +1,15 @@
 import {createHash} from 'node:crypto'
+import {readFileSync} from 'node:fs'
+import {isDeepStrictEqual} from 'node:util'
+import {Ajv2020} from 'ajv/dist/2020.js'
+import addFormats from 'ajv-formats'
 import {RISK_LEVELS, TaskConflictError, assertSameTaskInput} from '#domain-model'
 import type {Store, TaskRecord, TaskEnvelopeV1, RiskLevel} from '#domain-model'
 
 export const MISSION_ACTOR={type:'system',id:'mission-workflow'} as const
+const ajv = new Ajv2020({strict:false,allErrors:true})
+addFormats.default(ajv)
+const validateEnvelope = ajv.compile(JSON.parse(readFileSync(new URL('../schemas/task-envelope.v1.schema.json',import.meta.url),'utf8')))
 
 export interface CreateTaskInput {
   readonly missionId:string
@@ -11,6 +18,9 @@ export interface CreateTaskInput {
   readonly supersedesTaskId?:string
   /** Omitted is the reserved initial intent. Distinct direct creates need distinct keys. */
   readonly creationKey?:string
+  readonly taskType?:string
+  readonly parameters?:Record<string,unknown>
+  readonly artifactRefs?:readonly NonNullable<NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs']>[number][]
 }
 export interface CreateTaskOutput { readonly taskId:string }
 
@@ -19,12 +29,28 @@ export function taskCreationId(missionId:string,creationKey='initial'):string {
   return `tsk_${createHash('sha256').update(JSON.stringify(['cmap/task-creation/v1',missionId,creationKey])).digest('hex')}`
 }
 
-const snapshot=(input:CreateTaskInput):CreateTaskInput=>({
-  missionId:input.missionId,capability:input.capability,
-  ...(input.goal!==undefined?{goal:input.goal}:{}),
-  ...(input.supersedesTaskId!==undefined?{supersedesTaskId:input.supersedesTaskId}:{}),
-  ...(input.creationKey!==undefined?{creationKey:input.creationKey}:{}),
-})
+export function snapshotTaskParameters(value:Record<string,unknown>):Record<string,unknown> {
+  try {
+    const cloned=structuredClone(value)
+    if(!cloned || typeof cloned!=='object' || Array.isArray(cloned) ||
+      !isDeepStrictEqual(cloned,JSON.parse(JSON.stringify(cloned)))) throw new Error()
+    return cloned
+  } catch { throw new Error('TASK_PARAMETERS_INVALID') }
+}
+
+const snapshot=(input:CreateTaskInput):CreateTaskInput=>{
+  try {
+    return {
+      missionId:input.missionId,capability:input.capability,
+      ...(input.goal!==undefined?{goal:input.goal}:{}),
+      ...(input.supersedesTaskId!==undefined?{supersedesTaskId:input.supersedesTaskId}:{}),
+      ...(input.creationKey!==undefined?{creationKey:input.creationKey}:{}),
+      ...(input.taskType!==undefined?{taskType:input.taskType}:{}),
+      ...(input.parameters!==undefined?{parameters:snapshotTaskParameters(input.parameters)}:{}),
+      ...(input.artifactRefs!==undefined?{artifactRefs:structuredClone(input.artifactRefs)}:{}),
+    }
+  } catch { throw new Error('TASK_CREATION_INPUT_INVALID') }
+}
 
 export async function taskCreationMatches(store:Store,task:TaskRecord,input:CreateTaskInput):Promise<boolean> {
   const expected=await buildTask(store,snapshot(input),task.id)
@@ -95,7 +121,7 @@ async function buildTask(store:Store,input:CreateTaskInput,taskId:string):Promis
       owner: m.owner,
     },
     classification: {
-      task_type: m.type,
+      task_type: input.taskType ?? m.type,
       requested_capability: input.capability,
       risk_level: risk,
     },
@@ -103,6 +129,10 @@ async function buildTask(store:Store,input:CreateTaskInput,taskId:string):Promis
       statement: input.goal ?? m.goal,
       success_definition: [firstCriterion, ...restCriteria],
     },
+    ...(input.parameters!==undefined || input.artifactRefs!==undefined ? {inputs:{
+      ...(input.parameters!==undefined?{parameters:input.parameters}:{}),
+      ...(input.artifactRefs!==undefined?{artifact_refs:[...input.artifactRefs]}:{}),
+    }} : {}),
     // 工作目录不进信封：本机绝对路径会让同一任务无法在别的机器上执行。
     environment: { tenant: m.tenant },
     execution_policy: { timeout_seconds: 300, max_attempts: 1 },
@@ -110,6 +140,7 @@ async function buildTask(store:Store,input:CreateTaskInput,taskId:string):Promis
     evidence_requirements: { required_artifact_roles: ['report'] },
     output_contract: { schema_uri: 'https://cmap.local/schemas/task-result/v1' },
   } as TaskEnvelopeV1
+  if(!validateEnvelope(envelope))throw new Error('TASK_ENVELOPE_INVALID')
 
   return {
     id: taskId,

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 
 process.env['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
@@ -33,7 +35,7 @@ import type {
 import type { ApprovalDecisionInputV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter, syntheticActivityDeps, syntheticRunner } from './fake-adapter.ts'
+import { FakeAdapter, FileFakeAdapter, syntheticActivityDeps, syntheticRunner } from './fake-adapter.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const TEMPORAL_ADDRESS = process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233'
@@ -134,7 +136,7 @@ class ThrowAfterCommitStore implements Store {
 type CliMissingBindingAdapter = FakeAdapter & { missingBinding: boolean }
 
 const cliMissingBindingAdapter = (): CliMissingBindingAdapter => {
-  const adapter = new FakeAdapter() as CliMissingBindingAdapter
+  const adapter = new FileFakeAdapter() as CliMissingBindingAdapter
   Object.defineProperty(adapter, 'adapterId', { value: 'codex-adapter' })
   Object.defineProperty(adapter, 'agentId', { value: 'codex' })
   adapter.missingBinding = false
@@ -156,12 +158,14 @@ let native: NativeConnection
 let worker: Worker
 let workerRun: Promise<void>
 let client: Client
+let workRoot: string
 
 before(async () => {
   pgStore = new PgStore({ connectionString: CONN, schema: SCHEMA })
   await pgStore.migrate()
   store = new ThrowAfterCommitStore(pgStore)
   adapter = cliMissingBindingAdapter()
+  workRoot = await mkdtemp(join(tmpdir(), 'cmap-pg-retry-input-fixture-'))
   conn = await Connection.connect({ address: TEMPORAL_ADDRESS, connectTimeout: 15_000 })
   native = await NativeConnection.connect({ address: TEMPORAL_ADDRESS })
   worker = await Worker.create({
@@ -172,6 +176,7 @@ before(async () => {
     activities: createActivities(syntheticActivityDeps({
       store,
       adapter,
+      workRoot,
       runner: syntheticRunner({ runner_id: 'pg-retry-runner' }),
       pollIntervalMs: 1,
     })),
@@ -186,6 +191,7 @@ after(async () => {
   await conn?.close()
   await native?.close()
   await pgStore?.close()
+  if(workRoot)await rm(workRoot,{recursive:true,force:true})
   const c = new pg.Client({ connectionString: CONN })
   await c.connect()
   try {

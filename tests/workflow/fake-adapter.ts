@@ -7,7 +7,9 @@
  *
  * 本文件不以 .test.ts 结尾，避免被测试运行器当作独立用例执行。
  */
-import { generateKeyPairSync } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import {
   issueDispatchPermit,
@@ -210,5 +212,23 @@ export class FakeAdapter implements AgentAdapter {
 
   async health(): Promise<AdapterHealth> {
     return { state: 'healthy', checked_at: new Date().toISOString() }
+  }
+}
+
+/** Synthetic transport with actual report bytes for input-copy integration tests. */
+export class FileFakeAdapter extends FakeAdapter {
+  override async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
+    const result = await super.collectResult(binding)
+    if (result.artifacts.length === 0) return result
+    if (result.artifacts.length !== 1 || result.artifacts[0]!.uri !== 'evidence/report.json') {
+      throw new Error('File fixture requires its synthetic report artifact')
+    }
+    const index = this.startCalls.findIndex(envelope => 'fake:' + envelope.identity.task_id === binding.remote_task_id)
+    const worktree = this.contexts[index]?.worktree
+    if (!worktree) throw new Error('File fixture requires a scoped worktree')
+    const bytes = Buffer.from(JSON.stringify({synthetic: true, revision: result.artifacts[0]!.sha256, criteria: result.criterion_results}))
+    await mkdir(join(worktree, 'evidence'), {recursive: true})
+    await writeFile(join(worktree, 'evidence/report.json'), bytes)
+    return {...result, artifacts: [{...result.artifacts[0]!,sha256:createHash('sha256').update(bytes).digest('hex'),size_bytes:bytes.length}]}
   }
 }

@@ -1,7 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
-import { access, link, lstat, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { join, relative, resolve } from 'node:path'
+import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 
 import {
@@ -20,20 +18,13 @@ import {
 } from '#domain-model'
 import { preflightTaskAdmission, type AdmissionDenial } from './runner-admission.ts'
 import type { TaskEnvelopeV1 } from '#domain-model'
-import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import type { MissionPlanV1 } from '../packages/domain-model/src/generated/mission-plan.ts'
+import { INPUT_PAYLOAD, safeChildDir, safeMkdir, publishInput, verifiedArtifactBytes } from './artifact-files.ts'
 
 type DagNode = MissionPlanV1['nodes'][number]
 
 const ACTOR = { type: 'system', id: 'dag-materializer' } as const
-const INPUT_PAYLOAD = 'payload'
-
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
-
-const inside = (root: string, candidate: string): boolean => {
-  const r = relative(root, candidate)
-  return r === '' || (!r.startsWith('..') && !r.startsWith('/'))
-}
 
 const sameKeys = (actual: readonly string[], expected: readonly string[]): boolean => {
   if (actual.length !== expected.length) return false
@@ -251,74 +242,6 @@ const assertDeps = async (
   return taskIds
 }
 
-const safeChildDir = async (workRoot: string, taskId: string): Promise<{ root: string; child: string }> => {
-  await mkdir(workRoot, { recursive: true })
-  const root = await realpath(workRoot)
-  const child = resolve(root, taskId)
-  if (!inside(root, child)) throw new Error('DAG child workDir escapes workRoot')
-  try {
-    const st = await lstat(child)
-    if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('DAG child workDir preexists as unsafe path')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    try {
-      await mkdir(child)
-    } catch (mkdirError) {
-      if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
-    }
-  }
-  const realChild = await realpath(child)
-  if (!inside(root, realChild)) throw new Error('DAG child workDir escapes workRoot')
-  return { root, child: realChild }
-}
-
-const safeMkdir = async (root: string, segments: readonly string[]): Promise<string> => {
-  let current = root
-  for (const segment of segments) {
-    current = join(current, segment)
-    if (!inside(root, resolve(current))) throw new Error('DAG input path escapes workRoot')
-    try {
-      const st = await lstat(current)
-      if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('DAG input directory symlink is unsafe')
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      try {
-        await mkdir(current)
-      } catch (mkdirError) {
-        if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError
-      }
-    }
-  }
-  return current
-}
-
-const publishInput = async (dir: string, bytes: Buffer): Promise<void> => {
-  const target = join(dir, INPUT_PAYLOAD)
-  try {
-    const st = await lstat(target)
-    if (st.isSymbolicLink() || !st.isFile()) throw new Error('DAG input target symlink is unsafe')
-    const existing = await readFile(target)
-    if (!existing.equals(bytes)) throw new Error('DAG input conflict: existing payload differs')
-    return
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-
-  const temp = join(dir, `.tmp-${process.pid}-${randomUUID()}`)
-  await writeFile(temp, bytes, { flag: 'wx' })
-  try {
-    await link(temp, target)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    const st = await lstat(target)
-    if (st.isSymbolicLink() || !st.isFile()) throw new Error('DAG input target symlink is unsafe')
-    const existing = await readFile(target)
-    if (!existing.equals(bytes)) throw new Error('DAG input conflict: existing payload differs')
-  } finally {
-    await rm(temp, { force: true })
-  }
-}
-
 const assertArtifactOwned = (artifact: Artifact, parentTaskId: string): void => {
   if (artifact.task_id !== parentTaskId) {
     throw new Error(`DAG artifact ownership mismatch: ${artifact.artifact_id}`)
@@ -337,23 +260,13 @@ const copyParentArtifacts = async (
   const refs: NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs'] = []
   for (const depNodeId of depNodeIds) {
     const parentTaskId = acceptedDeps[depNodeId]!
-    const parentDir = resolve(root, parentTaskId)
-    if (!inside(root, parentDir)) throw new Error('DAG parent workDir escapes workRoot')
-    const parentStat = await lstat(parentDir)
-    if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) throw new Error('DAG parent workDir symlink is unsafe')
-    if (!inside(root, await realpath(parentDir))) throw new Error('DAG parent workDir escapes workRoot')
-    await access(parentDir, constants.R_OK)
     const artifacts = (await store.listArtifacts(parentTaskId))
       .filter((a) => a.state === 'AVAILABLE')
       .toSorted((a, b) => a.artifact_id.localeCompare(b.artifact_id))
     for (const artifact of artifacts) {
       assertArtifactOwned(artifact, parentTaskId)
       if (artifact.mission_id !== missionId) throw new Error(`DAG artifact mission mismatch: ${artifact.artifact_id}`)
-      const verified = await readVerifiedArtifact(parentDir, {
-        uri: artifact.uri,
-        role: artifact.role,
-        sha256: artifact.sha256,
-      })
+      const verified = await verifiedArtifactBytes(root, parentTaskId, artifact)
       const artifactBucket = hash(artifact.artifact_id)
       const dir = await safeMkdir(child, ['inputs', depNodeId, artifactBucket])
       await publishInput(dir, verified.bytes)

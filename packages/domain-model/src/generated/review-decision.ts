@@ -56,10 +56,13 @@ export interface ReviewDecisionV1 {
     capability: string
     task_type: string
     inputs?: {
+      /**
+       * 产物 ID，按声明顺序保留。新 followup format2 由控制面解析同 Mission、同 tenant/owner 的已收取终态产物，冻结 source_task_id/role/hash/目标相对路径；未知、未就绪或无权限引用拒绝，不将 ID 当文件路径。
+       */
       artifact_refs?: string[]
     }
     /**
-     * 后继任务的参数，形状由 capability 决定，此处刻意保持自由
+     * 后继任务的 JSON 参数，形状由 capability 决定。新 followup format2 原样深拷贝到 TaskEnvelope.inputs.parameters；task_type 同样保留为后继任务类型。参数不覆盖风险、权限或派发策略。旧格式回执仍按已冻结的旧任务形状恢复。
      */
     parameters?: {
       [k: string]: unknown

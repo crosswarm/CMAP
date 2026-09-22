@@ -38,6 +38,7 @@ import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmis
 import {createLedgerTask, MISSION_ACTOR as ACTOR, type CreateTaskInput, type CreateTaskOutput} from './task-creation.ts'
 import { applyReviewApplication } from './review-application.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
+import { prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -259,7 +260,7 @@ export const createActivities = (deps: ActivityDeps) => {
     return selected
   }
 
-  const selectAdapter = async (envelope: TaskEnvelopeV1): Promise<AgentAdapter> => {
+  const selectAdapter = async (envelope: TaskEnvelopeV1): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean}> => {
     if (!adapters.length) throw new Error('未注入 Adapter：控制面没有可派发的目标')
     const policy = envelope.execution_policy
     const ids = [...(policy.preferred_agent ? [policy.preferred_agent] : []), ...(policy.fallback_agents ?? [])]
@@ -276,7 +277,7 @@ export const createActivities = (deps: ActivityDeps) => {
         const ceiling = risks.indexOf(descriptor.risk_ceiling)
         if (required < 0 || ceiling < required) continue
         if ((await candidate.health()).state !== 'healthy') continue
-        return candidate
+        return {adapter: candidate, supportsWorktreeIsolation: descriptor.supports_worktree_isolation}
       } catch {
         // 仅启动前探测允许转向下一候选；startTask 的不确定结果不得触发替补。
       }
@@ -447,7 +448,7 @@ export const createActivities = (deps: ActivityDeps) => {
       }
 
       const envelope = existing.envelope as TaskEnvelopeV1
-      const selectedAdapter = await selectAdapter(envelope)
+      const {adapter: selectedAdapter, supportsWorktreeIsolation} = await selectAdapter(envelope)
 
       const assertPreparedAuthority = async (expectedBinding?: RemoteTaskBinding, observedPolicy?: string): Promise<void> => {
         const task = await store.getTask(taskId)
@@ -483,6 +484,7 @@ export const createActivities = (deps: ActivityDeps) => {
             }
           }
         }
+        if (expectedBinding) await verifyReviewInputs(store, task, workRoot)
       }
       // Adapter health may await external I/O. Recheck authoritative scope before local preparation.
       const current = await store.getTask(taskId)
@@ -491,7 +493,14 @@ export const createActivities = (deps: ActivityDeps) => {
       if (rechecked) return {dispatched:false,...rechecked}
       if (current.binding) return {dispatched:false,remoteTaskId:current.binding.remote_task_id}
       if (selectedAdapter.prepareBinding) {
-        try {await assertPreparedAuthority()}
+        try {
+          await assertPreparedAuthority()
+          if (envelope.inputs?.artifact_refs?.some(ref => Object.hasOwn(ref, 'source_task_id')) &&
+            supportsWorktreeIsolation !== true) {
+            throw new RunnerAdmissionError('INPUT_INVALID')
+          }
+          await prepareReviewInputs(store, current, workRoot)
+        }
         catch (error) {
           if (!(error instanceof RunnerAdmissionError)) throw error
           return {dispatched:false,...await persistAdmissionDenial(store,runner,current,error,'initial')}

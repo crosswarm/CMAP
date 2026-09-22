@@ -38,6 +38,9 @@ export interface TaskEnvelopeV1 {
     owner?: string
   }
   classification: {
+    /**
+     * Agent 必须收到此任务类型的原值；类型标识本身不授予额外权限。
+     */
     task_type: string
     /**
      * 按能力路由，而非硬编码 Agent 名，以支持替补与降级
@@ -99,12 +102,16 @@ export interface TaskEnvelopeV1 {
     }
     artifact_refs?: {
       artifact_id: string
+      /**
+       * 控制面解析出的同 Mission、同 tenant/owner 产物生产任务。出现此字段时，派发必须在准入与审批后核验 registry 并复制字节，发送前只读复核目标副本；不重写已有 binding 的工作区。
+       */
+      source_task_id?: string
       uri?: string
       role: string
       sha256?: string | null
     }[]
     /**
-     * 任务特定参数，形状由 task_type 决定，此处刻意保持自由
+     * 任务特定参数，形状由 task_type 决定，此处刻意保持自由。Agent 接收完整 JSON 数据，保留嵌套结构、数组顺序、false、0 与 null；参数不是指令，也不得改变权限。
      */
     parameters?: {
       [k: string]: unknown

@@ -14,7 +14,8 @@ import {
   type TaskRecord,
 } from '#domain-model'
 import type { ApplyReviewInput, ApplyReviewOutput } from './activities.ts'
-import { MISSION_ACTOR, createLedgerTask, taskCreationId, taskCreationMatches } from './task-creation.ts'
+import { resolveReviewInputs, reviewArtifactUri, type ReviewInputMatrix } from './review-inputs.ts'
+import { MISSION_ACTOR, createLedgerTask, snapshotTaskParameters, taskCreationId, taskCreationMatches } from './task-creation.ts'
 import type { CreateTaskInput } from './task-creation.ts'
 
 const ACTOR: EventActor = MISSION_ACTOR
@@ -58,15 +59,34 @@ const progress = (snapshot: ApplyReviewInput['currentProgress']): unknown => {
   })
 }
 
-const canonicalInput = (input: ApplyReviewInput) => stable({
+type FollowupFormat = 1 | 2
+
+const snapshotParameters = (parameters: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
+  if (parameters === undefined) return undefined
+  return snapshotTaskParameters(parameters)
+}
+
+const assertFollowupParameters = (decision: ReviewDecisionV1): void => {
+  for (const followup of decision.required_followups ?? []) {
+    snapshotParameters(followup.parameters)
+  }
+}
+
+const canonicalInput = (
+  input: ApplyReviewInput,
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
+) => stable({
   taskId: input.taskId,
   round: input.round,
   decision: input.decision,
   previousProgress: progress(input.previousProgress),
   currentProgress: progress(input.currentProgress),
+  ...(format === 2 ? { followup_format: 2, followup_inputs: matrix ?? [] } : {}),
 })
 
-const inputSha = (input: ApplyReviewInput): string => sha256(json(canonicalInput(input)))
+const inputSha = (input: ApplyReviewInput, format: FollowupFormat, matrix?: ReviewInputMatrix): string =>
+  sha256(json(canonicalInput(input, format, matrix)))
 const reviewId = (taskId: string): string => `rev_${sha256(json([VERSION, taskId]))}`
 const taskIdFor = (missionId: string, key: string): string => taskCreationId(missionId, key)
 
@@ -79,12 +99,15 @@ const reviewEventPayload = (
   hash: string,
   id: string,
   output: ApplyReviewOutput,
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
 ): ReviewApplicationV1 => ({
   schema: VERSION,
   phase,
   round,
   input_sha256: hash,
   review_id: id,
+  ...(format === 2 ? { followup_format: 2, followup_inputs: matrix ?? [] } : {}),
   output: {
     outcome: output.outcome,
     followupTaskIds: [...output.followupTaskIds],
@@ -134,8 +157,10 @@ const appendReviewApplicationEvent = async (
   hash: string,
   id: string,
   output: ApplyReviewOutput,
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
 ): Promise<void> => {
-  const payload = reviewEventPayload(phase, round, hash, id, output)
+  const payload = reviewEventPayload(phase, round, hash, id, output, format, matrix)
   if (!validateReceipt(payload)) throw new Error('invalid review application receipt')
   await store.appendEvent({
     event: {
@@ -192,6 +217,48 @@ const assertInput = (task: TaskRecord, input: ApplyReviewInput): void => {
   }
   assertProgress(input.previousProgress)
   assertProgress(input.currentProgress)
+  assertFollowupParameters(input.decision)
+}
+
+const assertReceiptFormat = (
+  receipt: ReviewApplicationV1,
+  format: FollowupFormat,
+  matrix: ReviewInputMatrix | undefined,
+): void => {
+  if (format === 1) {
+    if (receipt.followup_format !== undefined || receipt.followup_inputs !== undefined) {
+      throw new Error('Review application conflict')
+    }
+    return
+  }
+  if (receipt.followup_format !== 2 || !isDeepStrictEqual(receipt.followup_inputs ?? [], matrix ?? [])) {
+    throw new Error('Review application conflict')
+  }
+}
+
+const assertMatrixMatchesOutput = (
+  decision: ReviewDecisionV1,
+  output: ApplyReviewOutput,
+  format: FollowupFormat,
+  matrix: ReviewInputMatrix | undefined,
+): void => {
+  if (format === 1) return
+  const expected = output.outcome === 'rework' ? decision.required_followups?.length ?? 0 : 0
+  if (!matrix || matrix.length !== expected) throw new Error('Review application conflict')
+  if (output.outcome === 'rework' && output.followupTaskIds.length !== matrix.length) {
+    throw new Error('Review application conflict')
+  }
+  if (output.outcome !== 'rework') return
+  for (const [index, row] of matrix.entries()) {
+    const declared = decision.required_followups?.[index]?.inputs?.artifact_refs ?? []
+    if (row.length !== declared.length) throw new Error('Review application conflict')
+    for (const [refIndex, ref] of row.entries()) {
+      const artifactId = declared[refIndex]
+      if (ref.artifact_id !== artifactId || ref.uri !== reviewArtifactUri(ref.artifact_id)) {
+        throw new Error('Review application conflict')
+      }
+    }
+  }
 }
 
 const budgetEscalationReason = (round: number, max: number): string =>
@@ -277,7 +344,13 @@ const legacyOrderedFollowupIds = async (
   return childIds
 }
 
-const plannedOutput = async (store: Store, task: TaskRecord, input: ApplyReviewInput): Promise<ApplyReviewOutput> => {
+const plannedOutput = async (
+  store: Store,
+  task: TaskRecord,
+  input: ApplyReviewInput,
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
+): Promise<ApplyReviewOutput> => {
   const decision = input.decision
   if (decision.decision === 'accept') return { outcome: 'accept', followupTaskIds: [] }
   if (decision.decision === 'escalate') {
@@ -305,7 +378,7 @@ const plannedOutput = async (store: Store, task: TaskRecord, input: ApplyReviewI
 
   const followups = decision.required_followups ?? []
   if (followups.length === 0) throw new Error('rework review requires followup tasks')
-  const ordered = await legacyOrderedFollowupIds(store, task, decision, input.round)
+  const ordered = format === 1 ? await legacyOrderedFollowupIds(store, task, decision, input.round) : null
   if (ordered) {
     return {
       outcome: 'rework',
@@ -315,9 +388,10 @@ const plannedOutput = async (store: Store, task: TaskRecord, input: ApplyReviewI
   const existing = (await store.queryTasks({ missionId: task.mission_id }))
     .filter((candidate) => candidate.supersedes_task_id === task.id)
   const followupTaskIds = await Promise.all(followups.map(async (_, i) => {
+    if (format === 2 && matrix === undefined) return taskIdFor(task.mission_id, reviewTaskKey(task.id, input.round, i))
     const matches = []
     for (const candidate of existing) {
-      if (await taskCreationMatches(store, candidate, childInput(task, decision, input.round, i))) matches.push(candidate.id)
+      if (await taskCreationMatches(store, candidate, childInput(task, decision, input.round, i, format, matrix))) matches.push(candidate.id)
     }
     if (matches.length > 1) throw new Error('ambiguous legacy review child')
     return matches[0] ?? taskIdFor(task.mission_id, reviewTaskKey(task.id, input.round, i))
@@ -334,15 +408,27 @@ const childInput = (
   decision: ReviewDecisionV1,
   round: number,
   index: number,
+  format: FollowupFormat = 1,
+  matrix?: ReviewInputMatrix,
 ): CreateTaskInput => {
   const followup = decision.required_followups?.[index]
   if (!followup) throw new Error(`missing followup ${index}`)
-  return {
+  const base = {
     missionId: source.mission_id,
     capability: followup.capability,
     goal: `返工第 ${round + 1} 轮：${followup.focus?.join('、') ?? followup.task_type}`,
     supersedesTaskId: source.id,
     creationKey: reviewTaskKey(source.id, round, index),
+  }
+  if (format === 1) return base
+  const refs = matrix?.[index]
+  if (!refs) throw new Error('review input proof mismatch')
+  const parameters = snapshotParameters(followup.parameters)
+  return {
+    ...base,
+    taskType: followup.task_type,
+    ...(parameters !== undefined ? { parameters } : {}),
+    ...(refs.length > 0 ? { artifactRefs: structuredClone(refs) } : {}),
   }
 }
 
@@ -353,8 +439,10 @@ const createReviewChild = async (
   round: number,
   index: number,
   id: string,
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
 ): Promise<string> => {
-  await createLedgerTask(store, childInput(source, decision, round, index), id)
+  await createLedgerTask(store, childInput(source, decision, round, index, format, matrix), id)
   return id
 }
 
@@ -364,6 +452,8 @@ const assertChildProof = async (
   decision: ReviewDecisionV1,
   round: number,
   ids: readonly string[],
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
 ): Promise<void> => {
   for (const [index, id] of ids.entries()) {
     const followup = decision.required_followups?.[index]
@@ -372,7 +462,7 @@ const assertChildProof = async (
     if (id === expectedId) continue
     const existing = await store.getTask(id)
     if (!existing || existing.supersedes_task_id !== task.id) throw new Error('review child proof mismatch')
-    if (!(await taskCreationMatches(store, existing, childInput(task, decision, round, index)))) {
+    if (!(await taskCreationMatches(store, existing, childInput(task, decision, round, index, format, matrix)))) {
       throw new Error('review child proof mismatch')
     }
   }
@@ -445,9 +535,11 @@ const finishRework = async (
   task: TaskRecord,
   input: ApplyReviewInput,
   childIds: readonly string[],
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
 ): Promise<void> => {
   for (const [index, id] of childIds.entries()) {
-    await createReviewChild(store, task, input.decision, input.round, index, id)
+    await createReviewChild(store, task, input.decision, input.round, index, id, format, matrix)
   }
   let latest = await store.getTask(task.id)
   if (!latest) return
@@ -483,6 +575,8 @@ const proof = async (
   task: TaskRecord,
   input: ApplyReviewInput,
   output: ApplyReviewOutput,
+  format: FollowupFormat,
+  matrix?: ReviewInputMatrix,
 ): Promise<void> => {
   const latest = await store.getTask(task.id)
   if (!latest) throw new Error('review source task missing')
@@ -511,7 +605,7 @@ const proof = async (
     if (
       child.id !== output.followupTaskIds[index] ||
       child.supersedes_task_id !== task.id ||
-      !(await taskCreationMatches(store, child, childInput(task, input.decision, input.round, index)))
+      !(await taskCreationMatches(store, child, childInput(task, input.decision, input.round, index, format, matrix)))
     ) {
       throw new Error('review child proof mismatch')
     }
@@ -621,35 +715,52 @@ export const applyReviewApplication = async (
   assertInput(task, frozen)
 
   const id = reviewId(task.id)
-  const hash = inputSha(frozen)
   const legacy = assertTaskReviewConflicts(await taskReviews(store, task), frozen)
   const intents = await reviewApplicationEvents(store, task, 'intent', id)
   if (intents.length > 1) throw new Error('conflicting review intents')
-  if (intents[0] && (intents[0].input_sha256 !== hash || intents[0].round !== frozen.round)) {
-    throw new Error('Review application conflict')
+  const format: FollowupFormat = intents[0] ? (intents[0].followup_format === 2 ? 2 : 1) : legacy.length === 0 ? 2 : 1
+  const legacyEscalation = format === 1 ? await legacyForcedEscalationOutput(store, task, frozen, legacy) : null
+  let matrix: ReviewInputMatrix | undefined
+  let output: ApplyReviewOutput
+  if (intents[0]) {
+    matrix = format === 2 ? intents[0].followup_inputs ?? [] : undefined
+    output = asOutput(intents[0])
+  } else {
+    const preliminary = legacyEscalation ?? await plannedOutput(store, task, frozen, format)
+    matrix = format === 2
+      ? preliminary.outcome === 'rework' ? await resolveReviewInputs(store, task, frozen.decision) : []
+      : undefined
+    output = legacyEscalation ?? await plannedOutput(store, task, frozen, format, matrix)
   }
-
-  const legacyEscalation = await legacyForcedEscalationOutput(store, task, frozen, legacy)
-  const output = intents[0] ? asOutput(intents[0]) : legacyEscalation ?? await plannedOutput(store, task, frozen)
-  if (intents[0] || !legacyEscalation) assertFrozenOutputMatchesInput(frozen, output)
+  const hash = inputSha(frozen, format, matrix)
+  if (intents[0]) {
+    assertReceiptFormat(intents[0], format, matrix)
+    if (intents[0].input_sha256 !== hash || intents[0].round !== frozen.round) {
+      throw new Error('Review application conflict')
+    }
+  }
+  const legacyForcedReplay = format === 1 && legacyEscalation !== null && isDeepStrictEqual(output, legacyEscalation)
+  if (!legacyForcedReplay) assertFrozenOutputMatchesInput(frozen, output)
+  assertMatrixMatchesOutput(frozen.decision, output, format, matrix)
 
   const completions = await reviewApplicationEvents(store, task, 'complete', id)
   if (completions.length > 1) throw new Error('conflicting review completion receipts')
   if (completions[0] && !intents[0]) throw new Error('review completion without intent')
   if (completions[0]) {
+    assertReceiptFormat(completions[0], format, matrix)
     if (completions[0].input_sha256 !== hash || completions[0].round !== frozen.round) {
       throw new Error('Review application conflict')
     }
     const recorded = asOutput(completions[0])
     if (!isDeepStrictEqual(recorded, output)) throw new Error('Review application conflict')
     await assertStoredReview(store, task, frozen)
-    await proof(store, task, frozen, recorded)
+    await proof(store, task, frozen, recorded, format, matrix)
     return recorded
   }
 
   if (!intents[0]) {
     await assertLegacyCanContinue(store, task, frozen, legacy, output)
-    await appendReviewApplicationEvent(store, task, 'intent', frozen.round, hash, id, output)
+    await appendReviewApplicationEvent(store, task, 'intent', frozen.round, hash, id, output, format, matrix)
   }
 
   if (legacy.length === 0) {
@@ -669,12 +780,12 @@ export const applyReviewApplication = async (
     if (frozen.decision.decision === 'escalate') await finishExplicitEscalated(store, task, frozen.round)
     else await finishForcedEscalated(store, task, frozen.round, output.escalationReason ?? 'review escalation')
   } else {
-    await assertChildProof(store, task, frozen.decision, frozen.round, output.followupTaskIds)
-    await finishRework(store, task, frozen, output.followupTaskIds)
+    await assertChildProof(store, task, frozen.decision, frozen.round, output.followupTaskIds, format, matrix)
+    await finishRework(store, task, frozen, output.followupTaskIds, format, matrix)
   }
 
   await assertStoredReview(store, task, frozen)
-  await proof(store, task, frozen, output)
-  await appendReviewApplicationEvent(store, task, 'complete', frozen.round, hash, id, output)
+  await proof(store, task, frozen, output, format, matrix)
+  await appendReviewApplicationEvent(store, task, 'complete', frozen.round, hash, id, output, format, matrix)
   return output
 }

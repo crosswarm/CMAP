@@ -107,7 +107,7 @@ WebUI 已接入目标创建、验收账本、证据预览、返工追踪、独�
 本机支持 inspect/v1 与显式 dag/v1；Codex＋Kimi 分叉汇合的真实执行、产物传递和历史重放已验证（[DAG 验证](docs/verification-dag-2026-09-21.md)）。
 本机 Kimi Adapter 见[运行说明](docs/kimi-adapter.md)；自然语言 Planner、YonWork Adapter、OIDC 与远程 runner 尚未完成。
 外部 [Planner CLI](docs/planner.md) 已实现本地契约闭环，真实 Claude 访问返回 403，尚未通过端到端验证。
-Mission 多后继已支持有界 FIFO、逐分支审批、停止后的待执行任务清理及历史兼容，见 [验证记录](docs/verification-mission-followups-2026-09-22.md)；Reviewer 的 inputs/parameters/task_type 物化仍待完成。
+Mission 多后继已支持有界 FIFO、逐分支审批、停止后的待执行任务清理及历史兼容，见 [验证记录](docs/verification-mission-followups-2026-09-22.md)。Reviewer 的 task_type、parameters 和同权限范围内已评估产物输入已支持本机交付与重试恢复，见 [输入协议](docs/review-inputs.md) 和 [真实验证](docs/verification-review-inputs-2026-09-22.md)。
 验证见 [WebUI 交付记录](docs/verification-webui-2026-09-21.md)。
 逐项状态见 [docs/architecture.md](docs/architecture.md#当前实现状态)。
 

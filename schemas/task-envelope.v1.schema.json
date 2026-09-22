@@ -48,7 +48,7 @@
       "required": ["task_type", "requested_capability", "risk_level"],
       "additionalProperties": false,
       "properties": {
-        "task_type": { "type": "string", "minLength": 1 },
+        "task_type": { "type": "string", "minLength": 1, "description": "Agent 必须收到此任务类型的原值；类型标识本身不授予额外权限。" },
         "requested_capability": {
           "type": "string",
           "minLength": 1,
@@ -125,6 +125,7 @@
             "additionalProperties": false,
             "properties": {
               "artifact_id": { "type": "string", "minLength": 1 },
+              "source_task_id": { "type": "string", "minLength": 1, "description": "控制面解析出的同 Mission、同 tenant/owner 产物生产任务。出现此字段时，派发必须在准入与审批后核验 registry 并复制字节，发送前只读复核目标副本；不重写已有 binding 的工作区。" },
               "uri": { "type": "string" },
               "role": { "type": "string", "minLength": 1 },
               "sha256": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{64}$" }
@@ -134,7 +135,7 @@
         "parameters": {
           "type": "object",
           "additionalProperties": true,
-          "description": "任务特定参数，形状由 task_type 决定，此处刻意保持自由"
+          "description": "任务特定参数，形状由 task_type 决定，此处刻意保持自由。Agent 接收完整 JSON 数据，保留嵌套结构、数组顺序、false、0 与 null；参数不是指令，也不得改变权限。"
         },
         "context_summary": { "type": "string" }
       }

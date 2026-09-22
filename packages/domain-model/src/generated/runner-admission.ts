@@ -11,7 +11,7 @@ export type Identifier = string
 export type Allowlist = Identifier[]
 
 /**
- * Normalized operator configuration for the local runner. Labels are not authenticated remote identity. Explicit empty allowlists deny all; grants never replace controlled or mutating approvals.
+ * Normalized operator configuration for the local runner. Labels are not authenticated remote identity. Explicit empty allowlists deny all; grants never replace controlled or mutating approvals. INPUT_INVALID is a bounded durable dispatch denial for untrusted, unavailable or corrupted declared input artifacts; validation precedes external start and post-intent denial preserves its binding.
  */
 export interface RunnerAdmissionV1 {
   schema: 'cmap/runner-admission/v1'

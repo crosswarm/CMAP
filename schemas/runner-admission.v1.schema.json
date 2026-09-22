@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmap.local/schemas/runner-admission/v1",
   "title": "Runner Admission v1",
-  "description": "Normalized operator configuration for the local runner. Labels are not authenticated remote identity. Explicit empty allowlists deny all; grants never replace controlled or mutating approvals.",
+  "description": "Normalized operator configuration for the local runner. Labels are not authenticated remote identity. Explicit empty allowlists deny all; grants never replace controlled or mutating approvals. INPUT_INVALID is a bounded durable dispatch denial for untrusted, unavailable or corrupted declared input artifacts; validation precedes external start and post-intent denial preserves its binding.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "runner_id", "runner_tenant", "host", "allowed_tenants", "allowed_owners", "allowed_capabilities", "max_risk"],

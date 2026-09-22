@@ -53,3 +53,44 @@ test('one matching legacy initial task is retained; ambiguity and changed intent
   await assert.rejects(acts(store).createTask(input),/TASK_CREATION_AMBIGUOUS/)
   assert.equal((await store.queryTasks({missionId:m.id})).length,2)
 })
+
+test('typed parameters and normalized artifact refs survive creation, mutation and retries without changing authority', async () => {
+  const store = await fixture()
+  const artifactRefs = [{artifact_id:'source:report',source_task_id:'source',role:'report',sha256:'a'.repeat(64),uri:'inputs/review/'+'b'.repeat(64)+'/payload'}]
+  const parameters = {nested:{values:[0,false,null]},risk_level:'mutating',execution_policy:{max_attempts:999}}
+  const incoming = {...input,creationKey:'rich',taskType:'refinement.test',parameters,artifactRefs}
+  const original = structuredClone(incoming)
+  const getMission = store.getMission.bind(store)
+  const entered = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  store.getMission = async id => {entered.resolve();await release.promise;return getMission(id)}
+  const pending = acts(store).createTask(incoming)
+  await entered.promise
+  incoming.taskType = 'changed'
+  incoming.parameters.nested.values.push(99)
+  incoming.artifactRefs[0]!.role = 'changed'
+  release.resolve()
+  const created = await pending
+  store.getMission = getMission
+  const task = await store.getTask(created.taskId)
+  assert.equal(task?.envelope.classification.task_type,original.taskType)
+  assert.deepEqual(task.envelope.inputs?.parameters,original.parameters)
+  assert.deepEqual(task.envelope.inputs?.artifact_refs,original.artifactRefs)
+  assert.equal(task.risk,'read-meta')
+  assert.equal(task.envelope.execution_policy.max_attempts,1)
+  assert.deepEqual(task.envelope.permissions,{forbidden:[]})
+  assert.deepEqual(await acts(store).createTask(original),created)
+  await assert.rejects(acts(store).createTask({...original,parameters:{changed:true}}),TaskConflictError)
+})
+
+test('non-JSON parameters and empty task types fail before task writes; explicit empty parameters remain present', async () => {
+  const store = await fixture()
+  const cyclic: Record<string,unknown> = {};cyclic.self=cyclic
+  for (const parameters of [{value:Infinity},{value:1n},{value:undefined},{value:new Date()},cyclic]) {
+    await assert.rejects(acts(store).createTask({...input,parameters,creationKey:'bad'}),/INVALID/)
+  }
+  await assert.rejects(acts(store).createTask({...input,taskType:'',creationKey:'bad'}),/INVALID/)
+  assert.equal((await store.queryTasks({missionId:m.id})).length,0)
+  const created = await acts(store).createTask({...input,parameters:{},creationKey:'empty'})
+  assert.deepEqual((await store.getTask(created.taskId))?.envelope.inputs?.parameters,{})
+})

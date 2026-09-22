@@ -16,6 +16,20 @@ export interface ReviewApplicationV1 {
   round: number
   input_sha256: string
   review_id: string
+  /**
+   * Absent means legacy child template1. New applications freeze format2 and the descriptor matrix into their canonical input hash; intent and completion must agree. Never reinterpret old child rows.
+   */
+  followup_format?: 2
+  /**
+   * Format2 normalized artifact descriptors per child, in declared order. Exactly one entry per rework child and none for accept/escalated, checked at runtime. No source paths, bytes, goal or parameter text. Retries reconstruct children from this matrix; dispatch separately verifies current availability and permissions.
+   */
+  followup_inputs?: {
+    artifact_id: string
+    source_task_id: string
+    role: string
+    uri: string
+    sha256: string
+  }[][]
   output: {
     outcome: 'accept' | 'rework' | 'escalated'
     followupTaskIds: string[]

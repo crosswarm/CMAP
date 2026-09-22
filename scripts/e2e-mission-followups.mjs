@@ -1,7 +1,7 @@
 /** Real Pg/Temporal/Codex execution; only the two-followup reviewer decision is synthetic. */
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync } from 'node:crypto'
-import { mkdtemp, readFile, readdir } from 'node:fs/promises'
+import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +21,10 @@ const schema = 'cmap_followups_e2e_' + suffix
 const taskQueue = 'cmap-followups-e2e-' + suffix
 const missionId = 'mis-followups-e2e-' + suffix
 const runnerId = 'followups-e2e-runner'
+const inputMode = process.argv.includes('--inputs')
+const sourceNonce = randomUUID()
+const childMarkers = [randomUUID(), randomUUID()]
+const childTypes = ['inspect.followup.' + randomUUID(), 'inspect.followup.' + randomUUID()]
 const workRoot = await mkdtemp(join(tmpdir(), 'cmap-followups-e2e-'))
 const store = new PgStore({
   connectionString: process.env.CMAP_DATABASE_URL ?? 'postgres://temporal:temporal@localhost:5433/cmap',
@@ -38,6 +42,10 @@ const adapter = new CodexAdapter({
 const startedTaskIds = []
 const startTask = adapter.startTask.bind(adapter)
 adapter.startTask = async (envelope, context) => {
+  if (inputMode && startedTaskIds.length === 0) {
+    assert.ok(context.worktree)
+    await writeFile(join(context.worktree, 'seed.json'), JSON.stringify({ nonce: sourceNonce }))
+  }
   startedTaskIds.push(envelope.identity.task_id)
   return startTask(envelope, context)
 }
@@ -52,7 +60,8 @@ const activities = createActivities({
   signDispatchPermit: (envelope, { runnerId, adapterId }) =>
     issueDispatchPermit({ privateKey, issuer, runnerId, adapterId, envelope }),
 })
-const goal = '在当前工作目录创建 sample/，写入恰好 3 个文本文件，实际统计文件数并写入 evidence/report.json；如实报告实际数量。'
+const goal = '在当前工作目录创建 sample/，写入恰好 3 个文本文件，实际统计文件数并写入 evidence/report.json；如实报告实际数量。' +
+  (inputMode ? ' 报告必须是 JSON。没有输入证据时，从本工作目录 seed.json 读取 nonce 并原样写入报告。存在输入证据时，读取工作区输入副本中的 nonce，原样写入报告的 nonce 和 source_nonce。将收到的参数 verification.marker 原样写入 parameter_marker，features 数组原样写入 received_features，当前任务类型原样写入 received_task_type；未提供的字段写 null。不得猜测或伪造值。' : '')
 let stage = 'database'
 let connection
 let native
@@ -78,13 +87,19 @@ try {
         const evaluated = await activities.evaluateHardGate(input)
         if (input.round !== 0) return evaluated
         assert.equal(evaluated.decision.decision, 'accept', 'Source must actually pass before the synthetic review fixture')
+        const reportInputs = inputMode ? (await store.listArtifacts(input.taskId)).filter(a => a.role === 'report') : []
+        if (inputMode) assert.equal(reportInputs.length, 1)
         // This fixture requests two independent rebuilds; it does not impersonate business approval.
         return { ...evaluated, decision: {
           ...evaluated.decision, decision: 'rework',
           hard_gate_summary: { total: 2, passed: 1, failed: 1 },
           failed_criteria: [{ criterion_id: 'TEST-INDEPENDENT-REVIEW', expected: 'two independent rebuilds',
             actual: 'source task only', reason: 'Synthetic test reviewer requires two independent rebuilds' }],
-          required_followups: ['A', 'B'].map(label => ({ capability: 'code.analyze', task_type: 'inspect',
+          required_followups: ['A', 'B'].map((label, index) => ({ capability: 'code.analyze', task_type: inputMode ? childTypes[index] : 'inspect',
+            ...(inputMode ? {
+              inputs: { artifact_refs: reportInputs.map(a => a.artifact_id) },
+              parameters: { verification: { marker: childMarkers[index] }, features: [0, false, null] },
+            } : {}),
             focus: [goal, '独立复核 ' + label + '：在自己的工作目录重新完成目标，并生成自己的证据。'] })),
           stop_conditions: { max_additional_cycles: 1 },
           review_confidence: { level: 'high', limitations: ['Synthetic reviewer fixture, not a human approval or real Claude review'] },
@@ -93,7 +108,7 @@ try {
     },
   })
   stage = 'real-agent-workflow'
-  console.log(JSON.stringify({ stage, missionId, schema, taskQueue, workRoot, reviewer: 'synthetic', adapter: 'real-codex' }))
+  console.log(JSON.stringify({ stage, missionId, schema, taskQueue, workRoot, inputMode, reviewer: 'synthetic', adapter: 'real-codex' }))
   const started = Date.now()
   let handle
   const result = await worker.runUntil(async () => {
@@ -127,6 +142,28 @@ try {
       const path = isAbsolute(artifact.uri) ? artifact.uri : join(workRoot, taskId, artifact.uri)
       assert.equal(createHash('sha256').update(await readFile(path)).digest('hex'), artifact.sha256.toLowerCase())
     }
+    if (inputMode) {
+      const reports = artifacts.filter(a => a.role === 'report')
+      assert.equal(reports.length, 1)
+      const reportArtifact = reports[0]
+      const reportPath = isAbsolute(reportArtifact.uri) ? reportArtifact.uri : join(workRoot, taskId, reportArtifact.uri)
+      const report = JSON.parse(await readFile(reportPath, 'utf8'))
+      assert.equal(report.nonce, sourceNonce)
+      if (taskId !== result.taskIds[0]) {
+        const index = result.taskIds.indexOf(taskId) - 1
+        assert.equal(report.source_nonce, sourceNonce)
+        assert.equal(report.parameter_marker, childMarkers[index])
+        assert.equal(report.received_task_type, childTypes[index])
+        assert.deepEqual(report.received_features, [0, false, null])
+        assert.equal(task.envelope.classification.task_type, childTypes[index])
+        const refs = task.envelope.inputs?.artifact_refs
+        assert.equal(refs?.length, 1)
+        assert.equal(refs[0].source_task_id, result.taskIds[0])
+        const copied = await readFile(join(workRoot, taskId, refs[0].uri))
+        assert.equal(createHash('sha256').update(copied).digest('hex'), refs[0].sha256)
+        assert.equal(JSON.parse(copied.toString('utf8')).nonce, sourceNonce)
+      }
+    }
   }
   const events = await store.listEvents(missionId)
   assert.equal(events.filter(event => event.event_type === 'TASK_CANCELED').length, 0)
@@ -134,7 +171,7 @@ try {
   stage = 'history-replay'
   const history = await handle.fetchHistory()
   await Worker.runReplayHistory({ workflowsPath: join(repoRoot, 'workflows/index.ts') }, history)
-  console.log(JSON.stringify({ verified: true, missionId, schema, taskQueue, workRoot,
+  console.log(JSON.stringify({ verified: true, missionId, schema, taskQueue, workRoot, inputMode,
     taskIds: result.taskIds, taskCount: tasks.length, historyEvents: history.events.length,
     elapsedSeconds: (Date.now() - started) / 1000, reviewer: 'synthetic', adapter: 'real-codex',
     evidence: 'three files per task; reported counts, hashes, parentage, task/Mission completion and fresh history replay verified' }))

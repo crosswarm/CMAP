@@ -828,6 +828,7 @@ describe('Activity retry recovery', () => {
       followupTaskIds: [],
       escalationReason: '历史评审已决定升级，停止返工并升级',
     })
+    assert.deepEqual(await activities(store).applyReviewDecision({ taskId, decision, round: 1 }), out)
   })
 
   test('legacy forced escalation with only review-escalated event repairs failed terminal and mission', async () => {
@@ -851,6 +852,7 @@ describe('Activity retry recovery', () => {
     assert.deepEqual(out, { outcome: 'escalated', followupTaskIds: [], escalationReason: '历史评审已决定升级，停止返工并升级' })
     assert.equal((await store.getTask(taskId))?.state, 'FAILED_TERMINAL')
     assert.equal((await store.getMission(missionId))?.state, 'ESCALATED')
+    assert.deepEqual(await activities(store).applyReviewDecision({ taskId, decision, round: 1 }), out)
   })
 
   test('legacy forced escalation with task failed but mission running repairs mission state', async () => {
@@ -964,6 +966,43 @@ describe('Activity retry recovery', () => {
     assert.equal(out.followupTaskIds[0], 'legacy-child')
     assert.equal(out.followupTaskIds.length, 2)
     assert.equal((await store.queryTasks({ missionId })).filter((t) => t.supersedes_task_id === taskId).length, 2)
+  })
+
+  test('legacy format1 partial children keep old body despite new task fields', async () => {
+    const store = new ThrowAfterCommitStore()
+    const missionId = 'mis-review-legacy-format1-old-body'
+    await store.createMission({ mission: mission(missionId), actor: ACTOR })
+    const taskId = await toReviewable(store, missionId)
+    const task = await store.getTask(taskId)
+    assert.ok(task)
+    const decision = reworkDecision(missionId, taskId, 2)
+    decision.required_followups = [
+      {
+        capability: 'codex.performance.root_cause',
+        task_type: 'performance.deep-diagnosis',
+        inputs: { artifact_refs: ['art-old'] },
+        parameters: { marker: 'must-not-enter-legacy-child' },
+        focus: ['legacy-one'],
+      },
+      {
+        capability: 'codex.performance.root_cause',
+        task_type: 'performance.deep-diagnosis',
+        inputs: { artifact_refs: ['art-old'] },
+        parameters: { marker: 'must-not-enter-legacy-child' },
+        focus: ['legacy-two'],
+      },
+    ]
+    await store.putReview({ id: 'legacy-format1-old-body-review', mission_id: missionId, reviewed_task_ids: [taskId], round: 1, decision, created_at: T0 })
+    await createLegacyFollowup(store, missionId, task, 'legacy-old-body-child', '返工第 2 轮：legacy-one')
+
+    const out = await activities(store).applyReviewDecision({ taskId, decision, round: 1 })
+    assert.equal(out.followupTaskIds.length, 2)
+    for (const id of out.followupTaskIds) {
+      const child = await store.getTask(id)
+      assert.ok(child)
+      assert.equal(child.envelope.classification.task_type, 'perf')
+      assert.equal(child.envelope.inputs, undefined)
+    }
   })
 
   test('legacy budget escalation branch event repairs terminal state', async () => {

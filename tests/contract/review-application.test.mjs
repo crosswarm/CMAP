@@ -41,3 +41,38 @@ test('review application receipt enforces branch-specific output shape', () => {
     output: { outcome: 'escalated', followupTaskIds: [], escalationReason: 'MAX_CYCLES' },
   }), true, JSON.stringify(validate.errors, null, 2))
 })
+
+test('review application receipt validates format2 descriptor matrix shape', () => {
+  const descriptor = {
+    artifact_id: 'art-1',
+    source_task_id: 'tsk-source',
+    role: 'report',
+    uri: `inputs/review/${'b'.repeat(64)}/payload`,
+    sha256: 'c'.repeat(64),
+  }
+  assert.equal(validate({
+    ...base,
+    followup_format: 2,
+    followup_inputs: [[descriptor]],
+    output: { outcome: 'rework', followupTaskIds: ['tsk_1'] },
+  }), true, JSON.stringify(validate.errors, null, 2))
+
+  for (const invalid of [
+    { ...base, followup_format: 2 },
+    { ...base, followup_inputs: [[]] },
+    {
+      ...base,
+      followup_format: 2,
+      followup_inputs: [[{ ...descriptor, source_path: '/tmp/raw' }]],
+      output: { outcome: 'rework', followupTaskIds: ['tsk_1'] },
+    },
+    {
+      ...base,
+      followup_format: 2,
+      followup_inputs: [[{ ...descriptor, uri: '../escape' }]],
+      output: { outcome: 'rework', followupTaskIds: ['tsk_1'] },
+    },
+  ]) {
+    assert.equal(validate(invalid), false, JSON.stringify(invalid))
+  }
+})

@@ -149,6 +149,7 @@ describe('runner admission domain policy', () => {
       'CLASSIFICATION_MISMATCH',
       'APPROVAL_INVALID',
       'PERMIT_INVALID',
+      'INPUT_INVALID',
     ])
   })
 
