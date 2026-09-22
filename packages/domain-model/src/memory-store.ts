@@ -48,6 +48,7 @@ import {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  assertSameEventInput,
   assertSameReviewInput,
   assertSameTaskInput,
 } from './store.ts'
@@ -348,7 +349,10 @@ export class MemoryStore implements Store {
     const existingId = this.#seenKeys.get(input.event.idempotency_key)
     if (existingId) {
       const found = this.#events.find((e) => e.event_id === existingId)
-      if (found) return cloneEvent(found)
+      if (found) {
+        assertSameEventInput(found, input.event)
+        return cloneEvent(found)
+      }
     }
 
     const event: TaskEvent = {

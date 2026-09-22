@@ -153,7 +153,7 @@ export async function missionWorkflow(
       await acts.setMissionState({
         missionId,
         state: 'ESCALATED',
-        idempotencyKey: `execution-uncertain:${taskId}`,
+        idempotencyKey: `mission-execution-uncertain:${taskId}`,
       })
       return {
         missionId,

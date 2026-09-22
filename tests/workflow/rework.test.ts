@@ -30,9 +30,9 @@ const mission = (id: string): Mission => ({
   created_at: T0, updated_at: T0,
 })
 
-const reworkDecision = (taskId: string, maxCycles = 2): ReviewDecisionV1 => ({
+const reworkDecision = (missionId: string, taskId: string, maxCycles = 2): ReviewDecisionV1 => ({
   schema: 'cmap/review-decision/v1',
-  mission_id: 'mis-rw',
+  mission_id: missionId,
   reviewed_task_ids: [taskId],
   decision: 'rework',
   hard_gate_summary: { total: 1, passed: 0, failed: 1 },
@@ -46,9 +46,9 @@ const reworkDecision = (taskId: string, maxCycles = 2): ReviewDecisionV1 => ({
   review_confidence: { level: 'high' },
 }) as ReviewDecisionV1
 
-const acceptDecision = (taskId: string): ReviewDecisionV1 => ({
+const acceptDecision = (missionId: string, taskId: string): ReviewDecisionV1 => ({
   schema: 'cmap/review-decision/v1',
-  mission_id: 'mis-rw',
+  mission_id: missionId,
   reviewed_task_ids: [taskId],
   decision: 'accept',
   hard_gate_summary: { total: 1, passed: 1, failed: 0 },
@@ -74,7 +74,7 @@ describe('返工闭环', () => {
 
     const taskId = await toReviewable(acts, 'mis-rw')
     const out = await acts.applyReviewDecision({
-      taskId, decision: reworkDecision(taskId), round: 1,
+      taskId, decision: reworkDecision('mis-rw', taskId), round: 1,
     })
 
     assert.equal(out.outcome, 'rework')
@@ -94,7 +94,7 @@ describe('返工闭环', () => {
     await store.createMission({ mission: mission('mis-rw2'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-rw2')
-    await acts.applyReviewDecision({ taskId, decision: reworkDecision(taskId), round: 1 })
+    await acts.applyReviewDecision({ taskId, decision: reworkDecision('mis-rw2', taskId), round: 1 })
 
     const orig = await store.getTask(taskId)
     assert.equal(
@@ -110,7 +110,7 @@ describe('返工闭环', () => {
 
     const taskId = await toReviewable(acts, 'mis-rw3')
     const out = await acts.applyReviewDecision({
-      taskId, decision: acceptDecision(taskId), round: 1,
+      taskId, decision: acceptDecision('mis-rw3', taskId), round: 1,
     })
 
     assert.equal(out.outcome, 'accept')
@@ -125,7 +125,7 @@ describe('返工闭环', () => {
     const taskId = await toReviewable(acts, 'mis-rw4')
     const out = await acts.applyReviewDecision({
       taskId,
-      decision: reworkDecision(taskId, 2),
+      decision: reworkDecision('mis-rw4', taskId, 2),
       round: 2, // 已达上限
     })
 
@@ -159,7 +159,7 @@ describe('返工闭环', () => {
 
     const out = await acts.applyReviewDecision({
       taskId,
-      decision: reworkDecision(taskId, 5), // 预算充足
+      decision: reworkDecision('mis-rw5', taskId, 5), // 预算充足
       round: 1,
       previousProgress: identical,
       currentProgress: identical,
@@ -177,7 +177,7 @@ describe('返工闭环', () => {
     await store.createMission({ mission: mission('mis-idem'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-idem')
-    const decision = reworkDecision(taskId, 3)
+    const decision = reworkDecision('mis-idem', taskId, 3)
 
     const first = await acts.applyReviewDecision({ taskId, decision, round: 1 })
     const tasksAfterFirst = (await store.queryTasks({ missionId: 'mis-idem' })).length
@@ -210,7 +210,7 @@ describe('返工闭环', () => {
     // 第一轮：执行后被打回
     const round1 = await toReviewable(acts, 'mis-e2e')
     const r1 = await acts.applyReviewDecision({
-      taskId: round1, decision: reworkDecision(round1, 3), round: 1,
+      taskId: round1, decision: reworkDecision('mis-e2e', round1, 3), round: 1,
     })
     assert.equal(r1.outcome, 'rework')
 
@@ -221,7 +221,7 @@ describe('返工闭环', () => {
     await acts.beginReview(round2)
 
     const r2 = await acts.applyReviewDecision({
-      taskId: round2, decision: acceptDecision(round2), round: 2,
+      taskId: round2, decision: acceptDecision('mis-e2e', round2), round: 2,
     })
     assert.equal(r2.outcome, 'accept')
 

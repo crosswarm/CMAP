@@ -159,6 +159,46 @@ test('PgStore keeps fresh connections isolated by schema search_path', async () 
   }
 })
 
+test('PgStore event ids do not collide across fresh store instances with the same clock', async () => {
+  const schema = `cmap_event_ids_${randomUUID().replaceAll('-', '')}`
+  const stores = [
+    new PgStore({ connectionString: CONN, schema }),
+    new PgStore({ connectionString: CONN, schema }),
+  ]
+  const client = new pg.Client({ connectionString: CONN })
+  const originalNow = Date.now
+  let connected = false
+
+  try {
+    await stores[0]!.migrate()
+    Date.now = () => 1_800_000_000_000
+    await Promise.all([
+      stores[0]!.createMission({ mission: { ...mission('goal A'), id: 'mis-a' }, actor: ACTOR }),
+      stores[1]!.createMission({ mission: { ...mission('goal B'), id: 'mis-b' }, actor: ACTOR }),
+    ])
+
+    await client.connect()
+    connected = true
+    const { rows } = await client.query(
+      `SELECT event_id FROM ${schema}.events ORDER BY mission_id`,
+    )
+    assert.equal(rows.length, 2)
+    assert.notEqual(
+      (rows[0] as { event_id: string }).event_id,
+      (rows[1] as { event_id: string }).event_id,
+    )
+  } finally {
+    Date.now = originalNow
+    await Promise.allSettled(stores.map((store) => store.close()))
+    if (!connected) {
+      await client.connect()
+      connected = true
+    }
+    await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
+    await client.end()
+  }
+})
+
 type QueryResult = { rows: unknown[], rowCount: number }
 
 async function withMockPgClient(

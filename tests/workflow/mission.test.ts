@@ -432,14 +432,16 @@ describe('Mission Workflow', () => {
     const native = await NativeConnection.connect({ address: ADDRESS })
     let verifying = false
     const states: string[] = []
+    const stateKeys: string[] = []
     const uncertainWorker = await Worker.create({
       connection: native,
       namespace: 'default',
       taskQueue: queue,
       workflowsPath: join(here, '../../workflows/mission.workflow.ts'),
       activities: {
-        setMissionState: async ({ state }: { state: string }) => {
+        setMissionState: async ({ state, idempotencyKey }: { state: string; idempotencyKey: string }) => {
           states.push(state)
+          stateKeys.push(idempotencyKey)
         },
         createTask: async () => ({ taskId: 'tsk-uncertain' }),
         markReady: async () => {},
@@ -470,6 +472,7 @@ describe('Mission Workflow', () => {
       assert.equal(result.escalationReason, 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND')
       assert.equal(verifying, false, '不确定执行状态不能进入 markVerifying')
       assert.deepEqual(states, ['RUNNING', 'ESCALATED'])
+      assert.notEqual(stateKeys.at(-1), 'execution-uncertain:tsk-uncertain', 'Mission 与 Task 事件不得共用全局幂等键')
     } finally {
       uncertainWorker.shutdown()
       await runUncertainWorker.catch(() => {})

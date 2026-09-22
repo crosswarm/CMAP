@@ -65,7 +65,7 @@ export interface ReviewDecisionV1 {
       [k: string]: unknown
     }
     /**
-     * 指明下一轮要收敛的具体方向，避免重复上一轮的无效尝试
+     * 指明下一轮要收敛的具体方向。控制面硬门槛评审生成的 focus 必须保留 Mission 原始目标，再列失败标准，避免后继任务只看到数字而丢失实际交付要求。
      */
     focus?: string[]
   }[]

@@ -17,7 +17,7 @@
  * 用法：node scripts/e2e-mission.mjs
  */
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { isAbsolute, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -40,7 +40,8 @@ const connectionString =
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
 const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
 
-// 返工场景：目标只建 3 个文件，验收却要求 5 个——Agent 无论怎么努力都够不着。
+// 返工场景：任何有限数字都不能小于最小有限数，控制面比较必定拒绝。
+// 要求 5 个会被补建文件满足，要求 -1 仍可能被 Agent 虚报满足；磁盘数量另行核验。
 // 这样才能在真实链路上验证「返工 → 预算耗尽 → 升级给人」，而不是只验证顺利路径。
 const reworkMode = process.argv.includes('--rework')
 
@@ -76,8 +77,8 @@ await store.createMission({
       {
         criterion_id: 'FILE-COUNT',
         metric: 'sample_file_count',
-        operator: 'eq',
-        expected: reworkMode ? 5 : 3,
+        operator: reworkMode ? 'lt' : 'eq',
+        expected: reworkMode ? -Number.MAX_VALUE : 3,
         hard_gate: true,
       },
     ],
@@ -128,6 +129,25 @@ if (reworkMode) {
     fail('后继任务没有指向被返工的原任务——说不清第几轮卡在哪')
   }
   ok(`返工派生新任务 ${secondId}，supersedes ${firstId}`)
+
+  for (const taskId of result.taskIds) {
+    const task = await store.getTask(taskId)
+    const count = (await readdir(join(workRoot, taskId, 'sample'), { withFileTypes: true }))
+      .filter(entry => entry.isFile()).length
+    if (count !== 3) fail(`任务 ${taskId} 没有完成原始目标：应创建 3 个文件，实际 ${count}`)
+    const criterion = task?.result?.criterion_results.find(c => c.criterion_id === 'FILE-COUNT')
+    if (!criterion || Number(criterion.actual) !== count || criterion.passed) {
+      fail(`任务 ${taskId} 的失败标准必须与磁盘文件数 ${count} 一致`)
+    }
+    const artifacts = await store.listArtifacts(taskId)
+    if (!artifacts.length) fail(`任务 ${taskId} 缺少真实证据`)
+    for (const artifact of artifacts) {
+      const path = isAbsolute(artifact.uri) ? artifact.uri : join(workRoot, taskId, artifact.uri)
+      const hash = createHash('sha256').update(await readFile(path)).digest('hex')
+      if (hash !== artifact.sha256.toLowerCase()) fail(`任务 ${taskId} 证据哈希不一致`)
+    }
+    ok(`任务 ${taskId}：磁盘数量 ${count} 与失败标准一致，证据哈希复算通过`)
+  }
 
   const m = await store.getMission(missionId)
   if (m?.state !== 'ESCALATED') fail(`账本里的 Mission 状态是 ${m?.state}`)

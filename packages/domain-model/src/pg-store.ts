@@ -19,6 +19,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { randomUUID } from 'node:crypto'
 import pg from 'pg'
 
 import type { TaskResultV1 } from './generated/task-result.ts'
@@ -60,6 +61,7 @@ import {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  assertSameEventInput,
   assertSameReviewInput,
   assertSameTaskInput,
 } from './store.ts'
@@ -116,7 +118,7 @@ const toEvent = (r: Record<string, unknown>): TaskEvent => {
   const actor: EventActor = {
     type: r['actor_type'] as EventActor['type'],
     id: r['actor_id'] as string,
-    ...(r['runner_id'] ? { runner_id: r['runner_id'] as string } : {}),
+    ...(r['runner_id'] !== null && r['runner_id'] !== undefined ? { runner_id: r['runner_id'] as string } : {}),
   }
   return {
     event_id: r['event_id'] as string,
@@ -215,7 +217,6 @@ const missionEventType = (state: MissionState): EventType => {
 export class PgStore implements Store {
   readonly #pool: pg.Pool
   readonly #schema: string
-  #seq = 0
 
   constructor(opts: PgStoreOptions) {
     this.#schema = opts.schema ?? 'public'
@@ -269,8 +270,7 @@ export class PgStore implements Store {
   }
 
   #nextId(prefix: string): string {
-    this.#seq += 1
-    return `${prefix}_${Date.now().toString(36)}_${String(this.#seq).padStart(6, '0')}`
+    return `${prefix}_${randomUUID()}`
   }
 
   /** 在给定事务内写事件。幂等冲突由唯一约束抛出，交给调用方处理。 */
@@ -284,6 +284,11 @@ export class PgStore implements Store {
       idempotencyKey: string
       payload?: Record<string, unknown>
       causationId?: string | null
+      eventVersion?: number
+      occurredAt?: string
+      attempt?: number | null
+      correlationId?: string
+      traceId?: string | null
     },
   ): Promise<TaskEvent> {
     const { rows } = await c.query(
@@ -291,12 +296,15 @@ export class PgStore implements Store {
          event_id, event_type, event_version, occurred_at, mission_id, task_id,
          attempt, actor_type, actor_id, runner_id, causation_id, correlation_id,
          trace_id, lamport, idempotency_key, payload
-       ) VALUES ($1,$2,1,now(),$3,$4,NULL,$5,$6,$7,$8,$9,NULL,nextval('lamport_seq'),$10,$11)
+       ) VALUES ($1,$2,$3,COALESCE($4::timestamptz, now()),$5,$6,$7,$8,$9,$10,$11,$12,$13,nextval('lamport_seq'),$14,$15)
        RETURNING *`,
       [
-        this.#nextId('evt'), e.type, e.missionId, e.taskId,
+        this.#nextId('evt'), e.type, e.eventVersion ?? 1,
+        e.occurredAt ?? null, e.missionId, e.taskId,
+        e.attempt ?? null,
         e.actor.type, e.actor.id, e.actor.runner_id ?? null,
-        e.causationId ?? null, e.missionId,
+        e.causationId ?? null, e.correlationId ?? e.missionId,
+        e.traceId ?? null,
         e.idempotencyKey, JSON.stringify(e.payload ?? {}),
       ],
     )
@@ -455,6 +463,14 @@ export class PgStore implements Store {
 
       const task = toTask(cur.rows[0] as Record<string, unknown>)
 
+      const dupAfterLock = await c.query(
+        'SELECT 1 FROM events WHERE idempotency_key = $1',
+        [input.idempotencyKey],
+      )
+      if (dupAfterLock.rowCount && dupAfterLock.rowCount > 0) {
+        return task
+      }
+
       if (input.expectedFrom !== undefined && task.state !== input.expectedFrom) {
         throw new ConcurrentModificationError(input.taskId, input.expectedFrom, task.state)
       }
@@ -603,16 +619,25 @@ export class PgStore implements Store {
           actor: e.actor, idempotencyKey: e.idempotency_key,
           payload: e.payload as Record<string, unknown>,
           causationId: e.causation_id,
+          eventVersion: e.event_version,
+          occurredAt: e.occurred_at,
+          attempt: e.attempt,
+          correlationId: e.correlation_id,
+          traceId: e.trace_id,
         }),
       )
     } catch (err) {
-      // 幂等：唯一约束冲突说明同一 key 已写过，返回已有事件
+      // 幂等：唯一约束冲突说明同一 key 已写过；语义一致才返回已有事件。
       if ((err as { code?: string }).code === UNIQUE_VIOLATION) {
         const { rows } = await this.#pool.query(
           'SELECT * FROM events WHERE idempotency_key = $1',
           [e.idempotency_key],
         )
-        if (rows.length) return toEvent(rows[0] as Record<string, unknown>)
+        if (rows.length) {
+          const existing = toEvent(rows[0] as Record<string, unknown>)
+          assertSameEventInput(existing, e)
+          return existing
+        }
       }
       throw err
     }

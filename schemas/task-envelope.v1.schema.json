@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmap.local/schemas/task-envelope/v1",
   "title": "Task Envelope v1",
-  "description": "控制面派发给 Agent 的任务契约。必须自洽——被派发的 worker 不继承任何上下文，信封本身要包含执行所需的全部信息。",
+  "description": "控制面派发给 Agent 的任务契约。必须自洽——被派发的 worker 不继承任何上下文，信封本身要包含执行所需的全部信息。 Legacy Activity task creation uses a stable logical creationKey (default initial within a Mission); distinct direct intents use distinct keys. Task IDs derive from Mission and logical key, never a fresh retry timestamp. Review followups have stable indexed keys.",
   "type": "object",
   "required": ["schema", "identity", "classification", "goal", "environment", "execution_policy", "permissions", "evidence_requirements", "output_contract"],
   "additionalProperties": false,

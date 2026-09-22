@@ -25,6 +25,7 @@ import type {
 } from '#domain-model'
 import {
   ConcurrentModificationError,
+  EventConflictError,
   LockUnavailableError,
 } from '#domain-model'
 import { MissionConflictError } from '../../packages/domain-model/src/mission-input.ts'
@@ -609,6 +610,30 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.equal(
           (await s.listEvents('mis-1')).length, n1,
           '重复投递不得产生重复事件',
+        )
+      })
+
+      test('并发相同 idempotencyKey 的同一迁移全部幂等返回', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        const calls = Array.from({ length: 8 }, () =>
+          s.transitionTask({
+            taskId: 'tsk-1',
+            to: 'READY',
+            actor: ACTOR,
+            eventType: 'TASK_READY',
+            idempotencyKey: 'same-key-concurrent',
+            expectedFrom: 'DRAFT',
+          }),
+        )
+        const results = await Promise.all(calls)
+
+        assert.deepEqual(results.map((r) => r.state), Array(8).fill('READY'))
+        assert.equal(
+          (await s.listEvents('mis-1')).filter((e) => e.idempotency_key === 'same-key-concurrent').length,
+          1,
         )
       })
 
@@ -1441,6 +1466,24 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
     })
 
     describe('直接追加事件', () => {
+      const appendedEvent = (overrides: Partial<Parameters<Store['appendEvent']>[0]['event']> = {}) => ({
+        event: {
+          event_type: 'TASK_HEARTBEAT' as const,
+          event_version: 7,
+          occurred_at: T0,
+          mission_id: 'mis-1',
+          task_id: 'tsk-1',
+          attempt: 2,
+          actor: { ...ACTOR, runner_id: 'runner-1' },
+          causation_id: 'cause-1',
+          correlation_id: 'corr-1',
+          trace_id: 'trace-1',
+          idempotency_key: 'append-semantic',
+          payload: { nested: { ok: true }, list: [1, 2] },
+          ...overrides,
+        },
+      })
+
       test('写入后出现在事件流中', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
@@ -1464,6 +1507,30 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
 
         const events = await s.listEvents('mis-1')
         assert.ok(events.some((e) => e.event_type === 'AGENT_MESSAGE_RECEIVED'))
+      })
+
+      test('appendEvent 保留调用方提供的事件元数据', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        const e = await s.appendEvent(appendedEvent())
+
+        assert.equal(e.event_version, 7)
+        assert.equal(e.occurred_at, T0)
+        assert.equal(e.task_id, 'tsk-1')
+        assert.equal(e.attempt, 2)
+        assert.deepEqual(e.actor, { ...ACTOR, runner_id: 'runner-1' })
+        assert.equal(e.causation_id, 'cause-1')
+        assert.equal(e.correlation_id, 'corr-1')
+        assert.equal(e.trace_id, 'trace-1')
+        assert.deepEqual(e.payload, { nested: { ok: true }, list: [1, 2] })
+
+        const emptyRunner = await s.appendEvent(appendedEvent({
+          actor: { ...ACTOR, runner_id: '' },
+          idempotency_key: 'append-empty-runner',
+        }))
+        assert.deepEqual(emptyRunner.actor, { ...ACTOR, runner_id: '' })
       })
 
       test('相同 idempotency_key 重复追加只留一条', async () => {
@@ -1494,6 +1561,38 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.equal(
           (await s.listEvents('mis-1')).filter((e) => e.idempotency_key === 'dup-append').length,
           1,
+        )
+      })
+
+      test('相同 idempotency_key 且仅 timestamp 不同返回首条事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        const first = await s.appendEvent(appendedEvent())
+        const second = await s.appendEvent(appendedEvent({ occurred_at: '2026-08-02T00:00:01.000Z' }))
+
+        assert.equal(second.event_id, first.event_id)
+        assert.equal(second.occurred_at, T0)
+      })
+
+      test('相同 idempotency_key 但语义输入不同会拒绝', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        await s.appendEvent(appendedEvent())
+
+        await assert.rejects(
+          s.appendEvent(appendedEvent({ payload: { nested: { ok: false }, list: [1, 2] } })),
+          EventConflictError,
+        )
+        await assert.rejects(
+          Promise.all([
+            s.appendEvent(appendedEvent({ idempotency_key: 'append-race', payload: { winner: 1 } })),
+            s.appendEvent(appendedEvent({ idempotency_key: 'append-race', payload: { winner: 2 } })),
+          ]),
+          EventConflictError,
         )
       })
 

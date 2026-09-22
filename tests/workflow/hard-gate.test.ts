@@ -161,10 +161,16 @@ describe('硬门槛判定', () => {
     const followups = decision.required_followups ?? []
     assert.equal(followups.length, 1)
     assert.equal(followups[0]?.capability, 'perf.optimize', '后继任务沿用同一能力')
+    assert.equal(followups[0]?.focus?.[0], mission('mis-1').goal, '返工必须先保留原始任务目标')
     assert.ok(
       (followups[0]?.focus ?? []).some((f) => f.includes('PERF-P95')),
       'focus 要指明这一轮该收敛哪条标准，否则下一轮可能重复无效尝试',
     )
+    await acts.beginReview(taskId)
+    const applied = await acts.applyReviewDecision({taskId,decision,round:0})
+    const child = await store.getTask(applied.followupTaskIds[0]!)
+    assert.ok(child?.envelope.goal.statement.includes(mission('mis-1').goal), '后继信封必须传递原始交付目标')
+    assert.ok(child?.envelope.goal.statement.includes('PERF-P95'), '后继信封必须同时保留失败标准')
   })
 
   test('没有 Mission 的轮次预算时给默认值，不是无限重试', async () => {

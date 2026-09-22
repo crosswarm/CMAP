@@ -37,15 +37,15 @@ Temporal Workflow  ──通过 Activity 写──▶  Task Ledger（唯一业�
 
 更值得注意的是**测试为何没发现它**：e2e 中的幂等断言在同一进程内连续调用两次 `startTask`——测试范围恰好掩盖了缺陷。
 
-规则：派发前先查 `TaskRecord.binding`，非空即视为已派发；派发成功后立刻 `setTaskBinding` 落库。Adapter 内存缓存降级为同进程快速路径，**不作为正确性依据**。
+规则：Adapter 先生成 prepared binding，控制面通过 `claimTaskBinding` 原子写入启动意图，获胜者才调用 `startTask`。已有 binding 只证明启动意图已登记，不证明远端启动或完成；重试先读取拒绝记录与结果，远端状态不可确认时记录 `INPUT_REQUIRED`，不得重新启动。Adapter 内存缓存不作为正确性依据。
 
 ### 规则二：所有 ID 由 Activity 侧生成，Workflow 只传递不创造
 
 Temporal Workflow 必须确定性，禁用 `Date.now()` / `Math.random()` / UUID 生成。若在 Workflow 里生成返工任务的 id，重放时会产生不同的 id，账本出现孤儿记录。
 
-正确路径：id 由创建 Task 的那个 Activity 生成并返回，其结果被记入 Event History，重放时取缓存值。
+正确路径：创建 Task 的 Activity 从 Mission ID 与逻辑 `creationKey` 派生稳定 ID。默认 key 表示唯一初始任务，独立创建意图显式使用不同 key；返工使用父 Task、轮次与后继索引构成 key。写入成功但 Activity 响应丢失后，再次执行仍指向同一条 Task，并核对不可变输入。
 
-当前 `MemoryStore` / `PgStore` 的 id 生成都在 Store 内部（即 Activity 侧），**碰巧是安全的**——但必须写成规矩，否则将来有人把 id 生成挪进 Workflow 就会踩雷，且只在重放时暴露。
+业务幂等键与事件 ID 职责不同：事件 ID 可以随机生成，但不能充当创建意图。仅把随机 ID 生成移到 Activity 内，不能避免 Activity 重试产生孤儿记录。
 
 ### 规则三：写 Ledger 与调用 Adapter 合并为单个 Activity
 
@@ -58,7 +58,15 @@ Activity B: 调 Adapter.startTask
 
 B 成功而后续失败时，Ledger 停在 `QUEUED` 而 Agent 已在运行。跨 Activity 的两阶段没有事务保护。
 
-规则：把「写 Ledger + 调 Adapter」放进同一个 Activity，内部先写后调，失败则整体标记失败。
+规则：把「写 Ledger + 调 Adapter」放进同一个 Activity，内部先登记启动意图再调用，并在发送前复核授权。单个 Activity 本身不是跨系统事务；失败后依据已持久化的意图、拒绝或结果恢复，不能把未知远端执行状态直接标成终态失败。
+
+### 评审应用的恢复边界
+
+Review 行存在只证明评审已保存，不证明后继任务与状态迁移都已完成。每个 Task 的评审应用先写 `REVIEW_APPLICATION_INTENT`，绑定输入哈希、轮次和冻结的返回结果；逐项修复 Review、后继任务、源 Task 与 Mission 状态后，回读验证，再写 `REVIEW_APPLICATION_COMPLETED`。完整契约见 [review-application schema](../../schemas/review-application.v1.schema.json)。
+
+同一输入重试复用原结果；变化的决策、进展或轮次拒绝混入既有应用。旧账本仅在分支与后继对应关系可证明时恢复，歧义情况明确失败。事件只保存哈希与受限结果，不保存评审自由文本；完整决策仍在 Review 记录中。
+
+Task 状态未知与 Mission 升级分别使用 `execution-uncertain:<task>` 和 `mission-execution-uncertain:<task>`，因为事件幂等键在全库唯一。已持久化的未知状态在 Adapter I/O 前重放，已落库的实际结果优先于未知状态记录。
 
 ## 备选方案与否决理由
 

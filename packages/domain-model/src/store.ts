@@ -149,6 +149,13 @@ export class ReviewConflictError extends Error {
   }
 }
 
+export class EventConflictError extends Error {
+  constructor(idempotencyKey: string) {
+    super(`Event ${idempotencyKey} 写入参数与既有记录不一致`)
+    this.name = 'EventConflictError'
+  }
+}
+
 export class BindingConflictError extends Error {
   constructor(taskId: string) {
     super(`Task ${taskId} 已绑定到不同的远端任务`)
@@ -185,6 +192,33 @@ const comparableReviewInput = (review: Review) => ({
 export const assertSameReviewInput = (existing: Review, incoming: Review): void => {
   if (!isDeepStrictEqual(comparableReviewInput(existing), comparableReviewInput(incoming))) {
     throw new ReviewConflictError(existing.id)
+  }
+}
+
+const comparableEventInput = (event: Omit<TaskEvent, 'event_id' | 'lamport'> | TaskEvent) => ({
+  event_type: event.event_type,
+  event_version: event.event_version,
+  mission_id: event.mission_id,
+  task_id: event.task_id,
+  attempt: event.attempt,
+  actor: {
+    type: event.actor.type,
+    id: event.actor.id,
+    runner_id: event.actor.runner_id ?? null,
+  },
+  causation_id: event.causation_id,
+  correlation_id: event.correlation_id,
+  trace_id: event.trace_id,
+  idempotency_key: event.idempotency_key,
+  payload: event.payload,
+})
+
+export const assertSameEventInput = (
+  existing: TaskEvent,
+  incoming: Omit<TaskEvent, 'event_id' | 'lamport'>,
+): void => {
+  if (!isDeepStrictEqual(comparableEventInput(existing), comparableEventInput(incoming))) {
+    throw new EventConflictError(existing.idempotency_key)
   }
 }
 

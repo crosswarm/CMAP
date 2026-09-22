@@ -22,9 +22,6 @@ import type {
   Artifact,
   Approval,
   ApprovalScope,
-  EventActor,
-  EventType,
-  RiskLevel,
   RemoteTaskBinding,
   TaskEnvelopeV1,
   TaskRecord,
@@ -33,11 +30,14 @@ import type {
   ProgressSnapshot,
   RunnerDescriptor,
 } from '#domain-model'
-import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
+import { needsApproval, ApprovalDecisionConflictError } from '#domain-model'
 import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError, DispatchPermitError } from '#domain-model'
 import { AdapterError, type AgentAdapter, type DispatchContext, type DispatchPermitSigner } from '#adapter-sdk'
 import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
 
+import {createLedgerTask, MISSION_ACTOR as ACTOR, type CreateTaskInput, type CreateTaskOutput} from './task-creation.ts'
+import { applyReviewApplication } from './review-application.ts'
+export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
  * 心跳只对 Temporal 有意义，不该成为单测必须搭起 Worker 的理由。
@@ -103,7 +103,6 @@ const failedResultFromCollectError = (
   },
 })
 
-const ACTOR: EventActor = { type: 'system', id: 'mission-workflow' }
 /** 默认返工预算。绝不无限重试——耗尽即升级给人。 */
 const DEFAULT_MAX_CYCLES = 2
 
@@ -163,19 +162,6 @@ export interface WaitApprovalInput {
 export interface WaitApprovalOutput {
   readonly decision: 'approved' | 'rejected'
   readonly decidedBy: string
-}
-
-export interface CreateTaskInput {
-  readonly missionId: string
-  readonly capability: string
-  /** 缺省则用 Mission 的目标。返工派生的子任务才需要单独措辞。 */
-  readonly goal?: string
-  /** 返工时指向被取代的原任务，用于重建因果链。 */
-  readonly supersedesTaskId?: string
-}
-
-export interface CreateTaskOutput {
-  readonly taskId: string
 }
 
 export type DispatchOutput = {
@@ -247,6 +233,23 @@ export const createActivities = (deps: ActivityDeps) => {
   const runnerId = runner.runner_id
   const pollIntervalMs = deps.pollIntervalMs ?? 2_000
   const approvalPollIntervalMs = deps.approvalPollIntervalMs ?? 5_000
+  const executionUncertain = {code:'BINDING_NOT_FOUND',terminalObserved:false} as const
+  const hasExecutionUncertainty = async (task: TaskRecord): Promise<boolean> => {
+    const receipts = (await store.listEvents(task.mission_id))
+      .filter(event => event.idempotency_key === `execution-uncertain:${task.id}`)
+    if (receipts.length === 0) return false
+    const receipt = receipts[0]!
+    const latest = await store.getTask(task.id)
+    const transitioned = isDeepStrictEqual(receipt.payload, {from:'RUNNING',to:'INPUT_REQUIRED',...executionUncertain})
+    if (receipts.length !== 1 || receipt.event_type !== 'INPUT_REQUIRED' || receipt.event_version !== 1 ||
+      receipt.task_id !== task.id || receipt.mission_id !== task.mission_id || !isDeepStrictEqual(receipt.actor, ACTOR) ||
+      (!transitioned && !isDeepStrictEqual(receipt.payload, executionUncertain)) ||
+      !latest || !isDeepStrictEqual(latest.binding, task.binding) ||
+      (transitioned && latest.state !== 'INPUT_REQUIRED' && !latest.result)) {
+      throw new Error('CLI_RECOVERY_RECEIPT_CONFLICT')
+    }
+    return !latest.result
+  }
   const approvalWaitTimeoutMs = deps.approvalWaitTimeoutMs ?? 24 * 3600 * 1000
 
   const boundAdapter = (adapterId: string): AgentAdapter => {
@@ -304,7 +307,7 @@ export const createActivities = (deps: ActivityDeps) => {
   return {
     /** 创建任务并返回其 id。id 在此生成，Workflow 只负责传递。 */
     async createTask(input: CreateTaskInput): Promise<CreateTaskOutput> {
-      return createTaskInternal(input)
+      return createLedgerTask(store,input)
     },
 
     async markReady(taskId: string): Promise<void> {
@@ -603,6 +606,7 @@ export const createActivities = (deps: ActivityDeps) => {
       }
 
       if (!t.binding) throw new Error(`任务 ${taskId} 尚未派发，无结果可收`)
+      if (await hasExecutionUncertainty(t)) return {executionUncertain}
       const a = boundAdapter(t.binding.adapter)
 
       const waitMs =
@@ -613,15 +617,21 @@ export const createActivities = (deps: ActivityDeps) => {
       // 卡住而无日志比失败难查得多。
       for (;;) {
         let revoked: AdmissionDenial | undefined
+        let completed: TaskRecord | undefined
         try {
           const current=await store.getTask(taskId)
           if(!current)throw new Error('TASK_NOT_FOUND')
+          if (current.result) completed = current
           revoked=await readAdmissionDenial(store,current)
         } catch {
           try {await a.cancel(t.binding,'RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
           finally {throw new Error('RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
         }
         if(revoked)return {status:'failed',passed:false,failedCriteria:[],summary:admissionDenialReason(revoked),...revoked}
+        if (completed?.result) {
+          await recordResultArtifacts(completed,completed.result,a,t.binding)
+          return judge(envelope,completed.result)
+        }
         let status
         try { status = await a.getStatus(t.binding) }
         catch (error) {
@@ -634,7 +644,7 @@ export const createActivities = (deps: ActivityDeps) => {
             return judge(envelope,current.result)
           }
           const idempotencyKey = `execution-uncertain:${taskId}`
-          const executionUncertain = {code:'BINDING_NOT_FOUND',terminalObserved:false} as const
+          if (await hasExecutionUncertainty(current)) return {executionUncertain}
           if (current.state === 'RUNNING') {
             await store.transitionTask({taskId,to:'INPUT_REQUIRED',expectedFrom:'RUNNING',actor:ACTOR,
               eventType:'INPUT_REQUIRED',idempotencyKey,payload:executionUncertain})
@@ -919,7 +929,8 @@ export const createActivities = (deps: ActivityDeps) => {
                   capability: t.capability,
                   task_type: envelope.classification.task_type,
                   // focus 指明这一轮该收敛哪几条，避免下一轮重复无效尝试
-                  focus: failed.map((f) => `${f.criterion_id}：期望 ${f.expected}，实测 ${f.actual}`),
+                  focus: [m?.goal ?? envelope.goal.statement,
+                    ...failed.map((f) => `${f.criterion_id}：期望 ${f.expected}，实测 ${f.actual}`)],
                   ...(t.result.artifacts.length > 0
                     ? { inputs: { artifact_refs: t.result.artifacts.map((a) => a.artifact_id) } }
                     : {}),
@@ -963,242 +974,11 @@ export const createActivities = (deps: ActivityDeps) => {
      * 证据与因果链，那正是「反复返工却说不清第几轮卡在哪」的根源。
      */
     async applyReviewDecision(input: ApplyReviewInput): Promise<ApplyReviewOutput> {
-      const { taskId, decision, round } = input
-
-      const t = await store.getTask(taskId)
-      if (!t) throw new Error(`任务不存在：${taskId}`)
-
-      // 幂等：Activity 超时后会真正重跑，且可能落到另一个 Worker 进程。
-      // 状态迁移有幂等键保护，但 putReview 与建后继任务每次都生成新 ID——
-      // 不拦住就会产生重复评审记录和孤儿任务，让「第几轮」的计数失真。
-      const priorReview = (await store.listReviews(t.mission_id)).find(
-        (r) => r.round === round && r.reviewed_task_ids.includes(taskId),
-      )
-      if (priorReview) {
-        return replayOutcome(t.mission_id, taskId, round, decision)
-      }
-
-      await store.putReview({
-        id: nextId('rev'),
-        mission_id: t.mission_id,
-        reviewed_task_ids: [taskId],
-        round,
-        decision,
-        created_at: new Date().toISOString(),
-      })
-
-      // accept：本任务收尾，不派生后继
-      if (decision.decision === 'accept') {
-        await finishTask(taskId, 'REVIEW_ACCEPTED')
-        return { outcome: 'accept', followupTaskIds: [] }
-      }
-
-      if (decision.decision === 'escalate') {
-        await finishTask(taskId, 'REVIEW_ESCALATED')
-        await store.setMissionState(t.mission_id, 'ESCALATED', ACTOR)
-        return {
-          outcome: 'escalated',
-          followupTaskIds: [],
-          escalationReason: '评审者主动升级',
-        }
-      }
-
-      // ---- decision === 'rework'：先过两道刹车 ----
-
-      const maxCycles = decision.stop_conditions?.max_additional_cycles ?? 0
-      if (round >= maxCycles) {
-        const reason = `返工轮次已达上限（${round}/${maxCycles}），停止返工并升级`
-        await escalate(taskId, t.mission_id, reason)
-        return { outcome: 'escalated', followupTaskIds: [], escalationReason: reason }
-      }
-
-      if (input.previousProgress && input.currentProgress) {
-        const np = detectNoProgress(input.previousProgress, input.currentProgress)
-        if (np.detected) {
-          const reason = `检测到无进展（${np.reasons.join('、')}），停止返工并升级`
-          await escalate(taskId, t.mission_id, reason)
-          return { outcome: 'escalated', followupTaskIds: [], escalationReason: reason }
-        }
-      }
-
-      // ---- 派生后继任务 ----
-
-      const followupTaskIds: string[] = []
-      for (const f of decision.required_followups ?? []) {
-        const { taskId: newId } = await createTaskInternal({
-          missionId: t.mission_id,
-          capability: f.capability,
-          goal: `返工第 ${round + 1} 轮：${f.focus?.join('、') ?? f.task_type}`,
-          supersedesTaskId: taskId,
-        })
-        followupTaskIds.push(newId)
-      }
-
-      await store.transitionTask({
-        taskId, to: 'REWORK', actor: ACTOR,
-        eventType: 'REVIEW_REWORK_REQUESTED',
-        idempotencyKey: `rework:${taskId}:${round}`,
-        payload: {
-          round,
-          failed_criteria: decision.failed_criteria?.map((c) => c.criterion_id) ?? [],
-          followups: followupTaskIds,
-        },
-      })
-      await store.transitionTask({
-        taskId, to: 'COMPLETED', actor: ACTOR,
-        eventType: 'TASK_COMPLETED',
-        idempotencyKey: `rework-done:${taskId}:${round}`,
-      })
-
-      return { outcome: 'rework', followupTaskIds }
+      return applyReviewApplication(store, input)
     },
   }
 
   // ------------------------------------------------------------ 内部
-
-  /**
-   * 重放已处理过的评审：从账本还原上次的结果，而不是重新执行。
-   *
-   * 后继任务通过 supersedes_task_id 反查，因此不依赖任何进程内状态——
-   * 换个 Worker 进程重试同样能还原。
-   */
-  async function replayOutcome(
-    missionId: string,
-    taskId: string,
-    round: number,
-    decision: ReviewDecisionV1,
-  ): Promise<ApplyReviewOutput> {
-    const followups = (await store.queryTasks({ missionId }))
-      .filter((x) => x.supersedes_task_id === taskId)
-      .map((x) => x.id)
-
-    if (decision.decision === 'accept') {
-      return { outcome: 'accept', followupTaskIds: [] }
-    }
-    if (followups.length > 0) {
-      return { outcome: 'rework', followupTaskIds: followups }
-    }
-    // 无后继任务说明上次走的是升级分支
-    const maxCycles = decision.stop_conditions?.max_additional_cycles ?? 0
-    return {
-      outcome: 'escalated',
-      followupTaskIds: [],
-      escalationReason:
-        round >= maxCycles
-          ? `返工轮次已达上限（${round}/${maxCycles}），停止返工并升级`
-          : '检测到无进展，停止返工并升级',
-    }
-  }
-
-  async function finishTask(taskId: string, eventType: EventType): Promise<void> {
-    const t = await store.getTask(taskId)
-    if (!t || t.state === 'COMPLETED') return
-    await store.transitionTask({
-      taskId, to: 'COMPLETED', actor: ACTOR,
-      eventType, idempotencyKey: `finish:${taskId}`,
-    })
-  }
-
-  async function escalate(taskId: string, missionId: string, reason: string): Promise<void> {
-    await store.transitionTask({
-      taskId, to: 'REWORK', actor: ACTOR,
-      eventType: 'REVIEW_ESCALATED',
-      idempotencyKey: `escalate-rework:${taskId}`,
-      payload: { reason },
-    })
-    await store.transitionTask({
-      taskId, to: 'FAILED_TERMINAL', actor: ACTOR,
-      eventType: 'TASK_FAILED',
-      idempotencyKey: `escalate-done:${taskId}`,
-      payload: { reason },
-    })
-    await store.setMissionState(missionId, 'ESCALATED', ACTOR)
-  }
-
-  async function createTaskInternal(input: CreateTaskInput): Promise<CreateTaskOutput> {
-    const taskId = nextId('tsk')
-    const now = new Date().toISOString()
-
-    // 信封必须自洽：spawn 出来的 Agent 不继承任何上下文，它只能看到这份信封。
-    // 目标与验收标准因此必须从 Mission 抄进来——写死的占位会让 Agent 去回应
-    // 一条根本不存在的标准，而验收又按 Mission 的标准判，永远对不上。
-    const m = await store.getMission(input.missionId)
-    if (!m) throw new Error(`Mission 不存在：${input.missionId}`)
-
-    // 没有验收标准就没有「完成」的定义，任务无从判定，也无从返工。
-    // 与其派一个永远说不清算不算过的任务出去，不如在这里挡住。
-    const [firstCriterion, ...restCriteria] = m.acceptance.map((c) => ({
-      criterion_id: c.criterion_id,
-      metric: c.metric,
-      operator: c.operator,
-      expected: c.expected,
-      hard_gate: c.hard_gate,
-    }))
-    if (!firstCriterion) {
-      throw new Error(`Mission ${m.id} 未声明验收标准，无法判定任务是否完成`)
-    }
-
-    const requestedRisk = m.constraints['risk_level']
-    if (
-      requestedRisk !== undefined &&
-      (typeof requestedRisk !== 'string' || !(RISK_LEVELS as readonly string[]).includes(requestedRisk))
-    ) {
-      throw new Error(`Mission ${m.id} 的 risk_level 非法：${String(requestedRisk)}`)
-    }
-    const risk = (requestedRisk ?? 'read-meta') as RiskLevel
-
-    const envelope = {
-      schema: 'cmap/task-envelope/v1',
-      identity: {
-        mission_id: input.missionId,
-        task_id: taskId,
-        ...(input.supersedesTaskId ? { supersedes_task_id: input.supersedesTaskId } : {}),
-        idempotency_key: `${input.missionId}:${taskId}`,
-        revision: 1,
-        tenant: m.tenant,
-        owner: m.owner,
-      },
-      classification: {
-        task_type: m.type,
-        requested_capability: input.capability,
-        risk_level: risk,
-      },
-      goal: {
-        statement: input.goal ?? m.goal,
-        success_definition: [firstCriterion, ...restCriteria],
-      },
-      // 工作目录不进信封：本机绝对路径会让同一任务无法在别的机器上执行。
-      environment: { tenant: m.tenant },
-      execution_policy: { timeout_seconds: 300, max_attempts: 1 },
-      permissions: { forbidden: [] },
-      evidence_requirements: { required_artifact_roles: ['report'] },
-      output_contract: { schema_uri: 'https://cmap.local/schemas/task-result/v1' },
-    } as TaskEnvelopeV1
-
-    await store.createTask({
-      task: {
-        id: taskId,
-        mission_id: input.missionId,
-        parent_task_id: null,
-        supersedes_task_id: input.supersedesTaskId ?? null,
-        capability: input.capability,
-        risk,
-        state: 'DRAFT',
-        attempt: 1,
-        max_attempts: 1,
-        lamport: 0,
-        envelope,
-        result: null,
-        binding: null,
-        deps: [],
-        created_at: now,
-        updated_at: now,
-      },
-      actor: ACTOR,
-    })
-
-    return { taskId }
-  }
 
   async function recordResultArtifacts(
     t: TaskRecord,

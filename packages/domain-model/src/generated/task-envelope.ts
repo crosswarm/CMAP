@@ -5,7 +5,7 @@
  */
 
 /**
- * 控制面派发给 Agent 的任务契约。必须自洽——被派发的 worker 不继承任何上下文，信封本身要包含执行所需的全部信息。
+ * 控制面派发给 Agent 的任务契约。必须自洽——被派发的 worker 不继承任何上下文，信封本身要包含执行所需的全部信息。 Legacy Activity task creation uses a stable logical creationKey (default initial within a Mission); distinct direct intents use distinct keys. Task IDs derive from Mission and logical key, never a fresh retry timestamp. Review followups have stable indexed keys.
  */
 export interface TaskEnvelopeV1 {
   schema: 'cmap/task-envelope/v1'

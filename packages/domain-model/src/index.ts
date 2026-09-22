@@ -17,6 +17,7 @@ export { normalizeMissionPlan, yonWorkProfileFromRoute } from './mission-plan.ts
 export type { YonWorkOutputV1 } from './generated/yonwork-output.ts'
 export type { TaskResultV1 } from './generated/task-result.ts'
 export type { ReviewDecisionV1 } from './generated/review-decision.ts'
+export type { ReviewApplicationV1 } from './generated/review-application.ts'
 export type { MissionEventV1 } from './generated/mission-event.ts'
 export type { ControlPlaneContextV1 } from './generated/control-plane-context.ts'
 export type { ApprovalAdviceV1 } from './generated/approval-advice.ts'
@@ -44,7 +45,10 @@ export {
   LockUnavailableError,
   ArtifactConflictError,
   TaskConflictError,
+  assertSameTaskInput,
+  assertSameReviewInput,
   ReviewConflictError,
+  EventConflictError,
   BindingConflictError,
 } from './store.ts'
 export type {

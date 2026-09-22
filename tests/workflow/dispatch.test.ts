@@ -463,13 +463,51 @@ test('fresh CLI runtime loss is a durable nonterminal uncertainty, not a TaskRes
   await acts.dispatchTask(taskId)
   const binding = {adapter:'codex-adapter',remote_task_id:`codex:${taskId}:1`,protocol:'codex-exec',protocol_version:'0.1.0',runner_id:'runner-test'}
   await store.setTaskBinding(taskId,binding)
-  const fresh = createActivities(syntheticActivityDeps({store,adapter:new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json', authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' })}),runner:syntheticRunner({runner_id:'runner-test'})}))
+  const freshAdapter = new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json', authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' })})
+  const fresh = createActivities(syntheticActivityDeps({store,adapter:freshAdapter,runner:syntheticRunner({runner_id:'runner-test'})}))
   const expected = {executionUncertain:{code:'BINDING_NOT_FOUND',terminalObserved:false}}
+  const snapshotRead = Promise.withResolvers<void>()
+  const releaseSnapshot = Promise.withResolvers<void>()
+  let holdFirstRead = true
+  const staleReader = new Proxy(store, {
+    get(target, key) {
+      if (key === 'getTask') return async (id: string) => {
+        const task = await target.getTask(id)
+        if (holdFirstRead) {
+          holdFirstRead = false
+          snapshotRead.resolve()
+          await releaseSnapshot.promise
+        }
+        return task
+      }
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  const concurrent = createActivities(syntheticActivityDeps({store:staleReader,adapter:freshAdapter,runner:syntheticRunner({runner_id:'runner-test'})}))
+  const concurrentCollection = concurrent.collectTaskResult(taskId)
+  await snapshotRead.promise
   assert.deepEqual(await fresh.collectTaskResult(taskId),expected)
+  releaseSnapshot.resolve()
+  assert.deepEqual(await concurrentCollection,expected)
+  freshAdapter.getStatus = async () => { throw new Error('durable receipt must replay before adapter I/O') }
   assert.deepEqual(await fresh.collectTaskResult(taskId),expected)
   const saved=await store.getTask(taskId)
   assert.equal(saved?.state,'INPUT_REQUIRED')
   assert.equal(saved?.result,null)
   assert.deepEqual(saved?.binding,binding)
   assert.equal((await store.listEvents('mis-1')).filter(e=>e.idempotency_key===`execution-uncertain:${taskId}`).length,1)
+  const conflictingStore = new Proxy(store, {
+    get(target, key) {
+      if (key === 'listEvents') return async (missionId: string) =>
+        (await target.listEvents(missionId)).map(event => event.idempotency_key === `execution-uncertain:${taskId}`
+          ? {...event, payload:{code:'BINDING_NOT_FOUND',terminalObserved:true}} : event)
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  const conflicting = createActivities(syntheticActivityDeps({store:conflictingStore,
+    adapter:new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json', authorization:syntheticAdapterAuthorization({runnerId:'runner-test'})}),
+    runner:syntheticRunner({runner_id:'runner-test'})}))
+  await assert.rejects(conflicting.collectTaskResult(taskId), /CLI_RECOVERY_RECEIPT_CONFLICT/)
 })
