@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/runner-admission/v1",
+  "title": "Runner Admission v1",
+  "description": "Normalized operator configuration for the local runner. Labels are not authenticated remote identity. Explicit empty allowlists deny all; grants never replace controlled or mutating approvals.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "runner_id", "runner_tenant", "host", "allowed_tenants", "allowed_owners", "allowed_capabilities", "max_risk"],
+  "properties": {
+    "schema": {"const": "cmap/runner-admission/v1"},
+    "runner_id": {"$ref": "#/$defs/identifier"},
+    "runner_tenant": {"$ref": "#/$defs/identifier"},
+    "host": {"$ref": "#/$defs/identifier"},
+    "allowed_tenants": {"$ref": "#/$defs/allowlist"},
+    "allowed_owners": {"$ref": "#/$defs/allowlist"},
+    "allowed_capabilities": {"$ref": "#/$defs/allowlist"},
+    "max_risk": {"enum": ["read-meta", "read-sensitive", "controlled", "mutating"]}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 256, "not": {"pattern": "[\\s*]"}},
+    "allowlist": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/identifier"}}
+  }
+}

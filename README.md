@@ -39,6 +39,10 @@ Temporal（持久化工作流引擎）+ PostgreSQL（任务账本）+ S3 兼容�
 
 ## 本地运行
 
+首次运行先从 `.env.example` 创建本机 `.env`；已有文件按示例补齐 `RUNNER_*`，不要覆盖原配置。
+Worker 必须显式配置 runner ID/tenant、tenant/owner/capability 白名单和风险上限；缺项拒绝启动，空白名单表示拒绝所有新任务。
+API 的 `CMAP_OWNER` 必须属于 Worker 的 `RUNNER_ALLOWED_OWNERS`。这些是本机配置，尚非远程身份认证。
+
 ```bash
 # 1. 起基础设施（Temporal + PostgreSQL）
 docker compose -f infra/docker-compose/docker-compose.yml up -d
@@ -49,15 +53,16 @@ npm run build:web                       # API 同源托管前端
 npm run start:worker                     # Temporal Worker，队列 cmap-main
 npm run start:api                        # 控制面 API，http://127.0.0.1:8787
 
-# 3. 真跑一次 Mission（codex 会被真实调起，约 1-3 分钟）
-node scripts/e2e-mission.mjs
-
-# 4. 验证审批闸口（需 Worker 与 API 同时运行）
-node scripts/e2e-approval.mjs
+# 3. 在 http://127.0.0.1:8787 创建本机 Mission
 ```
 
 两个进程都会幂等建表，空库首次启动即可用。环境变量见 `.env.example`，
 存在 `.env` 时自动加载。
+
+真实脚本验收使用独立 schema/队列/工作目录和匹配的 API/Worker 配置。旧 `e2e-mission.mjs`、
+`e2e-approval.mjs` 固定使用 owner `crosswarm`，须显式加入验收 Worker 白名单；审批专项还需
+`RUNNER_MAX_RISK=mutating`，仍然保留两个 scope 的独立审批，不能复用默认只读配置冒充通过。
+准入配置与允许/拒绝验收见 [runner 准入](docs/runner-admission.md)。
 
 ### 创建 Mission
 

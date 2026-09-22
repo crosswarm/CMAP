@@ -16,7 +16,7 @@ import type {
   TaskRecord,
 } from '#domain-model'
 import type { DispatchContext, NormalizedAgentStatus } from '#adapter-sdk'
-import { FakeAdapter } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 import { createDagAttemptRunner } from '../../workflows/dag-attempt.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'dag-attempt-test' }
@@ -333,7 +333,7 @@ describe('DAG attempt runner', () => {
     adapter.startTask = async (envelope,ctx) => {await gate; return start(envelope,ctx)}
     const taskId = `tsk-after-grace-${rejectAfterBinding}`
     await createTask(store,taskId,[{resource:taskId,ttl_seconds:15}])
-    const result = await createDagAttemptRunner({store,adapter,workRoot:await mkdtemp(join(tmpdir(),'cmap-dag-attempt-')),pollIntervalMs:5,waitTimeoutMs:20})({taskId})
+    const result = await createDagAttemptRunner({ runner: syntheticRunner(),store,adapter,workRoot:await mkdtemp(join(tmpdir(),'cmap-dag-attempt-')),pollIntervalMs:5,waitTimeoutMs:20})({taskId})
     assert.equal(result.reason,'CANCELLATION_UNCONFIRMED')
     assert.equal((await store.listActiveLocks(new Date().toISOString())).length,1)
     resume()
@@ -350,7 +350,7 @@ describe('DAG attempt runner', () => {
       return status(binding)
     }
     await createTask(store, 'tsk-poll-failure', [{ resource: 'poll:resource', ttl_seconds: 15 }])
-    const result = await createDagAttemptRunner({store, adapter, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')), pollIntervalMs: 5})({taskId:'tsk-poll-failure'})
+    const result = await createDagAttemptRunner({ runner: syntheticRunner(),store, adapter, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')), pollIntervalMs: 5})({taskId:'tsk-poll-failure'})
     assert.equal(result.reason, 'STATUS_UNAVAILABLE')
     assert.equal(adapter.cancelCalls.length, 1)
     assert.equal((await store.listActiveLocks(new Date().toISOString())).length, 0)
@@ -363,7 +363,7 @@ describe('DAG attempt runner', () => {
     else adapter.getStatus = async () => new Promise<NormalizedAgentStatus>(() => {})
     await createTask(store, `tsk-hung-${hang}`, [{resource:`hung:${hang}`, ttl_seconds:15}])
     const started = Date.now()
-    const result = await createDagAttemptRunner({store, adapter, workRoot:await mkdtemp(join(tmpdir(),'cmap-dag-attempt-')), pollIntervalMs:5, waitTimeoutMs:20})({taskId:`tsk-hung-${hang}`})
+    const result = await createDagAttemptRunner({ runner: syntheticRunner(),store, adapter, workRoot:await mkdtemp(join(tmpdir(),'cmap-dag-attempt-')), pollIntervalMs:5, waitTimeoutMs:20})({taskId:`tsk-hung-${hang}`})
     assert.equal(result.reason, 'CANCELLATION_UNCONFIRMED')
     assert.ok(Date.now() - started < 6500)
     assert.equal((await store.listActiveLocks(new Date().toISOString())).length,1)
@@ -376,7 +376,7 @@ describe('DAG attempt runner', () => {
     await createTask(store, 'tsk-a', [{ resource: 'device:one', ttl_seconds: 15 }])
     await createTask(store, 'tsk-b', [{ resource: 'device:one', ttl_seconds: 15 }])
     const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-'))
-    const run = createDagAttemptRunner({ store, adapter, workRoot, pollIntervalMs: 5 })
+    const run = createDagAttemptRunner({ runner: syntheticRunner(), store, adapter, workRoot, pollIntervalMs: 5 })
 
     const first = run({ taskId: 'tsk-a' })
     await waitUntil(() => adapter.active === 1)
@@ -398,7 +398,7 @@ describe('DAG attempt runner', () => {
     const store = new MemoryStore()
     const adapter = new ControlledAdapter()
     await createTask(store, 'tsk-ttl', [{ resource: 'device:ttl', ttl_seconds: 15 }])
-    const run = createDagAttemptRunner({
+    const run = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -423,7 +423,7 @@ describe('DAG attempt runner', () => {
     const adapter = new DelayedStartAdapter(30)
     await createTask(store, 'tsk-late-dispatch-timeout', [{ resource: 'res:late-timeout', ttl_seconds: 15 }])
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -443,7 +443,7 @@ describe('DAG attempt runner', () => {
     const adapter = new DelayedStartAdapter(delayMs)
     await createTask(store, 'tsk-late-dispatch-rejects-after-binding', [{ resource: 'res:late-reject', ttl_seconds: 15 }])
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -462,7 +462,7 @@ describe('DAG attempt runner', () => {
     const adapter = new ControlledAdapter()
     await createTask(store, 'tsk-ledger-read-failure', [{ resource: 'res:ledger-read', ttl_seconds: 15 }])
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -481,7 +481,7 @@ describe('DAG attempt runner', () => {
     await createTask(store, 'tsk-hung-dispatch-lock-loss', [{ resource: 'res:hung-dispatch', ttl_seconds: 15 }])
 
     const started = Date.now()
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -500,7 +500,7 @@ describe('DAG attempt runner', () => {
     await createTask(store, 'tsk-hung-dispatch-timeout', [{ resource: 'res:hung-timeout', ttl_seconds: 15 }], 1)
 
     const started = Date.now()
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -518,7 +518,7 @@ describe('DAG attempt runner', () => {
     const adapter = new WaitForRenewStartAdapter(store)
     await createTask(store, 'tsk-renew-during-dispatch', [{ resource: 'res:dispatch-renew', ttl_seconds: 15 }])
 
-    const pending = createDagAttemptRunner({
+    const pending = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -536,7 +536,7 @@ describe('DAG attempt runner', () => {
     const adapter = new ResultAfterLostLockAdapter(store)
     await createTask(store, 'tsk-result-after-lock-loss', [{ resource: 'res:result-loss', ttl_seconds: 15 }])
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -566,7 +566,7 @@ describe('DAG attempt runner', () => {
       released_at: null,
     })
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -584,7 +584,7 @@ describe('DAG attempt runner', () => {
     const store = new MemoryStore()
     const adapter = new ControlledAdapter()
     await createTask(store, 'tsk-loss', [{ resource: 'res:loss', ttl_seconds: 15 }])
-    const run = createDagAttemptRunner({
+    const run = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -611,7 +611,7 @@ describe('DAG attempt runner', () => {
       { resource: 'res:first', ttl_seconds: 15 },
       { resource: 'res:second', ttl_seconds: 15 },
     ])
-    const run = createDagAttemptRunner({
+    const run = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -648,7 +648,7 @@ describe('DAG attempt runner', () => {
       artifacts: [],
     })
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -674,7 +674,7 @@ describe('DAG attempt runner', () => {
       expires_at: new Date(Date.now() + 60_000).toISOString(),
       released_at: null,
     })
-    const run = createDagAttemptRunner({
+    const run = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -706,7 +706,7 @@ describe('DAG attempt runner', () => {
         expires_at: new Date(Date.now() + 60_000).toISOString(),
         released_at: null,
       })
-      const run = createDagAttemptRunner({
+      const run = createDagAttemptRunner({ runner: syntheticRunner(),
         store,
         adapter,
         workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -734,7 +734,7 @@ describe('DAG attempt runner', () => {
       },
     }) as ReturnType<typeof Context.current>)
     try {
-      const pending = createDagAttemptRunner({
+      const pending = createDagAttemptRunner({ runner: syntheticRunner(),
         store,
         adapter,
         workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -752,7 +752,7 @@ describe('DAG attempt runner', () => {
     const store = new RenewThrowStore()
     const adapter = new ControlledAdapter()
     await createTask(store, 'tsk-renew-error', [{ resource: 'res:renew-error', ttl_seconds: 15 }])
-    const pending = createDagAttemptRunner({
+    const pending = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -775,7 +775,7 @@ describe('DAG attempt runner', () => {
       { resource: 'res:first', ttl_seconds: 15 },
       { resource: 'res:second', ttl_seconds: 15 },
     ])
-    const pending = createDagAttemptRunner({
+    const pending = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -803,7 +803,7 @@ describe('DAG attempt runner', () => {
       { resource: 'res:first', ttl_seconds: 15 },
       { resource: 'res:second', ttl_seconds: 15 },
     ])
-    const pending = createDagAttemptRunner({
+    const pending = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -828,7 +828,7 @@ describe('DAG attempt runner', () => {
     const adapter = new ControlledAdapter()
     adapter.throwOnCollect = true
     await createTask(store, 'tsk-collect-error', [{ resource: 'res:collect', ttl_seconds: 15 }])
-    const pending = createDagAttemptRunner({
+    const pending = createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -852,7 +852,7 @@ describe('DAG attempt runner', () => {
     ])
 
     await assert.rejects(
-      async () => createDagAttemptRunner({
+      async () => createDagAttemptRunner({ runner: syntheticRunner(),
         store,
         adapter,
         workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -869,7 +869,7 @@ describe('DAG attempt runner', () => {
     const adapter = new StartErrorAdapter()
     await createTask(store, 'tsk-dispatch-error', [{ resource: 'res:dispatch', ttl_seconds: 15 }])
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
@@ -892,7 +892,7 @@ describe('DAG attempt runner', () => {
       runner_id: 'runner-test',
     })
 
-    const out = await createDagAttemptRunner({
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
       store,
       adapters: [],
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),

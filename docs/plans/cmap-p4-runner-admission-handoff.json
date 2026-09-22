@@ -1,0 +1,31 @@
+{
+  "planning_state": "complete",
+  "planning_artifacts": {
+    "prd": "docs/plans/cmap-p4-runner-admission.md",
+    "test_spec": "docs/plans/cmap-p4-runner-admission-tests.md"
+  },
+  "prd_sha256": "e55c6477540d484fcf0b1c3c037b80bd909bb15d3c28f941904e9beaafdb58ee",
+  "test_spec_sha256": "19fff7644fc52db7d46ff47e20c095e19c2757388377fa4b14fd89b0df828ac7",
+  "ralplan_architect_review": {
+    "agent": "p4_admission_architect",
+    "verdict": "APPROVE",
+    "revision": 3,
+    "order": 1
+  },
+  "ralplan_critic_review": {
+    "agent": "p4_admission_critic",
+    "verdict": "APPROVE",
+    "revision": 3,
+    "order": 2
+  },
+  "ralplan_consensus_gate": {
+    "complete": true
+  },
+  "execution_lane": "existing_native_goal",
+  "authorization": "existing user authorization for local development and tests; not live YonWork approval or remote deployment",
+  "recorded_at": "2026-09-22T02:32:18.229925+00:00",
+  "source_planning_artifacts": {
+    "prd": ".omx/plans/cmap-p4-runner-admission.md",
+    "test_spec": ".omx/plans/test-spec-cmap-p4-runner-admission.md"
+  }
+}

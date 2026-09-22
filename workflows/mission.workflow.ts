@@ -139,10 +139,19 @@ export async function missionWorkflow(
 
     // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
     // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。
-    await acts.dispatchTask(taskId)
+    const dispatch = await acts.dispatchTask(taskId)
+    if ('admissionDenied' in dispatch) {
+      const prefix=dispatch.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
+      await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
+      return {missionId,state:'ESCALATED',taskIds,summary:`${prefix}:${dispatch.admissionDenied.code}`,failedCriteria:[],rounds:round}
+    }
 
     // 等 Agent 干完并收结果。
     const collected = await longRunning.collectTaskResult(taskId)
+    if (collected.admissionDenied) {
+      await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
+      return {missionId,state:'ESCALATED',taskIds,summary:collected.summary,failedCriteria:[],rounds:round}
+    }
 
     // 硬门槛由确定性程序判定，不看 Agent 的措辞。
     await acts.markVerifying(taskId)

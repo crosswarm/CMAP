@@ -4,7 +4,7 @@ import { MemoryStore } from '#domain-model'
 import type { Mission, RiskLevel, TaskEnvelopeV1 } from '#domain-model'
 import type { AdapterHealth } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 
 const ACTOR = { type: 'system', id: 'routing-test' } as const
 const candidate = (id: string, caps = ['code.analyze'], state: AdapterHealth['state'] = 'healthy') => {
@@ -21,11 +21,11 @@ async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['
   const now = new Date().toISOString()
   const mission: Mission = { id: 'routing-mission', tenant: 'local', owner: 'test', type: 'inspect', goal: 'routing', constraints: {}, acceptance: [{ criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: true, hard_gate: true }], workflow_template: 'inspect/v1', state: 'DRAFT', revision: 1, created_at: now, updated_at: now }
   await store.createMission({ mission, actor: ACTOR })
-  const acts = createActivities({ store, adapters, pollIntervalMs: 1 })
+  const acts = createActivities({ store, adapters, runner: syntheticRunner(), pollIntervalMs: 1 })
   const taskId = 'routing-task'
   const envelope: TaskEnvelopeV1 = {
     schema:'cmap/task-envelope/v1',
-    identity:{mission_id:mission.id,task_id:taskId,idempotency_key:taskId,revision:1},
+    identity:{mission_id:mission.id,task_id:taskId,idempotency_key:taskId,revision:1,tenant:mission.tenant,owner:mission.owner},
     classification:{task_type:'inspect',requested_capability:'code.analyze',risk_level:risk},
     goal:{statement:mission.goal,success_definition:[{criterion_id:'C1',metric:'ok',operator:'eq',expected:true}]},
     environment:{},execution_policy:{timeout_seconds:30,max_attempts:1,...policy},
@@ -93,14 +93,14 @@ test('注册表缺少已绑定 Adapter 时拒绝收取，不转给另一 Agent',
   const original = candidate('original')
   const { acts, store, taskId } = await fixture([original])
   await acts.dispatchTask(taskId)
-  const replacement = createActivities({ store, adapters: [candidate('replacement')] })
+  const replacement = createActivities({ store, adapters: [candidate('replacement')], runner: syntheticRunner() })
   await assert.rejects(replacement.collectTaskResult(taskId), /已绑定 Adapter 不可用/)
 })
 
 test('重复注册身份和双配置在初始化时拒绝', () => {
   const store = new MemoryStore()
-  assert.throws(() => createActivities({ store, adapters: [candidate('dup'), candidate('dup')] }), /ID 重复/)
-  assert.throws(() => createActivities({ store, adapter: candidate('a'), adapters: [candidate('b')] }), /不能同时配置/)
+  assert.throws(() => createActivities({ store, adapters: [candidate('dup'), candidate('dup')], runner: syntheticRunner() }), /ID 重复/)
+  assert.throws(() => createActivities({ store, adapter: candidate('a'), adapters: [candidate('b')], runner: syntheticRunner() }), /不能同时配置/)
 })
 
 test('Adapter 返回错误绑定身份时拒绝入账', async () => {

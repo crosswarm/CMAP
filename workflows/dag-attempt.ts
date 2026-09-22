@@ -3,9 +3,10 @@ import { createHash } from 'node:crypto'
 import { Context } from '@temporalio/activity'
 
 import type { RemoteTaskBinding, ResourceLock, Store, TaskEnvelopeV1, TaskRecord } from '#domain-model'
-import { LockUnavailableError } from '#domain-model'
+import { LockUnavailableError, snapshotRunnerDescriptor } from '#domain-model'
 import type { AgentAdapter, NormalizedAgentStatus } from '#adapter-sdk'
 import { createActivities, type ActivityDeps } from './activities.ts'
+import { preflightTaskAdmission, readAdmissionDenial, admissionDenialReason } from './runner-admission.ts'
 
 export type DagAttemptOutcome = {
   readonly outcome: 'collected' | 'waiting_resource' | 'escalated'
@@ -14,7 +15,6 @@ export type DagAttemptOutcome = {
 }
 
 const ACTOR = { type: 'system', id: 'dag-attempt' } as const
-const DEFAULT_RUNNER_ID = process.env['RUNNER_ID'] ?? 'local-dev'
 const CANCEL_GRACE_MS = 5_000
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -135,7 +135,8 @@ export const createDagAttemptRunner = (
   deps: ActivityDeps & { readonly workRoot: string },
 ): ((input: { taskId: string }) => Promise<DagAttemptOutcome>) => {
   const { store } = deps
-  const runnerId = deps.runnerId ?? DEFAULT_RUNNER_ID
+  const runner = snapshotRunnerDescriptor(deps.runner)
+  const runnerId = runner.runner_id
   const pollIntervalMs = deps.pollIntervalMs ?? 2_000
   const activities = createActivities(deps)
   const adapters = adapterRegistry(deps)
@@ -171,9 +172,12 @@ export const createDagAttemptRunner = (
     const initial = await store.getTask(taskId)
     if (!initial) throw new Error(`任务不存在：${taskId}`)
     if (initial.result) {
-      await activities.collectTaskResult(taskId)
+      const collected=await activities.collectTaskResult(taskId)
+      if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
       return { outcome: 'collected', taskId }
     }
+    const denied=await preflightTaskAdmission(store,runner,initial)
+    if(denied)return {outcome:'escalated',taskId,reason:admissionDenialReason(denied)}
 
     const envelope = initial.envelope as TaskEnvelopeV1
     const policies = lockPolicy(envelope)
@@ -398,6 +402,11 @@ export const createDagAttemptRunner = (
       return handleOwnedLockLoss(dispatch.lock, '派发期间资源锁失效')
     }
 
+    if ('admissionDenied' in dispatch.value) {
+      await releaseAll(store,owned)
+      return {outcome:'escalated',taskId,reason:admissionDenialReason(dispatch.value)}
+    }
+
     let task: TaskRecord | null
     try {
       task = await store.getTask(taskId)
@@ -417,7 +426,8 @@ export const createDagAttemptRunner = (
     }
     if (task.result) {
       try {
-        await activities.collectTaskResult(taskId)
+        const collected=await activities.collectTaskResult(taskId)
+        if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
       } finally {
         await releaseAll(store, owned)
       }
@@ -434,6 +444,18 @@ export const createDagAttemptRunner = (
     const binding = task.binding
 
     for (;;) {
+      let revoked
+      try {
+        const current=await store.getTask(taskId)
+        if(!current)throw new Error('TASK_NOT_FOUND')
+        revoked=await readAdmissionDenial(store,current)
+      } catch {
+        return handleKnownBindingFailure(binding,'准入账本读取失败','STATUS_UNAVAILABLE')
+      }
+      if(revoked) {
+        await releaseAll(store,owned)
+        return {outcome:'escalated',taskId,reason:admissionDenialReason(revoked)}
+      }
       const lost = await renewDueLocks()
       if (lost) {
         return handleOwnedLockLoss(lost, '资源锁失效')
@@ -458,7 +480,8 @@ export const createDagAttemptRunner = (
           return handleOwnedLockLoss(lostBeforeCollect, '终态采纳前资源锁失效')
         }
         try {
-          await activities.collectTaskResult(taskId)
+          const collected=await activities.collectTaskResult(taskId)
+          if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
           return { outcome: 'collected', taskId }
         } catch {
           return { outcome: 'escalated', taskId, reason: 'COLLECT_FAILED' }

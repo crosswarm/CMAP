@@ -62,12 +62,15 @@ try {
   assert.equal(accepted.right.binding.adapter, 'kimi-adapter')
   assert.deepEqual(accepted.join.deps, [accepted.left.id, accepted.right.id])
   const reviews = await store.listReviews(mission.id)
-  for (const task of Object.values(accepted)) {
+  for (const [nodeId, task] of Object.entries(accepted)) {
     assert.equal(task.state, 'COMPLETED')
     assert.ok(reviews.some(r => r.decision.decision === 'accept' && r.reviewed_task_ids.length === 1 && r.reviewed_task_ids[0] === task.id))
     for (const artifact of await store.listArtifacts(task.id)) {
       const bytes = await readFile(isAbsolute(artifact.uri) ? artifact.uri : join(workRoot, task.id, artifact.uri))
       assert.equal(createHash('sha256').update(bytes).digest('hex'), artifact.sha256)
+      if (artifact.role === 'report' && (nodeId === 'left' || nodeId === 'right')) {
+        assert.ok(JSON.parse(bytes).value === (nodeId === 'left' ? 17 : 25), 'Producer report must independently match its own criterion')
+      }
     }
   }
   const inputs = accepted.join.envelope.inputs.artifact_refs

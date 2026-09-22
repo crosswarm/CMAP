@@ -39,6 +39,10 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
           return [id,parent.taskId]
         }))
         const created=await acts.materializeDagNode({missionId,nodeId:node.node_id,attempt:attemptNumber,acceptedDeps,...(previousTaskId?{supersedesTaskId:previousTaskId}:{})})
+        if('admissionDenied' in created) {
+          const prefix=created.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
+          return acts.finishDagNode({missionId,nodeId:node.node_id,status:'escalated',reason:`${prefix}:${created.admissionDenied.code}`})
+        }
         taskId=created.taskId
         for(;;) {
           if(stopping) return stopped()

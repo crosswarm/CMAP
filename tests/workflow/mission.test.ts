@@ -27,7 +27,7 @@ import { MemoryStore } from '#domain-model'
 import type { Mission, RemoteTaskBinding, Store, TaskResultV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 // 每次测试进程用独立队列。Temporal 会保留失败用例留下的 Workflow；固定队列
@@ -72,7 +72,7 @@ before(async () => {
       // Activity 注入 Store 与假 Adapter：这里验证的是编排逻辑，
       // 真实 Agent 调用由 scripts/e2e-single-hop.mjs 覆盖。
       activities: createActivities({
-        store, adapter, runnerId: 'test-runner', pollIntervalMs: 1,
+        store, adapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1,
       }),
     })
     workerRun = worker.run()
@@ -188,7 +188,7 @@ describe('Mission Workflow', () => {
     // 模拟 Activity 重试：Temporal 在超时后会真正重跑 Activity，
     // 且可能落到另一个 Worker 进程——那时 Adapter 的内存缓存是空的。
     // 唯一能认出「已派发过」的依据是 Ledger 中的 binding。
-    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
+    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1 })
     const retry = await acts.dispatchTask(taskId)
 
     assert.equal(retry.dispatched, false, '重试必须识别出已派发，不得再次执行')
@@ -213,7 +213,7 @@ describe('Mission Workflow', () => {
     // 里的 binding 能跨进程认出「已经派发过了」。
     const freshAdapter = new FakeAdapter()
     const freshActs = createActivities({
-      store, adapter: freshAdapter, runnerId: 'test-runner', pollIntervalMs: 1,
+      store, adapter: freshAdapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1,
     })
     const out = await freshActs.dispatchTask(taskId)
 
@@ -243,7 +243,7 @@ describe('Mission Workflow', () => {
       released_at: null,
     })
 
-    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
+    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1 })
     const { taskId } = await acts.createTask({
       missionId: 'mis-lock-1',
       capability: 'realdevice-validation',
@@ -279,7 +279,7 @@ describe('Mission Workflow', () => {
       released_at: null,
     })
 
-    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
+    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1 })
     const { taskId } = await acts.createTask({
       missionId: 'mis-lock-2',
       capability: 'realdevice-validation',
@@ -318,7 +318,7 @@ describe('Mission Workflow', () => {
       actor: { type: 'system', id: 'test' },
     })
 
-    const acts = createActivities({ store, adapter, runnerId: 'test-runner', pollIntervalMs: 1 })
+    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'test-runner' }), pollIntervalMs: 1 })
     const { taskId } = await acts.createTask({
       missionId: 'mis-lock-3',
       capability: 'realdevice-validation',

@@ -7,7 +7,7 @@
  *
  * 本文件不以 .test.ts 结尾，避免被测试运行器当作独立用例执行。
  */
-import type { TaskEnvelopeV1, TaskResultV1, RemoteTaskBinding } from '#domain-model'
+import type { RemoteTaskBinding, RunnerDescriptor, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
 import type {
   AgentAdapter,
   AdapterDescriptor,
@@ -15,6 +15,48 @@ import type {
   DispatchContext,
   NormalizedAgentStatus,
 } from '#adapter-sdk'
+
+export const syntheticRunner = (
+  overrides: Partial<RunnerDescriptor> = {},
+): RunnerDescriptor => ({
+  runner_id: 'runner-test',
+  tenant: 'team-ycc',
+  host: 'test-host',
+  agents: [
+    'fake',
+    'codex',
+    'kimi',
+    'right',
+    'wrong',
+    'unrelated',
+    'primary',
+    'backup',
+    'low',
+    'broken',
+    'original',
+    'replacement',
+    'actual',
+    'other',
+    'yonwork:cmap-test',
+  ],
+  resources: ['device-A', 'device-C', 'yonwork:host'],
+  admission: {
+    allowed_tenants: ['team-ycc', 'local', 'test'],
+    allowed_owners: ['crosswarm', 'test', 'test-harness'],
+    allowed_capabilities: [
+      'code.analyze',
+      'code.modify',
+      'realdevice-validation',
+      'perf.optimize',
+      'codex.performance.root_cause',
+      'yonwork.validate',
+    ],
+    max_risk: 'mutating',
+  },
+  health: 'healthy',
+  last_heartbeat_at: '2026-09-22T00:00:00.000Z',
+  ...overrides,
+})
 
 export class FakeAdapter implements AgentAdapter {
   readonly adapterId = 'fake-adapter'

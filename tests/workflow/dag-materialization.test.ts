@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, mkdir, writeFile, readFile, symlink, rename } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, writeFile, readFile, symlink, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, describe } from 'node:test'
@@ -17,6 +17,7 @@ import type {
   TaskResultV1,
 } from '#domain-model'
 import type { MissionPlanV1 } from '../../packages/domain-model/src/generated/mission-plan.ts'
+import { syntheticRunner } from './fake-adapter.ts'
 import {
   acceptedDagAttempt,
   dagTaskId,
@@ -134,6 +135,11 @@ const review = (missionId: string, taskId: string, decision: 'accept' | 'rework'
   created_at: T0,
 })
 
+const assertMaterialized = (out: { taskId: string } | { admissionDenied: unknown }): { taskId: string } => {
+  if ('admissionDenied' in out) assert.fail(`expected materialized task, got ${JSON.stringify(out.admissionDenied)}`)
+  return out
+}
+
 const createAcceptedNode = async (
   store: Store,
   m: Mission,
@@ -155,8 +161,9 @@ const createAcceptedNode = async (
 ): Promise<TaskRecord> => {
   const node = plan.nodes.find((n) => n.node_id === nodeId)!
   const taskId = opts.taskId ?? dagTaskId(m.id, nodeId, attempt)
-  await materializeDagNode({
+  assertMaterialized(await materializeDagNode({
     store,
+    runner: syntheticRunner(),
     workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-root-')),
   }, {
     missionId: m.id,
@@ -164,7 +171,7 @@ const createAcceptedNode = async (
     attempt,
     ...(opts.supersedesTaskId ? { supersedesTaskId: opts.supersedesTaskId } : {}),
     acceptedDeps: {},
-  })
+  }))
   const task = (await store.getTask(taskId))!
   await store.transitionTask({ taskId, to: 'READY', actor: ACTOR, eventType: 'TASK_READY', idempotencyKey: `${taskId}:ready` })
   await store.transitionTask({ taskId, to: 'QUEUED', actor: ACTOR, eventType: 'TASK_ASSIGNED', idempotencyKey: `${taskId}:queued` })
@@ -216,7 +223,7 @@ describe('DAG materialization', () => {
     const yonPlan={...plan,nodes:plan.nodes.map(n=>n.node_id==='rootA'?{...n,capability:'yonwork.validate',risk_level:'controlled' as const,preferred_agent:'yonwork:cmap-test',fallback_agents:[],required_resource_locks:[{resource:'yonwork:host',ttl_seconds:15}],yonwork:{chat_send:true as const,policy_sha256:'a'.repeat(64)}}:n)}
     const m=mission('mis-yonwork-materialize',{constraints:{risk_level:'mutating',max_additional_cycles:1,plan:yonPlan}})
     await store.createMission({mission:m,actor:ACTOR})
-    const {taskId}=await materializeDagNode({store,workRoot:await mkdtemp(join(tmpdir(),'cmap-yon-'))},{missionId:m.id,nodeId:'rootA',attempt:1,acceptedDeps:{}})
+    const {taskId}=assertMaterialized(await materializeDagNode({store,runner:syntheticRunner(),workRoot:await mkdtemp(join(tmpdir(),'cmap-yon-'))},{missionId:m.id,nodeId:'rootA',attempt:1,acceptedDeps:{}}))
     const task=(await store.getTask(taskId))!
     assert.equal(task.envelope.permissions.yonwork?.chat_send,true)
     assert.equal(task.envelope.inputs?.parameters?.['yonwork_policy_sha256'],'a'.repeat(64))
@@ -242,7 +249,48 @@ describe('DAG materialization', () => {
     }
     await rename(join(workRoot,acceptedDeps['rootA']!),join(outside,'redirected'))
     await symlink(join(outside,'redirected'),join(workRoot,acceptedDeps['rootA']!))
-    await assert.rejects(()=>materializeDagNode({store,workRoot},{missionId:m.id,nodeId:'join',attempt:1,acceptedDeps}), /parent.*(?:symlink|unsafe|escape)/i)
+    await assert.rejects(()=>materializeDagNode({store,workRoot,runner:syntheticRunner()},{missionId:m.id,nodeId:'join',attempt:1,acceptedDeps}), /parent.*(?:symlink|unsafe|escape)/i)
+  })
+
+  test('denies runner admission before reading missing parent payload or creating child task', async () => {
+    const store = new MemoryStore()
+    const m = mission('mis-denied-before-copy')
+    await store.createMission({ mission: m, actor: ACTOR })
+    const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-'))
+    const parentA = dagTaskId(m.id, 'rootA', 1)
+    const parentB = dagTaskId(m.id, 'rootB', 1)
+    await createAcceptedNode(store, m, 'rootA', 1, {
+      resultArtifactId: 'art-A',
+      resultArtifactSha: sha('missing-A'),
+      resultArtifactSize: Buffer.byteLength('missing-A'),
+      putLedgerArtifact: true,
+    })
+    await createAcceptedNode(store, m, 'rootB', 1, {
+      resultArtifactId: 'art-B',
+      resultArtifactSha: sha('missing-B'),
+      resultArtifactSize: Buffer.byteLength('missing-B'),
+      putLedgerArtifact: true,
+    })
+    const childId = dagTaskId(m.id, 'join', 1)
+    const denied = await materializeDagNode({
+      store,
+      workRoot,
+      runner: syntheticRunner({
+        admission: {
+          ...syntheticRunner().admission,
+          allowed_capabilities: ['code.analyze'],
+        },
+      }),
+    }, {
+      missionId: m.id,
+      nodeId: 'join',
+      attempt: 1,
+      acceptedDeps: { rootA: parentA, rootB: parentB },
+    })
+
+    assert.deepEqual(denied, { admissionDenied: { phase: 'initial', code: 'CAPABILITY_DENIED' } })
+    assert.equal(await store.getTask(childId), null)
+    await assert.rejects(() => access(join(workRoot, childId)), /ENOENT/)
   })
 
   test('loads a dag/v1 mission and materializes valid root and join nodes', async () => {
@@ -250,13 +298,12 @@ describe('DAG materialization', () => {
     const m = mission('mis-dag-valid')
     await store.createMission({ mission: m, actor: ACTOR })
     const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-'))
-
-    const root = await materializeDagNode({ store, workRoot }, {
+    const root = assertMaterialized(await materializeDagNode({ store, workRoot, runner: syntheticRunner() }, {
       missionId: m.id,
       nodeId: 'rootA',
       attempt: 1,
       acceptedDeps: {},
-    })
+    }))
     assert.equal(root.taskId, dagTaskId(m.id, 'rootA', 1))
     assert.deepEqual((await getDagMission(store, m.id)).plan.nodes.map((n) => n.node_id), ['rootA', 'rootB', 'join'])
 
@@ -281,12 +328,12 @@ describe('DAG materialization', () => {
     await writeFile(join(workRoot, parentA, 'evidence/report.txt'), bytesA)
     await writeFile(join(workRoot, parentB, 'evidence/report.txt'), bytesB)
 
-    const joinNode = await materializeDagNode({ store, workRoot }, {
+    const joinNode = assertMaterialized(await materializeDagNode({ store, workRoot, runner: syntheticRunner() }, {
       missionId: m.id,
       nodeId: 'join',
       attempt: 1,
       acceptedDeps: { rootB: parentB, rootA: parentA },
-    })
+    }))
     const task = (await store.getTask(joinNode.taskId))!
     assert.deepEqual(task.deps, [parentA, parentB])
     assert.equal(task.envelope.identity.plan_node_id, 'join')
@@ -326,13 +373,13 @@ describe('DAG materialization', () => {
     await seedParentArtifact(store, workRoot, m.id, parentB, 'art-B', 'same-B')
 
     const input = { missionId: m.id, nodeId: 'join', attempt: 1, acceptedDeps: { rootA: parentA, rootB: parentB } }
-    const out = await Promise.all(Array.from({ length: 4 }, () => materializeDagNode({ store, workRoot }, input)))
+    const out = (await Promise.all(Array.from({ length: 4 }, () => materializeDagNode({ store, workRoot, runner: syntheticRunner() }, input)))).map(assertMaterialized)
     assert.deepEqual(out.map((o) => o.taskId), Array(4).fill(dagTaskId(m.id, 'join', 1)))
     assert.equal((await store.queryTasks({ missionId: m.id })).filter((t) => t.envelope.identity.plan_node_id === 'join').length, 1)
 
     const task = (await store.getTask(out[0]!.taskId))!
     await writeFile(join(workRoot, task.id, task.envelope.inputs!.artifact_refs![0]!.uri!), 'different')
-    await assert.rejects(() => materializeDagNode({ store, workRoot }, input), /input conflict/i)
+    await assert.rejects(() => materializeDagNode({ store, workRoot, runner: syntheticRunner() }, input), /input conflict/i)
   })
 
   test('rejects parent completed without exact accept review', async () => {
@@ -343,7 +390,7 @@ describe('DAG materialization', () => {
 
     assert.equal(await acceptedDagAttempt(store, m, plan.nodes[0]!, dagTaskId(m.id, 'rootA', 1)), false)
     await assert.rejects(
-      () => materializeDagNode({ store, workRoot: tmpdir() }, {
+      () => materializeDagNode({ store, runner: syntheticRunner(), workRoot: tmpdir() }, {
         missionId: m.id,
         nodeId: 'join',
         attempt: 1,
@@ -408,7 +455,7 @@ describe('DAG materialization', () => {
     await store.createMission({ mission: m, actor: ACTOR })
 
     await assert.rejects(
-      () => materializeDagNode({ store, workRoot: tmpdir() }, {
+      () => materializeDagNode({ store, runner: syntheticRunner(), workRoot: tmpdir() }, {
         missionId: m.id,
         nodeId: 'rootA',
         attempt: 2,
@@ -417,14 +464,14 @@ describe('DAG materialization', () => {
       /supersedes/i,
     )
 
-    await materializeDagNode({ store, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
+    await materializeDagNode({ store, runner: syntheticRunner(), workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
       missionId: m.id,
       nodeId: 'rootA',
       attempt: 1,
       acceptedDeps: {},
     })
     await assert.rejects(
-      async () => materializeDagNode({ store, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
+      async () => materializeDagNode({ store, runner: syntheticRunner(), workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
         missionId: m.id,
         nodeId: 'rootA',
         attempt: 2,
@@ -434,13 +481,13 @@ describe('DAG materialization', () => {
       /rework/i,
     )
     await driveNodeToReworkComplete(store, m, 'rootA', 1)
-    const out = await materializeDagNode({ store, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
+    const out = assertMaterialized(await materializeDagNode({ store, runner: syntheticRunner(), workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
       missionId: m.id,
       nodeId: 'rootA',
       attempt: 2,
       supersedesTaskId: dagTaskId(m.id, 'rootA', 1),
       acceptedDeps: {},
-    })
+    }))
     const task = (await store.getTask(out.taskId))!
     assert.equal(task.attempt, 2)
     assert.equal(task.supersedes_task_id, dagTaskId(m.id, 'rootA', 1))
@@ -451,7 +498,7 @@ describe('DAG materialization', () => {
     const budgeted = mission('mis-dag-budget', { constraints: { risk_level: 'mutating', max_additional_cycles: 0, plan } })
     await store.createMission({ mission: budgeted, actor: ACTOR })
     await assert.rejects(
-      async () => materializeDagNode({ store, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
+      async () => materializeDagNode({ store, runner: syntheticRunner(), workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
         missionId: budgeted.id,
         nodeId: 'rootA',
         attempt: 2,
@@ -470,7 +517,7 @@ describe('DAG materialization', () => {
 
     const m = mission('mis-dag-metadata')
     await store.createMission({ mission: m, actor: ACTOR })
-    await materializeDagNode({ store, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
+    await materializeDagNode({ store, runner: syntheticRunner(), workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-')) }, {
       missionId: m.id,
       nodeId: 'rootA',
       attempt: 1,
@@ -497,7 +544,7 @@ describe('DAG materialization', () => {
     await store.transitionTask({ taskId: badTaskId, to: 'VERIFYING', actor: ACTOR, eventType: 'HARD_GATE_EVALUATED', idempotencyKey: `${badTaskId}:verifying` })
     await store.transitionTask({ taskId: badTaskId, to: 'REVIEWING', actor: ACTOR, eventType: 'REVIEW_STARTED', idempotencyKey: `${badTaskId}:reviewing` })
     await store.putReview(review(m.id, badTaskId))
-    await store.transitionTask({ taskId: badTaskId, to: 'COMPLETED', actor: ACTOR, eventType: 'TASK_COMPLETED', idempotencyKey: `${badTaskId}:completed` })
+    store.transitionTask({ taskId: badTaskId, to: 'COMPLETED', actor: ACTOR, eventType: 'TASK_COMPLETED', idempotencyKey: `${badTaskId}:completed` })
 
     assert.equal(await acceptedDagAttempt(store, m, plan.nodes[0]!, badTaskId), false)
   })
@@ -525,7 +572,7 @@ describe('DAG materialization', () => {
     await seedParentArtifact(store, workRoot, m.id, parentB, 'art-B', 'actual-B')
 
     await assert.rejects(
-      () => materializeDagNode({ store, workRoot }, {
+      () => materializeDagNode({ store, workRoot, runner: syntheticRunner() }, {
         missionId: m.id,
         nodeId: 'join',
         attempt: 1,
@@ -559,7 +606,7 @@ describe('DAG materialization', () => {
     await mkdir(targetDir, { recursive: true })
     await symlink('/tmp/escape', join(targetDir, 'payload'))
     await assert.rejects(
-      () => materializeDagNode({ store: symlinkStore, workRoot: cleanRoot }, {
+      () => materializeDagNode({ store: symlinkStore, workRoot: cleanRoot, runner: syntheticRunner() }, {
         missionId: symlinkMission.id,
         nodeId: 'join',
         attempt: 1,
@@ -569,7 +616,7 @@ describe('DAG materialization', () => {
     )
 
     await assert.rejects(
-      () => materializeDagNode({ store: symlinkStore, workRoot: cleanRoot }, {
+      () => materializeDagNode({ store: symlinkStore, workRoot: cleanRoot, runner: syntheticRunner() }, {
         missionId: symlinkMission.id,
         nodeId: 'join',
         attempt: 1,

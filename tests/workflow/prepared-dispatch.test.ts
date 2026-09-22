@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {MemoryStore} from '#domain-model'
 import type {Mission,TaskEnvelopeV1,RemoteTaskBinding} from '#domain-model'
 import type {DispatchContext} from '#adapter-sdk'
-import {FakeAdapter} from './fake-adapter.ts'
+import {FakeAdapter, syntheticRunner} from './fake-adapter.ts'
 import {createActivities} from '../../workflows/activities.ts'
 
 const actor={type:'system',id:'prepared-test'} as const
@@ -41,7 +41,7 @@ async function fixture({approved=true,lock=true,lockRunner='runner',expired=fals
   await store.createMission({mission,actor})
   const envelope:TaskEnvelopeV1={schema:'cmap/task-envelope/v1',identity:{mission_id:mission.id,task_id:'prepared',idempotency_key:'prepared',revision:1,tenant:mission.tenant,owner:mission.owner},classification:{task_type:'inspect',requested_capability:'yonwork.validate',risk_level:'controlled'},goal:{statement:mission.goal,success_definition:[{criterion_id:'C',metric:'value',operator:'eq',expected:true,hard_gate:true}]},inputs:{parameters:{yonwork_policy_sha256:policy}},environment:{},execution_policy:{timeout_seconds:30,max_attempts:1,preferred_agent:'yonwork:cmap-test',required_resource_locks:[{resource:'yonwork:host',ttl_seconds:15}]},permissions:{forbidden:[],yonwork:{chat_send:true}},evidence_requirements:{required_artifact_roles:['report']},output_contract:{schema_uri:'https://cmap.local/schemas/task-result/v1'}}
   await store.createTask({actor,task:{id:'prepared',mission_id:mission.id,parent_task_id:null,supersedes_task_id:null,capability:'yonwork.validate',risk:'controlled',state:'DRAFT',attempt:1,max_attempts:1,lamport:0,envelope,result:null,binding:null,deps:[],created_at:now,updated_at:now}})
-  const acts=createActivities({store,adapter,runnerId:'runner',approvalPollIntervalMs:1})
+  const acts=createActivities({store,adapter,runner: syntheticRunner({ runner_id: 'runner' }),approvalPollIntervalMs:1})
   await acts.markReady('prepared')
   const gate=await acts.requestApproval('prepared')
   if(approved){
@@ -81,7 +81,7 @@ test('uncertain acceptance with a persisted intent never redispatches through a 
   const {store,adapter,acts}=await fixture();adapter.loseAcknowledgement=true
   await assert.rejects(()=>acts.dispatchTask('prepared'))
   const next=new PreparedAdapter(store)
-  const fresh=createActivities({store,adapter:next,runnerId:'runner'})
+  const fresh=createActivities({store,adapter:next,runner: syntheticRunner({ runner_id: 'runner' })})
   assert.equal((await fresh.dispatchTask('prepared')).dispatched,false)
   assert.equal(adapter.sends,1)
   assert.equal(next.sends,0)

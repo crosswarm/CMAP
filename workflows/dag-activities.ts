@@ -7,7 +7,7 @@ import type {
   Store,
   TaskRecord,
 } from '#domain-model'
-import { ApprovalDecisionConflictError, detectNoProgress, isTerminal } from '#domain-model'
+import { ApprovalDecisionConflictError, detectNoProgress, isTerminal, snapshotRunnerDescriptor } from '#domain-model'
 import { createActivities, type ActivityDeps } from './activities.ts'
 import { createDagAttemptRunner } from './dag-attempt.ts'
 import {
@@ -267,6 +267,7 @@ const withProgress = (
 
 export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: string }) => {
   const { store } = deps
+  const runner = snapshotRunnerDescriptor(deps.runner)
   const base = createActivities(deps)
   const runAttempt = createDagAttemptRunner(deps)
 
@@ -295,8 +296,8 @@ export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: st
       }
     },
 
-    async materializeDagNode(input: Parameters<typeof materializeDagTask>[1]): Promise<{ taskId: string }> {
-      return materializeDagTask({ store, workRoot: deps.workRoot }, input)
+    async materializeDagNode(input: Parameters<typeof materializeDagTask>[1]) {
+      return materializeDagTask({ store, workRoot: deps.workRoot, runner }, input)
     },
 
     async runDagAttempt(input: { taskId: string }) {

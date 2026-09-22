@@ -18,6 +18,7 @@ import type {
   TaskResultV1,
 } from '#domain-model'
 import type { MissionPlanV1 } from '../../packages/domain-model/src/generated/mission-plan.ts'
+import { syntheticRunner } from './fake-adapter.ts'
 import { createDagActivities } from '../../workflows/dag-activities.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'dag-controller-test' }
@@ -129,7 +130,12 @@ const make = async (m: Mission) => {
   const store = new MemoryStore()
   await store.createMission({ mission: m, actor: ACTOR })
   const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-controller-'))
-  return { store, workRoot, acts: createDagActivities({ store, workRoot, pollIntervalMs: 1, approvalWaitTimeoutMs: 1 }) }
+  return { store, workRoot, acts: createDagActivities({ store, workRoot, runner: syntheticRunner(), pollIntervalMs: 1, approvalWaitTimeoutMs: 1 }) }
+}
+
+const assertMaterialized = (out: { taskId: string } | { admissionDenied: unknown }): { taskId: string } => {
+  if ('admissionDenied' in out) assert.fail(`expected materialized task, got ${JSON.stringify(out.admissionDenied)}`)
+  return out
 }
 
 const toRunning = async (store: Store, taskId: string): Promise<void> => {
@@ -183,8 +189,8 @@ describe('DAG controller activities', () => {
   test('early finalize refuses while another planned node lacks proof', async () => {
     const m = mission('mis-early')
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A')
     assert.equal((await acts.reviewDagAttempt({ taskId })).status, 'accepted')
 
@@ -258,8 +264,8 @@ describe('DAG controller activities', () => {
     const m = mission('mis-success')
     const { store, acts } = await make(m)
     for (const [nodeId, criterionId] of [['rootA', 'A'], ['rootB', 'B']] as const) {
-      const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId, attempt: 1, acceptedDeps: {} })
-      await toRunning(store, taskId)
+      const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId, attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
       await completeNode(store, (await store.getTask(taskId))!, criterionId)
       assert.equal((await acts.reviewDagAttempt({ taskId })).status, 'accepted')
     }
@@ -274,8 +280,8 @@ describe('DAG controller activities', () => {
     const m = mission('mis-node-local')
     const { store, acts } = await make(m)
     await acts.loadDagSchedule(m.id)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A')
 
     await acts.reviewDagAttempt({ taskId })
@@ -285,8 +291,8 @@ describe('DAG controller activities', () => {
   test('budget zero and no-progress rework escalate the node only', async () => {
     const budget = mission('mis-budget-zero', { maxAdditionalCycles: 0 })
     const a = await make(budget)
-    const first = await a.acts.materializeDagNode({ missionId: budget.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(a.store, first.taskId)
+    const first = assertMaterialized(await a.acts.materializeDagNode({ missionId: budget.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(a.store, first.taskId)
     await completeNode(a.store, (await a.store.getTask(first.taskId))!, 'A', false)
     assert.deepEqual(
       await a.acts.reviewDagAttempt({ taskId: first.taskId }),
@@ -308,8 +314,8 @@ describe('DAG controller activities', () => {
 
     const noProgress = mission('mis-no-progress')
     const b = await make(noProgress)
-    const second = await b.acts.materializeDagNode({ missionId: noProgress.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(b.store, second.taskId)
+    const second = assertMaterialized(await b.acts.materializeDagNode({ missionId: noProgress.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(b.store, second.taskId)
     await completeNode(b.store, (await b.store.getTask(second.taskId))!, 'A', false)
     const prev: ProgressSnapshot = {
       patchHash: sha(sha(`${second.taskId}-bytes`)),
@@ -323,8 +329,8 @@ describe('DAG controller activities', () => {
   test('multi-followup rework is rejected before successor task creation', async () => {
     const m = mission('mis-followups')
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A', false)
 
     await assert.rejects(
@@ -337,8 +343,8 @@ describe('DAG controller activities', () => {
   test('review replay is idempotent', async () => {
     const m = mission('mis-replay')
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A')
 
     assert.equal((await acts.reviewDagAttempt({ taskId })).status, 'accepted')
@@ -350,8 +356,8 @@ describe('DAG controller activities', () => {
   test('rework review retry repairs task transitions and preserves recomputed progress', async () => {
     const m = mission('mis-rework-retry')
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A', false)
     await store.transitionTask({
       taskId,
@@ -385,8 +391,8 @@ describe('DAG controller activities', () => {
   test('rework review retry still applies budget escalation when receipt is missing', async () => {
     const m = mission('mis-rework-budget-retry', { maxAdditionalCycles: 0 })
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A', false)
     await store.transitionTask({
       taskId,
@@ -414,9 +420,8 @@ describe('DAG controller activities', () => {
   test('terminal node receipt is replayed before hard-gate evaluation', async () => {
     const m = mission('mis-terminal-first')
     const { acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-
-    await acts.finishDagNode({ missionId: m.id, nodeId: 'rootA', taskId, status: 'failed', reason: 'STOPPED' })
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await acts.finishDagNode({ missionId: m.id, nodeId: 'rootA', taskId, status: 'failed', reason: 'STOPPED' })
     assert.deepEqual(await acts.reviewDagAttempt({ taskId }), {
       status: 'failed',
       nodeId: 'rootA',
@@ -428,8 +433,7 @@ describe('DAG controller activities', () => {
   test('pending approval check returns immediately and stopped pending approval expires without grant', async () => {
     const m = mission('mis-approval', { rootRisk: 'controlled' })
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
     assert.deepEqual(await acts.checkDagApproval(taskId), { decision: 'pending' })
     const approval = (await store.listPendingApprovals(m.id))[0]!
     assert.equal((await store.getTask(taskId))?.state, 'APPROVAL_REQUIRED')
@@ -444,8 +448,8 @@ describe('DAG controller activities', () => {
   test('caller-provided accept cannot manufacture success', async () => {
     const m = mission('mis-no-fake-success')
     const { store, acts } = await make(m)
-    const { taskId } = await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} })
-    await toRunning(store, taskId)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+await toRunning(store, taskId)
     await completeNode(store, (await store.getTask(taskId))!, 'A', false)
     const fakeAccept: ReviewDecisionV1 = {
       schema: 'cmap/review-decision/v1',

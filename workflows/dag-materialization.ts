@@ -13,7 +13,12 @@ import {
   type RiskLevel,
   type Store,
   type TaskRecord,
+  type RunnerDescriptor,
+  assertRunnerAdmission,
+  admissionSubjectFromDagNode,
+  RunnerAdmissionError,
 } from '#domain-model'
+import { preflightTaskAdmission, type AdmissionDenial } from './runner-admission.ts'
 import type { TaskEnvelopeV1 } from '#domain-model'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import type { MissionPlanV1 } from '../packages/domain-model/src/generated/mission-plan.ts'
@@ -444,7 +449,7 @@ const createDagTask = async (
 }
 
 export const materializeDagNode = async (
-  deps: { store: Store; workRoot: string },
+  deps: { store: Store; workRoot: string; runner: RunnerDescriptor },
   input: {
     missionId: string
     nodeId: string
@@ -452,12 +457,26 @@ export const materializeDagNode = async (
     supersedesTaskId?: string
     acceptedDeps: Readonly<Record<string, string>>
   },
-): Promise<{ taskId: string }> => {
+): Promise<{ taskId: string } | AdmissionDenial> => {
   const { mission, plan } = await getDagMission(deps.store, input.missionId)
   const node = nodeById(plan, input.nodeId)
   await assertAttempt(deps.store, mission, node, input.attempt, input.supersedesTaskId)
   const acceptedTaskIds = await assertDeps(deps.store, mission, plan, node, input.acceptedDeps)
   const taskId = dagTaskId(mission.id, node.node_id, input.attempt)
+  const existing = await deps.store.getTask(taskId)
+  if (existing) {
+    const denied=await preflightTaskAdmission(deps.store,deps.runner,existing)
+    if(denied)return denied
+    if(existing.binding) {
+      if(!assertEnvelopeMatchesNode(mission,node,existing)||!isDeepStrictEqual(existing.deps,acceptedTaskIds))throw new Error('DAG_BOUND_TASK_MISMATCH')
+      return {taskId} // recovery never re-copies inputs into an owned active workspace
+    }
+  }
+  try {assertRunnerAdmission(deps.runner,admissionSubjectFromDagNode(mission,node,taskId))}
+  catch(error) {
+    if(!(error instanceof RunnerAdmissionError))throw error
+    return {admissionDenied:{phase:'initial',code:error.code}}
+  }
   const artifactRefs = await copyParentArtifacts(
     deps.store,
     mission.id,

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { MemoryStore } from '#domain-model'
 import type { Approval, Mission, Store } from '#domain-model'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 
 const ACTOR = { type: 'system', id: 'test' } as const
 const T0 = '2026-08-31T00:00:00.000Z'
@@ -32,7 +32,7 @@ beforeEach(() => {
   store = new MemoryStore()
   adapter = new FakeAdapter()
   acts = createActivities({
-    store, adapter, pollIntervalMs: 1, approvalPollIntervalMs: 1,
+    store, adapter, runner: syntheticRunner(), pollIntervalMs: 1, approvalPollIntervalMs: 1,
     approvalWaitTimeoutMs: 1_000,
   })
 })
@@ -55,7 +55,7 @@ describe('审批 Activity', () => {
       if (decision === 'expired') await decide(approvalId, 'approved', 'user:human', at)
       return decide(approvalId, decision, actor, at)
     }
-    const expiring = createActivities({ store, adapter, approvalWaitTimeoutMs: 0 })
+    const expiring = createActivities({ store, adapter, runner: syntheticRunner(), approvalWaitTimeoutMs: 0 })
     const result = await expiring.waitForApproval({ taskId, approvalId: id, scope: 'controlled' })
     assert.equal(result.decision, 'approved')
     assert.equal((await store.getApproval(id))?.decided_by, 'user:human')

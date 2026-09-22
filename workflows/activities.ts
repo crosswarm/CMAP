@@ -31,10 +31,12 @@ import type {
   TaskResultV1,
   ReviewDecisionV1,
   ProgressSnapshot,
+  RunnerDescriptor,
 } from '#domain-model'
 import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
-import { recomputeCriterionPassed, yonWorkProfileFromRoute } from '#domain-model'
+import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError } from '#domain-model'
 import { AdapterError, type AgentAdapter, type DispatchContext } from '#adapter-sdk'
+import { preflightTaskAdmission, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
 
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -102,7 +104,6 @@ const failedResultFromCollectError = (
 })
 
 const ACTOR: EventActor = { type: 'system', id: 'mission-workflow' }
-const DEFAULT_RUNNER_ID = process.env['RUNNER_ID'] ?? 'local-dev'
 /** 默认返工预算。绝不无限重试——耗尽即升级给人。 */
 const DEFAULT_MAX_CYCLES = 2
 
@@ -127,7 +128,7 @@ export interface ActivityDeps {
   readonly adapter?: AgentAdapter
   /** 注册顺序是无显式首选时的稳定路由顺序；不能与 adapter 同时传入。 */
   readonly adapters?: readonly AgentAdapter[]
-  readonly runnerId?: string
+  readonly runner: RunnerDescriptor
   /**
    * 工作目录根。每个任务分一个子目录，避免并发任务互相污染。
    * 不给则由 Adapter 自建临时目录。
@@ -176,11 +177,11 @@ export interface CreateTaskOutput {
   readonly taskId: string
 }
 
-export interface DispatchOutput {
+export type DispatchOutput = {
   /** true 表示本次真实派发；false 表示已有 binding，跳过。 */
   readonly dispatched: boolean
   readonly remoteTaskId: string
-}
+} | ({ readonly dispatched: false } & AdmissionDenial)
 
 export interface HardGateInput {
   readonly taskId: string
@@ -195,6 +196,7 @@ export interface HardGateOutput {
 }
 
 export interface CollectOutput {
+  readonly admissionDenied?: AdmissionDenial['admissionDenied']
   readonly status: TaskResultV1['status']
   /** 全部验收标准都被逐条回应且通过，才为 true。 */
   readonly passed: boolean
@@ -228,7 +230,8 @@ export const createActivities = (deps: ActivityDeps) => {
       new Set(adapters.map((a) => a.agentId)).size !== adapters.length) {
     throw new Error('Adapter / Agent ID 重复')
   }
-  const runnerId = deps.runnerId ?? DEFAULT_RUNNER_ID
+  const runner = snapshotRunnerDescriptor(deps.runner)
+  const runnerId = runner.runner_id
   const pollIntervalMs = deps.pollIntervalMs ?? 2_000
   const approvalPollIntervalMs = deps.approvalPollIntervalMs ?? 5_000
   const approvalWaitTimeoutMs = deps.approvalWaitTimeoutMs ?? 24 * 3600 * 1000
@@ -244,8 +247,8 @@ export const createActivities = (deps: ActivityDeps) => {
     const policy = envelope.execution_policy
     const ids = [...(policy.preferred_agent ? [policy.preferred_agent] : []), ...(policy.fallback_agents ?? [])]
     const candidates = ids.length
-      ? [...new Set(ids)].flatMap((id) => adapters.filter((a) => a.agentId === id))
-      : adapters
+      ? [...new Set(ids)].flatMap((id) => adapters.filter((a) => a.agentId === id && runner.agents.includes(a.agentId)))
+      : adapters.filter((a) => runner.agents.includes(a.agentId))
     const risks = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
     for (const candidate of candidates) {
       try {
@@ -414,6 +417,9 @@ export const createActivities = (deps: ActivityDeps) => {
       const existing = await store.getTask(taskId)
       if (!existing) throw new Error(`任务不存在：${taskId}`)
 
+      const denied = await preflightTaskAdmission(store,runner,existing)
+      if (denied) return {dispatched:false,...denied}
+
       if (existing.binding) {
         // 已派发过——重试或重复执行时走到这里，不得再次调用 Adapter
         return { dispatched: false, remoteTaskId: existing.binding.remote_task_id }
@@ -424,6 +430,7 @@ export const createActivities = (deps: ActivityDeps) => {
 
       const assertPreparedAuthority = async (expectedBinding?: RemoteTaskBinding, observedPolicy?: string): Promise<void> => {
         const task = await store.getTask(taskId)
+        if (task) await assertStoredTaskAdmission(store,runner,task)
         const policy = envelope.inputs?.parameters?.['yonwork_policy_sha256']
         if (!task || !isDeepStrictEqual(task.envelope, envelope) ||
           task.capability !== 'yonwork.validate' || task.risk !== 'controlled' ||
@@ -456,7 +463,19 @@ export const createActivities = (deps: ActivityDeps) => {
           throw new Error('Prepared dispatch requires an active owned YonWork host lease')
         }
       }
-      if (selectedAdapter.prepareBinding) await assertPreparedAuthority()
+      // Adapter health may await external I/O. Recheck authoritative scope before local preparation.
+      const current = await store.getTask(taskId)
+      if (!current) throw new Error('TASK_NOT_FOUND')
+      const rechecked = await preflightTaskAdmission(store,runner,current)
+      if (rechecked) return {dispatched:false,...rechecked}
+      if (current.binding) return {dispatched:false,remoteTaskId:current.binding.remote_task_id}
+      if (selectedAdapter.prepareBinding) {
+        try {await assertPreparedAuthority()}
+        catch (error) {
+          if (!(error instanceof RunnerAdmissionError)) throw error
+          return {dispatched:false,...await persistAdmissionDenial(store,runner,current,error,'initial')}
+        }
+      }
 
       if (existing.state === 'READY') {
         await store.transitionTask({
@@ -489,14 +508,36 @@ export const createActivities = (deps: ActivityDeps) => {
           throw new Error('Prepared binding identity mismatch')
         }
         const claim = await store.claimTaskBinding({taskId,binding:prepared,actor:ACTOR})
-        if (!claim.claimed) return {dispatched:false,remoteTaskId:claim.task.binding!.remote_task_id}
-        await assertPreparedAuthority(prepared)
+        if (!claim.claimed) {
+          const receipt=await readAdmissionDenial(store,claim.task)
+          if(receipt)return {dispatched:false,...receipt}
+          return {dispatched:false,remoteTaskId:claim.task.binding!.remote_task_id}
+        }
+        let revoked: AdmissionDenial | undefined
+        const checkPrepared = async (policySha256?: string): Promise<void> => {
+          try {await assertPreparedAuthority(prepared,policySha256)}
+          catch (error) {
+            if (!(error instanceof RunnerAdmissionError)) throw error
+            const task = await store.getTask(taskId)
+            if (!task) throw new Error('TASK_NOT_FOUND')
+            revoked = await persistAdmissionDenial(store,runner,task,error,'post-intent')
+            throw error // prevents the Adapter from proceeding past beforeSend
+          }
+        }
         let checked = false
-        const binding = await selectedAdapter.startTask(envelope, {...context,beforeSend:async (candidate,policySha256) => {
-          if (!isDeepStrictEqual(candidate,prepared)) throw new Error('Prepared binding changed before send')
-          await assertPreparedAuthority(prepared,policySha256)
-          checked = true
-        }})
+        let binding: RemoteTaskBinding
+        try {
+          await checkPrepared()
+          binding = await selectedAdapter.startTask(envelope, {...context,beforeSend:async (candidate,policySha256) => {
+            if (checked) throw new Error('Prepared beforeSend invoked more than once')
+            if (!isDeepStrictEqual(candidate,prepared)) throw new Error('Prepared binding changed before send')
+            await checkPrepared(policySha256)
+            checked = true
+          }})
+        } catch (error) {
+          if (revoked) return {dispatched:false,...revoked}
+          throw error
+        }
         if (!checked || !isDeepStrictEqual(binding,prepared)) throw new Error('Prepared dispatch contract mismatch')
         // RUNNING and intent were persisted before effects; startTask return is not remote completion.
         return {dispatched:true,remoteTaskId:binding.remote_task_id}
@@ -537,6 +578,13 @@ export const createActivities = (deps: ActivityDeps) => {
       if (!t) throw new Error(`任务不存在：${taskId}`)
 
       const envelope = t.envelope as TaskEnvelopeV1
+      let denied: AdmissionDenial | undefined
+      try {denied=await readAdmissionDenial(store,t)}
+      catch {
+        try {if(t.binding&&!t.result)await boundAdapter(t.binding.adapter).cancel(t.binding,'RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
+        finally {throw new Error('RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
+      }
+      if (denied) return {status:'failed',passed:false,failedCriteria:[],summary:admissionDenialReason(denied),...denied}
       if (t.result) {
         if (t.binding) await recordResultArtifacts(t, t.result, boundAdapter(t.binding.adapter), t.binding)
         return judge(envelope, t.result)
@@ -552,6 +600,16 @@ export const createActivities = (deps: ActivityDeps) => {
       // 轮询至终态。显式超时：宁可明确失败，也不要静默挂起——
       // 卡住而无日志比失败难查得多。
       for (;;) {
+        let revoked: AdmissionDenial | undefined
+        try {
+          const current=await store.getTask(taskId)
+          if(!current)throw new Error('TASK_NOT_FOUND')
+          revoked=await readAdmissionDenial(store,current)
+        } catch {
+          try {await a.cancel(t.binding,'RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
+          finally {throw new Error('RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
+        }
+        if(revoked)return {status:'failed',passed:false,failedCriteria:[],summary:admissionDenialReason(revoked),...revoked}
         const status = await a.getStatus(t.binding)
         if (status.terminal_observed) break
         if (Date.now() > deadline) {

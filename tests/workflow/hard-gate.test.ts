@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { MemoryStore } from '#domain-model'
 import type { Mission, Store, TaskResultV1 } from '#domain-model'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 
 const ACTOR = { type: 'system', id: 'test' } as const
 
@@ -65,7 +65,7 @@ let acts: ReturnType<typeof createActivities>
 beforeEach(async () => {
   store = new MemoryStore()
   adapter = new FakeAdapter()
-  acts = createActivities({ store, adapter, pollIntervalMs: 1 })
+  acts = createActivities({ store, adapter, runner: syntheticRunner(), pollIntervalMs: 1 })
 })
 
 /** 跑完一个任务并停在「已收结果」这一步。 */

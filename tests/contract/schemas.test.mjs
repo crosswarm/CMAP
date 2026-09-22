@@ -21,6 +21,18 @@ addFormats(ajv)
 const validateEnvelope = ajv.compile(envelopeSchema)
 const validateResult = ajv.compile(resultSchema)
 const validateReview = ajv.compile(reviewSchema)
+const validateRunnerAdmission = ajv.compile(load('runner-admission.v1.schema.json'))
+
+test('runner admission configuration is explicit, exact and supports deny-all', () => {
+  const valid={schema:'cmap/runner-admission/v1',runner_id:'runner',runner_tenant:'test',host:'test-host',allowed_tenants:['test'],allowed_owners:['operator'],allowed_capabilities:['code.analyze'],max_risk:'read-meta'}
+  assert.equal(validateRunnerAdmission(valid),true)
+  assert.equal(validateRunnerAdmission({...valid,allowed_tenants:[],allowed_owners:[],allowed_capabilities:[]}),true)
+  for(const change of [
+    {allowed_tenants:['*']},{allowed_tenants:['test-*']},{allowed_owners:['operator','operator']},
+    {allowed_capabilities:[' code.analyze']},{runner_id:'runner\n'},{host:''},{max_risk:'unknown'},
+    {remote_authenticated:true},{allowed_owners:undefined},
+  ])assert.equal(validateRunnerAdmission({...valid,...change}),false,JSON.stringify(change))
+})
 
 /** 深拷贝后按路径改写，用于从合法样例派生非法样例 */
 const mutate = (base, fn) => {

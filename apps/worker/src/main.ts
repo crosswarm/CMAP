@@ -28,6 +28,7 @@ import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
 import { parseAdapterNames } from './adapter-config.ts'
+import { buildRunnerDescriptor } from './runner-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
 import { createDagActivities } from '../../../workflows/dag-activities.ts'
 
@@ -38,7 +39,7 @@ const connectionString =
   process.env['CMAP_DATABASE_URL'] ??
   'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
-const runnerId = process.env['RUNNER_ID'] ?? 'local-dev'
+const runnerId = process.env['RUNNER_ID'] ?? ''
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '../../..')
@@ -55,6 +56,12 @@ const adapters = adapterNames.map((name) =>
         outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
       }),
 )
+
+const descriptors = await Promise.all(adapters.map(adapter => adapter.discover()))
+for (const [index, descriptor] of descriptors.entries()) {
+  if(descriptor.agent_id!==adapters[index]!.agentId || descriptor.adapter_id!==adapters[index]!.adapterId)throw new Error('RUNNER_ADAPTER_IDENTITY_MISMATCH')
+}
+const runner = buildRunnerDescriptor(process.env,descriptors)
 
 const store = new PgStore({ connectionString, schema })
 // 幂等建表：空库首次启动即可用，不需要额外的迁移步骤。
@@ -83,13 +90,13 @@ const worker = await Worker.create({
       // 传给 codex 的是 OpenAI structured outputs 兼容子集，
       // 不是控制面校验账本用的严格 schema（见 ADR-0003）。
       adapters,
-      runnerId,
+      runner,
       workRoot,
     }),
     ...createDagActivities({
       store,
       adapters,
-      runnerId,
+      runner,
       workRoot,
     }),
   },

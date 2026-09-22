@@ -206,6 +206,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | SSE 实时推送 | ✅ P2，租户级与 Mission 级事件流，租户隔离、历史回放、实时追加、重连去重与断开清理；真实 PostgreSQL/HTTP 验证通过 |
 | Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；审批详情已接入建议展示，见 [说明](approval-advisor.md) |
 | 能力路由 | 🟡 P3，启动前按能力/风险/健康及显式首选替补选择；已绑定任务按原 Adapter 收取，不自动二次派发，见 [验证](verification-p3-routing-2026-09-21.md) |
+| runner 主机准入 | ✅ 本机默认拒绝、复制/加锁/派发前检查及拒绝恢复已通过真实允许/拒绝验收；不是远程认证，见 [配置](runner-admission.md) 与 [验证](verification-runner-admission-2026-09-22.md) |
 | kimi-adapter | ✅ 本机 macOS P3；真实单跳与 Temporal → Kimi 完成，见 [运行说明](kimi-adapter.md) 与 [验证](verification-kimi-2026-09-21.md) |
 | DAG 执行 | ✅ 本机显式 dag/v1；API → Temporal → Codex/Kimi 分叉汇合、依赖产物与节点验收已验证，见 [验证](verification-dag-2026-09-21.md)；不包含自动 Planner |
 | 自然语言 Planner 桥接 | 🟡 外部 CLI 与契约校验已实现；Claude 真实调用返回 403，端到端验证未完成，见 [Planner](planner.md) |

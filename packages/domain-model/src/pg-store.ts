@@ -235,14 +235,18 @@ export class PgStore implements Store {
   async migrate(): Promise<void> {
     const here = dirname(fileURLToPath(import.meta.url))
     const ddl = await readFile(join(here, 'pg-schema.sql'), 'utf8')
-    const c = await this.#pool.connect()
-    try {
+    await this.#tx(async (c) => {
+      await c.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtext(current_database()),
+           hashtext($1)
+         )`,
+        [this.#schema],
+      )
       await c.query(`CREATE SCHEMA IF NOT EXISTS ${this.#schema}`)
-      await c.query(`SET search_path TO ${this.#schema}`)
+      await c.query(`SET LOCAL search_path TO ${this.#schema}`)
       await c.query(ddl)
-    } finally {
-      c.release()
-    }
+    })
   }
 
   async close(): Promise<void> {

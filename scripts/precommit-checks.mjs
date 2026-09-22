@@ -138,6 +138,7 @@ const GENERATED_MAP = [
   { schema: 'control-plane-context.v1.schema.json', generated: 'control-plane-context.ts' },
   { schema: 'mission-query.v1.schema.json', generated: 'mission-query.ts' },
   { schema: 'mission-event.v1.schema.json', generated: 'mission-event.ts' },
+  { schema: 'runner-admission.v1.schema.json', generated: 'runner-admission.ts' },
   { schema: 'codex-output.v1.schema.json', generated: 'codex-output.ts' },
   { schema: 'yonwork-output.v1.schema.json', generated: 'yonwork-output.ts' },
   { schema: 'task-envelope.v1.schema.json', generated: 'task-envelope.ts' },

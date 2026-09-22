@@ -73,7 +73,7 @@ A 成员派发一个 `mutating` 任务到 B 的 runner，任务内容是"读取 
 
 | 缓解 | 状态 |
 |---|---|
-| runner 准入策略：`RunnerAdmission` 声明接受哪些 tenant/owner/capability，**默认拒绝、白名单放行** | 🟡 类型已定义，执行逻辑待 P4 |
+| runner 准入策略：`RunnerAdmission` 声明接受哪些 tenant/owner/capability，**默认拒绝、白名单放行** | 🟡 本机复制/加锁/派发前强制检查及真实拒绝已验证；远程身份仍待 P4，见 [验证](verification-runner-admission-2026-09-22.md) |
 | Adapter 显式传 `-s` 沙箱档，绝不继承本机 `danger-full-access` | ✅ 已实现 |
 | 每个代码任务独立 git worktree，禁止推 `main`/`release/*` | 🟡 信封字段已定义，强制待 P1 |
 | `permissions.forbidden` 显式禁止项 | ✅ Schema 已实现 |
@@ -221,7 +221,7 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 | 缓解 | 状态 |
 |---|---|
-| 锁续租 + runner 失锁自停（见 [ADR-0004](adr/0004-brain-split-on-dumb-resources.md)） | 🟡 `renewLock` 已实现并有契约测试；runner 侧自停逻辑待 P4 |
+| 锁续租 + runner 失锁自停（见 [ADR-0004](adr/0004-brain-split-on-dumb-resources.md)） | 🟡 本机 DAG 续租、失锁停止及账本故障时取消已有测试；跨主机网络分区与停机证明待 P4 |
 | `renewLock` 必须如实返回失败，禁止静默成功 | ✅ 已实现 + 契约测试固化 |
 | 证据冲突检测（事后补救） | ⬜ P1 评审环节 |
 | ~~fencing token~~ | ❌ **不适用**，见下 |

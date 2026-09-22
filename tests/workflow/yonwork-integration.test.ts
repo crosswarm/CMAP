@@ -8,11 +8,22 @@ import { test } from "node:test";
 import { MemoryStore, type Approval, type EventActor, type Mission, type ResourceLock, type TaskEnvelopeV1, type TaskRecord } from "#domain-model";
 import { createActivities } from "../../workflows/activities.ts";
 import { YonWorkAdapter, type YonWorkRuntimeLike } from "../../adapters/yonwork-adapter/src/index.ts";
+import { syntheticRunner } from "./fake-adapter.ts";
 
 const ACTOR: EventActor = { type: "system", id: "yonwork-integration-test" };
 const RUNNER = "runner-yonwork-test";
 const PROFILE = "cmap-test";
 const POLICY = "a".repeat(64);
+const runner = () => syntheticRunner({
+  runner_id: RUNNER,
+  agents: [`yonwork:${PROFILE}`],
+  admission: {
+    allowed_tenants: ["tenant-test"],
+    allowed_owners: ["owner-test"],
+    allowed_capabilities: ["yonwork.validate"],
+    max_risk: "controlled",
+  },
+});
 
 const finalReply = JSON.stringify({
   status: "completed",
@@ -223,7 +234,7 @@ const makeActivities = async (id: string, mode: SendMode = "final") => {
   const runtime = new SyntheticRuntime(store, ids.missionId, ids.taskId);
   runtime.mode = mode;
   const adapter = new YonWorkAdapter({ profileId: PROFILE, runnerId: RUNNER, runtime });
-  const acts = createActivities({ store, adapters: [adapter], runnerId: RUNNER, workRoot, pollIntervalMs: 1, waitTimeoutMs: 25 });
+  const acts = createActivities({ store, adapters: [adapter], runner: runner(), workRoot, pollIntervalMs: 1, waitTimeoutMs: 25 });
   return { store, workRoot, runtime, adapter, acts, ...ids };
 };
 

@@ -65,6 +65,9 @@ export { detectNoProgress, NO_PROGRESS_REASONS } from './no-progress.ts'
 export type { ProgressSnapshot, NoProgressResult, NoProgressReason } from './no-progress.ts'
 
 export { MemoryStore } from './memory-store.ts'
+export { RUNNER_ADMISSION_CODES, RunnerAdmissionError, assertRunnerAdmission, admissionSubjectFromTask, admissionSubjectFromDagNode, snapshotRunnerDescriptor } from './runner-admission.ts'
+export type { RunnerAdmissionErrorCode, RunnerAdmissionSubject } from './runner-admission.ts'
+export type { RunnerAdmissionV1 } from './generated/runner-admission.ts'
 export { PgStore } from './pg-store.ts'
 export type { PgStoreOptions } from './pg-store.ts'
 
