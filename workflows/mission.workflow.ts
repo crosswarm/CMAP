@@ -14,7 +14,7 @@
  * 内部状态上（见 ADR-0005）。
  */
 
-import { proxyActivities } from '@temporalio/workflow'
+import { ActivityFailure, isCancellation, patched, proxyActivities } from '@temporalio/workflow'
 
 import type { ProgressSnapshot } from '#domain-model'
 import type { Activities } from './activities.ts'
@@ -56,6 +56,18 @@ const approvalWait = proxyActivities<Activities>({
   },
 })
 
+const MAX_FOLLOWUPS_PER_TASK = 16
+const MAX_DISCOVERED_TASKS = 128
+const FOLLOWUP_QUEUE_PATCH = 'mission-followup-queue-v1'
+
+type StopReason = Parameters<Activities['cancelPendingMissionTasks']>[0]['reason']
+
+interface QueueEntry {
+  readonly taskId: string
+  readonly round: number
+  readonly previousProgress: ProgressSnapshot | null
+}
+
 export interface MissionWorkflowInput {
   readonly missionId: string
 }
@@ -93,133 +105,214 @@ export async function missionWorkflow(
   })
 
   const taskIds: string[] = []
-  let taskId = first.taskId
-  let previousProgress: ProgressSnapshot | null = null
-  let round = 0
+  const seen = new Set<string>()
+  const queue: QueueEntry[] = []
+  let current: QueueEntry = { taskId: first.taskId, round: 0, previousProgress: null }
+  let branched = false
+  let maxRound = 0
+
+  const remember = (ids: readonly string[]): void => {
+    for (const id of ids) {
+      if (seen.has(id)) throw new Error(`任务 ${id} 被重复发现`)
+      seen.add(id)
+      taskIds.push(id)
+    }
+  }
+  remember([first.taskId])
+
+  const pendingIds = (): readonly string[] => queue.map((item) => item.taskId)
+  const cancelPending = async (reason: StopReason): Promise<readonly string[]> => {
+    const ids = pendingIds()
+    if (ids.length > 0) await acts.cancelPendingMissionTasks({ missionId, taskIds: ids, reason })
+    return ids
+  }
 
   // 返工循环。出口只有三个：验收通过、轮次耗尽、判定无进展——
   // 后两个都交给人，绝不无限重试。
   for (;;) {
-    taskIds.push(taskId)
+    const { taskId, round, previousProgress } = current
+    maxRound = Math.max(maxRound, round)
+    let recoverActivityFailure = branched
 
-    await acts.markReady(taskId)
+    try {
+      await acts.markReady(taskId)
 
-    // controlled 与 mutating 都必须在人明确批准后才派发，且两类授权互不蕴含。
-    const gate = await acts.requestApproval(taskId)
-    if (gate.required && gate.approvalId && gate.scope) {
-      await acts.setMissionState({
-        missionId,
-        state: 'AWAITING_APPROVAL',
-        idempotencyKey: `approval-wait:${taskId}`,
-      })
-      const approval = await approvalWait.waitForApproval({
-        taskId,
-        approvalId: gate.approvalId,
-        scope: gate.scope,
-      })
+      // controlled 与 mutating 都必须在人明确批准后才派发，且两类授权互不蕴含。
+      const gate = await acts.requestApproval(taskId)
+      if (gate.required && gate.approvalId && gate.scope) {
+        await acts.setMissionState({
+          missionId,
+          state: 'AWAITING_APPROVAL',
+          idempotencyKey: `approval-wait:${taskId}`,
+        })
+        const approval = await approvalWait.waitForApproval({
+          taskId,
+          approvalId: gate.approvalId,
+          scope: gate.scope,
+        })
 
-      if (approval.decision === 'rejected') {
-        await acts.setMissionState({ missionId, state: 'FAILED' })
+        if (approval.decision === 'rejected') {
+          recoverActivityFailure = false
+          await cancelPending('APPROVAL_REJECTED')
+          await acts.setMissionState({ missionId, state: 'FAILED' })
+          return {
+            missionId,
+            state: 'FAILED',
+            taskIds,
+            summary: `审批被 ${approval.decidedBy} 拒绝`,
+            failedCriteria: [],
+            rounds: maxRound,
+          }
+        }
+
+        await acts.setMissionState({
+          missionId,
+          state: 'RUNNING',
+          idempotencyKey: `approval-resumed:${taskId}`,
+        })
+      }
+
+      // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
+      // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。
+      const dispatch = await acts.dispatchTask(taskId)
+      if ('admissionDenied' in dispatch) {
+        const prefix=dispatch.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
+        recoverActivityFailure = false
+        await cancelPending('ADMISSION_DENIED')
+        await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
+        return {missionId,state:'ESCALATED',taskIds,summary:`${prefix}:${dispatch.admissionDenied.code}`,failedCriteria:[],rounds:maxRound}
+      }
+
+      // 等 Agent 干完并收结果。
+      const collected = await longRunning.collectTaskResult(taskId)
+      if ('executionUncertain' in collected) {
+        const reason = `EXECUTION_UNCERTAIN:${collected.executionUncertain.code}`
+        recoverActivityFailure = false
+        await cancelPending('EXECUTION_UNCERTAIN')
+        await acts.setMissionState({
+          missionId,
+          state: 'ESCALATED',
+          idempotencyKey: `mission-execution-uncertain:${taskId}`,
+        })
         return {
           missionId,
-          state: 'FAILED',
+          state: 'ESCALATED',
           taskIds,
-          summary: `审批被 ${approval.decidedBy} 拒绝`,
+          summary: reason,
           failedCriteria: [],
-          rounds: round,
+          escalationReason: reason,
+          rounds: maxRound,
+        }
+      }
+      if (collected.admissionDenied) {
+        recoverActivityFailure = false
+        await cancelPending('ADMISSION_DENIED')
+        await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
+        return {missionId,state:'ESCALATED',taskIds,summary:collected.summary,failedCriteria:[],rounds:maxRound}
+      }
+
+      // 硬门槛由确定性程序判定，不看 Agent 的措辞。
+      await acts.markVerifying(taskId)
+      const { decision, progress } = await acts.evaluateHardGate({ taskId, round })
+
+      // 通过的才进评审态收尾；没过的从 VERIFYING 直接进 REWORK，
+      // 不经过 REVIEWING——那会在事件流里显示一场并不存在的评审。
+      if (decision.decision === 'accept') await acts.beginReview(taskId)
+
+      recoverActivityFailure = false
+      const outcome = await acts.applyReviewDecision({
+        taskId,
+        decision,
+        round,
+        ...(previousProgress ? { previousProgress } : {}),
+        currentProgress: progress,
+      })
+
+      if (outcome.outcome === 'accept') {
+        const next = queue.shift()
+        if (next) {
+          current = next
+          continue
+        }
+        recoverActivityFailure = false
+        await acts.setMissionState({ missionId, state: 'COMPLETED' })
+        return {
+          missionId,
+          state: 'COMPLETED',
+          taskIds,
+          summary: collected.summary,
+          failedCriteria: [],
+          rounds: maxRound,
         }
       }
 
-      await acts.setMissionState({
-        missionId,
-        state: 'RUNNING',
-        idempotencyKey: `approval-resumed:${taskId}`,
-      })
-    }
+      if (outcome.outcome === 'escalated') {
+        recoverActivityFailure = false
+        await cancelPending('BRANCH_ESCALATED')
+        // Mission 状态已由 applyReviewDecision 置为 ESCALATED
+        return {
+          missionId,
+          state: 'ESCALATED',
+          taskIds,
+          summary: collected.summary,
+          failedCriteria: collected.failedCriteria,
+          ...(outcome.escalationReason ? { escalationReason: outcome.escalationReason } : {}),
+          rounds: maxRound,
+        }
+      }
 
-    // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
-    // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。
-    const dispatch = await acts.dispatchTask(taskId)
-    if ('admissionDenied' in dispatch) {
-      const prefix=dispatch.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
-      await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
-      return {missionId,state:'ESCALATED',taskIds,summary:`${prefix}:${dispatch.admissionDenied.code}`,failedCriteria:[],rounds:round}
-    }
+      const followups = [...outcome.followupTaskIds]
+      if (!branched && followups.length > 1 && patched(FOLLOWUP_QUEUE_PATCH)) branched = true
+      if (!branched) {
+        const next = followups[0]
+        if (!next) {
+          // 判了返工却没派生后继任务，说明决策与执行不一致。继续循环会
+          // 原地重跑同一个已完成的任务，不如在这里明确失败。
+          throw new Error(`任务 ${taskId} 判定返工但没有后继任务`)
+        }
+        remember([next])
+        current = { taskId: next, round: round + 1, previousProgress: progress }
+        continue
+      }
 
-    // 等 Agent 干完并收结果。
-    const collected = await longRunning.collectTaskResult(taskId)
-    if ('executionUncertain' in collected) {
-      const reason = `EXECUTION_UNCERTAIN:${collected.executionUncertain.code}`
-      await acts.setMissionState({
-        missionId,
-        state: 'ESCALATED',
-        idempotencyKey: `mission-execution-uncertain:${taskId}`,
-      })
+      if (followups.length === 0) throw new Error(`任务 ${taskId} 判定返工但没有后继任务`)
+      if (followups.length > MAX_FOLLOWUPS_PER_TASK || taskIds.length + followups.length > MAX_DISCOVERED_TASKS) {
+        const toCancel = [...pendingIds(), ...followups]
+        remember(followups)
+        recoverActivityFailure = false
+        if (toCancel.length > 0) {
+          await acts.cancelPendingMissionTasks({ missionId, taskIds: toCancel, reason: 'MISSION_TASK_LIMIT' })
+        }
+        await acts.setMissionState({ missionId, state: 'ESCALATED', idempotencyKey: `mission-task-limit:${taskId}` })
+        return {
+          missionId,
+          state: 'ESCALATED',
+          taskIds,
+          summary: collected.summary,
+          failedCriteria: collected.failedCriteria,
+          escalationReason: 'MISSION_TASK_LIMIT',
+          rounds: maxRound,
+        }
+      }
+
+      remember(followups)
+      queue.push(...followups.map((id) => ({ taskId: id, round: round + 1, previousProgress: progress })))
+      current = queue.shift()!
+    } catch (error) {
+      if (isCancellation(error)) throw error
+      if (!branched || !recoverActivityFailure || !(error instanceof ActivityFailure)) throw error
+      recoverActivityFailure = false
+      await cancelPending('WORKFLOW_ACTIVITY_FAILED')
+      await acts.setMissionState({ missionId, state: 'ESCALATED', idempotencyKey: `workflow-activity-failed:${taskId}` })
       return {
         missionId,
         state: 'ESCALATED',
         taskIds,
-        summary: reason,
+        summary: 'WORKFLOW_ACTIVITY_FAILED',
         failedCriteria: [],
-        escalationReason: reason,
-        rounds: round,
+        escalationReason: 'WORKFLOW_ACTIVITY_FAILED',
+        rounds: maxRound,
       }
     }
-    if (collected.admissionDenied) {
-      await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
-      return {missionId,state:'ESCALATED',taskIds,summary:collected.summary,failedCriteria:[],rounds:round}
-    }
-
-    // 硬门槛由确定性程序判定，不看 Agent 的措辞。
-    await acts.markVerifying(taskId)
-    const { decision, progress } = await acts.evaluateHardGate({ taskId, round })
-
-    // 通过的才进评审态收尾；没过的从 VERIFYING 直接进 REWORK，
-    // 不经过 REVIEWING——那会在事件流里显示一场并不存在的评审。
-    if (decision.decision === 'accept') await acts.beginReview(taskId)
-
-    const outcome = await acts.applyReviewDecision({
-      taskId,
-      decision,
-      round,
-      ...(previousProgress ? { previousProgress } : {}),
-      currentProgress: progress,
-    })
-
-    if (outcome.outcome === 'accept') {
-      await acts.setMissionState({ missionId, state: 'COMPLETED' })
-      return {
-        missionId,
-        state: 'COMPLETED',
-        taskIds,
-        summary: collected.summary,
-        failedCriteria: [],
-        rounds: round,
-      }
-    }
-
-    if (outcome.outcome === 'escalated') {
-      // Mission 状态已由 applyReviewDecision 置为 ESCALATED
-      return {
-        missionId,
-        state: 'ESCALATED',
-        taskIds,
-        summary: collected.summary,
-        failedCriteria: collected.failedCriteria,
-        ...(outcome.escalationReason ? { escalationReason: outcome.escalationReason } : {}),
-        rounds: round,
-      }
-    }
-
-    const next = outcome.followupTaskIds[0]
-    if (!next) {
-      // 判了返工却没派生后继任务，说明决策与执行不一致。继续循环会
-      // 原地重跑同一个已完成的任务，不如在这里明确失败。
-      throw new Error(`任务 ${taskId} 判定返工但没有后继任务`)
-    }
-
-    taskId = next
-    previousProgress = progress
-    round += 1
   }
 }

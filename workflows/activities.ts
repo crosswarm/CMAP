@@ -37,6 +37,7 @@ import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmis
 
 import {createLedgerTask, MISSION_ACTOR as ACTOR, type CreateTaskInput, type CreateTaskOutput} from './task-creation.ts'
 import { applyReviewApplication } from './review-application.ts'
+import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -305,6 +306,10 @@ export const createActivities = (deps: ActivityDeps) => {
   }
 
   return {
+    async cancelPendingMissionTasks(input: CancelPendingMissionTasksInput): Promise<void> {
+      await cancelPendingMissionTasks(store, input)
+    },
+
     /** 创建任务并返回其 id。id 在此生成，Workflow 只负责传递。 */
     async createTask(input: CreateTaskInput): Promise<CreateTaskOutput> {
       return createLedgerTask(store,input)

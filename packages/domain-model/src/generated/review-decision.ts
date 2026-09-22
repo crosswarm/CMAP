@@ -50,7 +50,7 @@ export interface ReviewDecisionV1 {
     actual_coverage?: number
   }[]
   /**
-   * 控制面据此自动创建后继 Task。返工一律创建新 Task 并以 supersedes_task_id 关联旧结果，不复用已完成 Task，以保留证据历史与因果链。
+   * 控制面据此自动创建后继 Task。返工一律创建新 Task 并以 supersedes_task_id 关联旧结果，不复用已完成 Task，以保留证据历史与因果链。启用 mission-followup-queue-v1 的 Mission 必须按声明顺序 FIFO 执行全部后继，所有叶任务通过且队列为空才完成；每个后继继承自己父任务的进展和轮次深度。自动执行限每次 16 个后继、每 Mission 128 个已发现任务；超限在下一次外部派发前停止，已创建但未启动的任务全部明确取消并以 MISSION_TASK_LIMIT 升级。分支升级、拒绝或已知执行失败同样停止派发并清理已证明的待执行队列；已启动且终态不明的任务不伪造终止。旧无 patch 历史保留原命令顺序供重放，不宣称已修复旧历史中遗漏的子任务。
    */
   required_followups?: {
     capability: string

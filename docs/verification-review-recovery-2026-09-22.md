@@ -33,6 +33,6 @@
 
 ## 未完成范围
 
-- 旧 Mission Workflow 仍只消费第一个 followup；默认硬门槛只生成一个，不代表任意多后继 Workflow 已完成。
+- 当时旧 Mission Workflow 仍只消费第一个 followup；默认硬门槛只生成一个，不代表任意多后继 Workflow 已完成。后续多后继队列化验证见 [Mission 多后继执行验证记录](verification-mission-followups-2026-09-22.md)。
 - 远程 Runner、WSS/mTLS 与身份接入不属于本次修复；未部署到远程主机。
 - WebUI 本机地址 `http://127.0.0.1:8789/`；API 仍仅绑定回环地址。

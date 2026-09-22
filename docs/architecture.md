@@ -202,6 +202,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 验收逐条判定（漏答即不通过） | ✅ P2 |
 | 硬门槛判定（确定性，不用 LLM） | ✅ P2 |
 | 自动返工接进主 Workflow（两道刹车 + 升级） | ✅ P2 |
+| Mission 多后继调度 | ✅ 本机有界 FIFO；所有叶任务通过才完成，分支停止清理待执行任务，新旧历史兼容；真实 Codex 三任务验证见 [记录](verification-mission-followups-2026-09-22.md)。Reviewer 的 inputs/parameters/task_type 物化仍待完成 |
 | 审批闸口接进主 Workflow（双 scope + 拒绝终止） | ✅ P2，真实 API → Workflow → Codex 链路通过 |
 | 证据哈希由控制面独立复算 | ✅ P2，复算在控制面 Adapter 层，不采信 Agent 自报 |
 | WebUI 原型（3 方案 × 2 轮迭代） | ✅ P2，原型已有；双 scope 同时 pending 已用合成数据验证实际 UI |

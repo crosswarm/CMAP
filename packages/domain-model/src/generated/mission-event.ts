@@ -10,6 +10,9 @@
 export interface MissionEventV1 {
   schema: 'cmap/mission-event/v1'
   event_id: string
+  /**
+   * TASK_CANCELED 可表示 Mission 分支停止后取消未派发的 DRAFT 后继。内部取消回执绑定完整有序请求的哈希及受限原因，写前写后核对身份、状态和事件；不得将已绑定的未知执行伪造为取消。SSE 仍不公开 payload。
+   */
   event_type: string
   event_version: number
   occurred_at: string
