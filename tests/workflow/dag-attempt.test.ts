@@ -15,7 +15,7 @@ import type {
   TaskEnvelopeV1,
   TaskRecord,
 } from '#domain-model'
-import type { DispatchContext, NormalizedAgentStatus } from '#adapter-sdk'
+import { AdapterError, type DispatchContext, type NormalizedAgentStatus } from '#adapter-sdk'
 import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 import { createDagAttemptRunner } from '../../workflows/dag-attempt.ts'
 
@@ -304,6 +304,34 @@ class AcquireThrowStore extends MemoryStore {
 class StartErrorAdapter extends FakeAdapter {
   override async startTask(): Promise<RemoteTaskBinding> {
     throw new Error('provider body with secrets')
+  }
+}
+
+class BindingLostDuringCollectAdapter extends ControlledAdapter {
+  statusCalls = 0
+
+  override async getStatus(_binding?: RemoteTaskBinding): Promise<NormalizedAgentStatus> {
+    this.statusCalls += 1
+    if (this.statusCalls === 1) {
+      return { status: 'completed', at: new Date().toISOString(), terminal_observed: true }
+    }
+    throw new AdapterError(
+      'BINDING_NOT_FOUND',
+      'fresh CLI adapter cannot observe the prior binding',
+      true,
+      'binding-not-found',
+    )
+  }
+}
+
+class FreshCliBindingMissingAdapter extends ControlledAdapter {
+  override async getStatus(_binding?: RemoteTaskBinding): Promise<NormalizedAgentStatus> {
+    throw new AdapterError(
+      'BINDING_NOT_FOUND',
+      'fresh CLI adapter cannot observe the prior binding',
+      true,
+      'binding-not-found',
+    )
   }
 }
 
@@ -842,6 +870,71 @@ describe('DAG attempt runner', () => {
     assert.equal(out.reason, 'COLLECT_FAILED')
     assert.equal((await store.listActiveLocks(new Date().toISOString())).length, 0)
   })
+
+  test('execution uncertainty after terminal observation escalates instead of collecting', async () => {
+    const store = new MemoryStore()
+    const adapter = new BindingLostDuringCollectAdapter()
+    Object.defineProperty(adapter, 'adapterId', { value: 'codex-adapter' })
+    await createTask(store, 'tsk-binding-lost-collect', [{ resource: 'res:binding-lost', ttl_seconds: 15 }])
+
+    const out = await createDagAttemptRunner({ runner: syntheticRunner(),
+      store,
+      adapter,
+      workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
+      pollIntervalMs: 5,
+    })({ taskId: 'tsk-binding-lost-collect' })
+
+    assert.equal(out.outcome, 'escalated')
+    assert.equal(out.reason, 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND')
+    assert.equal((await store.listActiveLocks(new Date().toISOString())).length, 0)
+    assert.equal(adapter.startCalls.length, 1)
+  })
+
+  for (const adapterId of ['codex-adapter', 'kimi-adapter'] as const) {
+    test(`fresh ${adapterId} status miss records INPUT_REQUIRED and keeps leases`, async () => {
+      const store = new MemoryStore()
+      const adapter = new FreshCliBindingMissingAdapter()
+      Object.defineProperty(adapter, 'adapterId', { value: adapterId })
+      const taskId = `tsk-fresh-${adapterId}`
+      await createTask(store, taskId, [{ resource: `res:${adapterId}`, ttl_seconds: 15 }])
+      await store.transitionTask({
+        taskId,
+        to: 'QUEUED',
+        actor: ACTOR,
+        eventType: 'TASK_ASSIGNED',
+        idempotencyKey: `${taskId}:queued`,
+      })
+      await store.claimTaskBinding({
+        taskId,
+        binding: {
+          adapter: adapterId,
+          remote_task_id: `${adapterId}:${taskId}:1`,
+          protocol: 'cli',
+          protocol_version: '0.1.0',
+          runner_id: 'runner-test',
+        },
+        actor: ACTOR,
+      })
+
+      const out = await createDagAttemptRunner({ runner: syntheticRunner(),
+        store,
+        adapter,
+        workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
+        pollIntervalMs: 5,
+      })({ taskId })
+
+      const task = await store.getTask(taskId)
+      const events = await store.listEvents(task!.mission_id)
+      assert.equal(out.outcome, 'escalated')
+      assert.equal(out.reason, 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND')
+      assert.equal(task?.state, 'INPUT_REQUIRED')
+      assert.equal(task?.result, null)
+      assert.equal(events.filter((event) => event.event_type === 'INPUT_REQUIRED').length, 1)
+      assert.equal((await store.listActiveLocks(new Date().toISOString())).length, 1)
+      assert.equal(adapter.startCalls.length, 0)
+      assert.equal(adapter.cancelCalls.length, 0)
+    })
+  }
 
   test('unexpected acquisition errors release partial known locks before dispatch', async () => {
     const store = new AcquireThrowStore()

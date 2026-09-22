@@ -427,6 +427,56 @@ describe('Mission Workflow', () => {
     }
   })
 
+  test('收结果遇到执行状态不确定时先升级，不进入验收', async () => {
+    const queue = `cmap-uncertain-${process.pid}-${Date.now()}`
+    const native = await NativeConnection.connect({ address: ADDRESS })
+    let verifying = false
+    const states: string[] = []
+    const uncertainWorker = await Worker.create({
+      connection: native,
+      namespace: 'default',
+      taskQueue: queue,
+      workflowsPath: join(here, '../../workflows/mission.workflow.ts'),
+      activities: {
+        setMissionState: async ({ state }: { state: string }) => {
+          states.push(state)
+        },
+        createTask: async () => ({ taskId: 'tsk-uncertain' }),
+        markReady: async () => {},
+        requestApproval: async () => ({ required: false }),
+        dispatchTask: async () => ({ dispatched: true, remoteTaskId: 'fake:tsk-uncertain' }),
+        collectTaskResult: async () => ({
+          executionUncertain: {
+            code: 'BINDING_NOT_FOUND',
+            terminalObserved: false,
+          },
+        }),
+        markVerifying: async () => {
+          verifying = true
+        },
+      },
+    })
+    const runUncertainWorker = uncertainWorker.run()
+    try {
+      const uncertainClient = new Client({ connection: conn, namespace: 'default' })
+      const result = await uncertainClient.workflow.execute('missionWorkflow', {
+        taskQueue: queue,
+        workflowId: `test-uncertain-${Date.now()}`,
+        args: [{ missionId: 'mis-uncertain' }],
+      })
+
+      assert.equal(result.state, 'ESCALATED')
+      assert.equal(result.summary, 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND')
+      assert.equal(result.escalationReason, 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND')
+      assert.equal(verifying, false, '不确定执行状态不能进入 markVerifying')
+      assert.deepEqual(states, ['RUNNING', 'ESCALATED'])
+    } finally {
+      uncertainWorker.shutdown()
+      await runUncertainWorker.catch(() => {})
+      await native.close()
+    }
+  })
+
   test('mutating 任务批准前不派发，批准 controlled 也不放行', async () => {
     await store.createMission({
       mission: mission('mis-approval-1', { risk_level: 'mutating' }),

@@ -148,6 +148,23 @@ export async function missionWorkflow(
 
     // 等 Agent 干完并收结果。
     const collected = await longRunning.collectTaskResult(taskId)
+    if ('executionUncertain' in collected) {
+      const reason = `EXECUTION_UNCERTAIN:${collected.executionUncertain.code}`
+      await acts.setMissionState({
+        missionId,
+        state: 'ESCALATED',
+        idempotencyKey: `execution-uncertain:${taskId}`,
+      })
+      return {
+        missionId,
+        state: 'ESCALATED',
+        taskIds,
+        summary: reason,
+        failedCriteria: [],
+        escalationReason: reason,
+        rounds: round,
+      }
+    }
     if (collected.admissionDenied) {
       await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
       return {missionId,state:'ESCALATED',taskIds,summary:collected.summary,failedCriteria:[],rounds:round}

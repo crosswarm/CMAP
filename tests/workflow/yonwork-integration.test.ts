@@ -245,6 +245,7 @@ test("dispatch intent is persisted before synthetic YonWork session/send and fin
 
   const dispatched = await fx.acts.dispatchTask(fx.taskId);
   const collected = await fx.acts.collectTaskResult(fx.taskId);
+  assert.ok(!('executionUncertain' in collected))
 
   assert.equal(dispatched.dispatched, true);
   assert.equal(collected.passed, true);

@@ -4,7 +4,7 @@ import { Context } from '@temporalio/activity'
 
 import type { RemoteTaskBinding, ResourceLock, Store, TaskEnvelopeV1, TaskRecord } from '#domain-model'
 import { LockUnavailableError, snapshotRunnerDescriptor } from '#domain-model'
-import type { AgentAdapter, NormalizedAgentStatus } from '#adapter-sdk'
+import { AdapterError, type AgentAdapter, type NormalizedAgentStatus } from '#adapter-sdk'
 import { createActivities, type ActivityDeps } from './activities.ts'
 import { preflightTaskDispatch, readAdmissionDenial, admissionDenialReason } from './runner-admission.ts'
 
@@ -32,6 +32,12 @@ const beforeDeadline = async <T>(operation: Promise<T>, deadline: number): Promi
     clearTimeout(timer)
   }
 }
+
+const executionUncertainReason = (code: string): string => `EXECUTION_UNCERTAIN:${code}`
+const isCliBindingNotFound = (error: unknown, binding: RemoteTaskBinding): error is AdapterError =>
+  error instanceof AdapterError &&
+  error.code === 'BINDING_NOT_FOUND' &&
+  (binding.adapter === 'codex-adapter' || binding.adapter === 'kimi-adapter')
 
 const heartbeat = (): void => {
   try {
@@ -173,6 +179,7 @@ export const createDagAttemptRunner = (
     if (!initial) throw new Error(`任务不存在：${taskId}`)
     if (initial.result) {
       const collected=await activities.collectTaskResult(taskId)
+      if('executionUncertain' in collected)return {outcome:'escalated',taskId,reason:executionUncertainReason(collected.executionUncertain.code)}
       if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
       return { outcome: 'collected', taskId }
     }
@@ -427,6 +434,7 @@ export const createDagAttemptRunner = (
     if (task.result) {
       try {
         const collected=await activities.collectTaskResult(taskId)
+        if('executionUncertain' in collected)return {outcome:'escalated',taskId,reason:executionUncertainReason(collected.executionUncertain.code)}
         if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
       } finally {
         await releaseAll(store, owned)
@@ -465,7 +473,27 @@ export const createDagAttemptRunner = (
       let status: NormalizedAgentStatus
       try {
         status = await beforeDeadline(adapter.getStatus(binding), Math.min(deadline, Date.now() + CANCEL_GRACE_MS))
-      } catch {
+      } catch (error) {
+        if (isCliBindingNotFound(error, binding)) {
+          try {
+            const collected = await activities.collectTaskResult(taskId)
+            if ('executionUncertain' in collected) {
+              return { outcome: 'escalated', taskId, reason: executionUncertainReason(collected.executionUncertain.code) }
+            }
+            if (collected.admissionDenied) {
+              await releaseAll(store, owned)
+              return { outcome: 'escalated', taskId, reason: admissionDenialReason({ admissionDenied: collected.admissionDenied }) }
+            }
+            const collectedTask = await store.getTask(taskId)
+            if (collectedTask?.result) {
+              await releaseAll(store, owned)
+              return { outcome: 'collected', taskId }
+            }
+            return { outcome: 'escalated', taskId, reason: 'STATUS_UNAVAILABLE' }
+          } catch {
+            return { outcome: 'escalated', taskId, reason: 'STATUS_UNAVAILABLE' }
+          }
+        }
         const out = await handleLockLoss(adapter, binding, owned, '状态观测失败')
         return taskOutcome(out, out.reason === 'LOCK_LOST' ? 'STATUS_UNAVAILABLE' : out.reason)
       }
@@ -481,6 +509,7 @@ export const createDagAttemptRunner = (
         }
         try {
           const collected=await activities.collectTaskResult(taskId)
+          if('executionUncertain' in collected)return {outcome:'escalated',taskId,reason:executionUncertainReason(collected.executionUncertain.code)}
           if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
           return { outcome: 'collected', taskId }
         } catch {
@@ -511,7 +540,9 @@ export const createDagAttemptRunner = (
           return handleOwnedLockLoss(lostBeforeCollect, '结果采纳前资源锁失效')
         }
         try {
-          await activities.collectTaskResult(taskId)
+          const collected=await activities.collectTaskResult(taskId)
+          if('executionUncertain' in collected)return {outcome:'escalated',taskId,reason:executionUncertainReason(collected.executionUncertain.code)}
+          if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
         } finally {
           await releaseAll(store, owned)
         }

@@ -57,8 +57,8 @@ export interface DispatchContext {
   /** 代码类任务的隔离工作区，避免 Codex 与 Kimi 并发污染。 */
   readonly worktree?: string
   readonly deadline_at: string
-  /** Control-plane-owned recheck after remote session preparation, immediately before send. */
-  readonly beforeSend?: (binding: RemoteTaskBinding, policySha256: string) => Promise<void>
+  /** Control-owned recheck immediately before send/spawn; YonWork supplies its verified policy hash. */
+  readonly beforeSend?: (binding: RemoteTaskBinding, policySha256?: string) => Promise<void>
 }
 
 // -------------------------------------------------------------- 归一化事件

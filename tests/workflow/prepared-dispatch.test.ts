@@ -12,7 +12,7 @@ class PreparedAdapter extends FakeAdapter {
   sends=0
   observations: Array<{state:string|undefined,bound:boolean,intents:number,guard:boolean}>=[]
   before: (()=>Promise<void>)|undefined
-  reportedPolicy=policy
+  reportedPolicy:string|undefined=policy
   loseAcknowledgement=false
   constructor(readonlyStore:MemoryStore) {
     super();this.store=readonlyStore
@@ -58,6 +58,7 @@ test('prepared dispatch persists RUNNING/intent before send and supplies the fin
   await acts.dispatchTask('prepared')
   assert.deepEqual(adapter.observations,[{state:'RUNNING',bound:true,intents:1,guard:true}])
   assert.equal((await store.getTask('prepared'))?.binding?.remote_task_id,'run-prepared')
+  assert.equal((await store.listEvents('mis-prepared')).filter(x=>x.event_type==='TASK_STARTED').length,1)
 })
 test('pending approval and unheld/wrong/expired leases never send',async()=>{
   for(const options of [{approved:false},{lock:false},{lockRunner:'other'},{expired:true}]){
@@ -67,9 +68,10 @@ test('pending approval and unheld/wrong/expired leases never send',async()=>{
   }
 })
 test('post-preparation policy/lease drift prevents send but keeps durable intent',async()=>{
-  for(const change of ['policy','lease']){
+  for(const change of ['policy','missing-policy','lease']){
     const {store,adapter,acts}=await fixture()
     if(change==='policy')adapter.reportedPolicy='b'.repeat(64)
+    else if(change==='missing-policy')adapter.reportedPolicy=undefined
     else adapter.before=()=>store.releaseLock('owned',new Date().toISOString())
     await assert.rejects(()=>acts.dispatchTask('prepared'))
     assert.equal(adapter.sends,0)
@@ -85,6 +87,25 @@ test('uncertain acceptance with a persisted intent never redispatches through a 
   assert.equal((await fresh.dispatchTask('prepared')).dispatched,false)
   assert.equal(adapter.sends,1)
   assert.equal(next.sends,0)
+})
+
+test('lost TASK_STARTED write retains intent and recovery never resends or invents acknowledgement',async()=>{
+  const {store,adapter,acts}=await fixture()
+  const append=store.appendEvent.bind(store)
+  store.appendEvent=async input=>{
+    if(input.event.event_type==='TASK_STARTED')throw new Error('started receipt unavailable')
+    return append(input)
+  }
+  await assert.rejects(()=>acts.dispatchTask('prepared'),/started receipt unavailable/)
+  store.appendEvent=append
+  const next=new PreparedAdapter(store)
+  const fresh=createActivities({store,adapter:next,runner:syntheticRunner({runner_id:'runner'})})
+  assert.equal((await fresh.dispatchTask('prepared')).dispatched,false)
+  assert.equal(adapter.sends,1)
+  assert.equal(next.sends,0)
+  const events=await store.listEvents('mis-prepared')
+  assert.equal(events.filter(e=>e.event_type==='TASK_DISPATCH_INTENT').length,1)
+  assert.equal(events.filter(e=>e.event_type==='TASK_STARTED').length,0)
 })
 
 test('wrong scope, expired and self-issued approvals cannot dispatch',async()=>{

@@ -211,6 +211,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | DAG 执行 | ✅ 本机显式 dag/v1；API → Temporal → Codex/Kimi 分叉汇合、依赖产物与节点验收已验证，见 [验证](verification-dag-2026-09-21.md)；不包含自动 Planner |
 | 自然语言 Planner 桥接 | 🟡 外部 CLI 与契约校验已实现；Claude 真实调用返回 403，端到端验证未完成，见 [Planner](planner.md) |
 | yonwork-adapter | 🟡 P3；受控派发、预写意图、相关终态与报告捕获已通过本地合成集成回归；真实专用 profile 闭环尚未验收，见 [运行说明](yonwork-adapter.md) 与 [验证](verification-yonwork-core-2026-09-22.md) |
+| Codex/Kimi 启动前持久意图 | ✅ 本机；未知运行状态保留绑定并升级，不能自动重接管，见 [验证](verification-cli-dispatch-intent-2026-09-22.md) |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 
 P2 后端出口验证记录在 `scripts/e2e-mission.mjs`（不代表 WebUI 或整个 P2 完成）：建 Mission → Workflow 派发 →

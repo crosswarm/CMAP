@@ -12,7 +12,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process'
 import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
-import { mkdtemp, writeFile, readFile, realpath, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -229,6 +229,16 @@ export class CodexAdapter implements AgentAdapter {
     return pending
   }
 
+  prepareBinding(envelope: TaskEnvelopeV1, ctx: DispatchContext): RemoteTaskBinding {
+    return {
+      adapter: ADAPTER_ID,
+      remote_task_id: `codex:${envelope.identity.task_id}:${envelope.identity.revision}`,
+      protocol: 'codex-exec',
+      protocol_version: ADAPTER_VERSION,
+      runner_id: ctx.runner_id,
+    }
+  }
+
   async #start(envelope: TaskEnvelopeV1, ctx: DispatchContext): Promise<RemoteTaskBinding> {
     const key = envelope.identity.idempotency_key
 
@@ -243,23 +253,32 @@ export class CodexAdapter implements AgentAdapter {
     // TMPDIR 与 -C 都可能含 macOS 卷别名；沙箱可写根必须是物理路径。
     const physicalWorkDir = await realpath(workDir)
     const resultFile = join(physicalWorkDir, `.cmap-result-${envelope.identity.task_id}.json`)
-    const promptFile = join(physicalWorkDir, `.cmap-prompt-${envelope.identity.task_id}.md`)
-
-    await writeFile(promptFile, renderTaskPrompt(envelope), 'utf8')
+    const prompt = renderTaskPrompt(envelope)
+    const physicalTmpDir = await realpath(tmpdir())
+    const binding = this.prepareBinding(envelope, ctx)
 
     const args = buildCodexArgs(envelope, {
       workDir: physicalWorkDir,
       resultFile,
       outputSchemaPath: this.#outputSchemaPath,
-      prompt: await readFile(promptFile, 'utf8'),
+      prompt,
     })
+
+    try {
+      await ctx.beforeSend?.(binding)
+    } catch (cause) {
+      if (ownsWorkDir) {
+        await rm(workDir, { recursive: true, force: true })
+      }
+      throw cause
+    }
 
     const child = spawn(this.#bin, args, {
       env: {
         ...process.env,
         // macOS 上 TMPDIR 可能经 /Volumes/<disk> 符号链接指回 /Users。
         // Codex workspace-write 拒绝带符号链接的 writable root，传物理路径即可。
-        TMPDIR: await realpath(tmpdir()),
+        TMPDIR: physicalTmpDir,
         // 隔离本机代理：Surge 会拦截 localhost 并返回 HTTP 200 + HTML，
         // 导致连接看似成功却永远等不到有效响应（静默挂起）。
         NO_PROXY: 'localhost,127.0.0.1,::1',
@@ -289,14 +308,6 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     this.#wire(state)
-
-    const binding: RemoteTaskBinding = {
-      adapter: ADAPTER_ID,
-      remote_task_id: `codex:${envelope.identity.task_id}:${envelope.identity.revision}`,
-      protocol: 'codex-exec',
-      protocol_version: ADAPTER_VERSION,
-      runner_id: ctx.runner_id,
-    }
 
     this.#runs.set(binding.remote_task_id, state)
     this.#idempotency.set(key, binding)

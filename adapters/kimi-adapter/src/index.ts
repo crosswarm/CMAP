@@ -124,6 +124,16 @@ export class KimiAdapter implements AgentAdapter {
     return pending
   }
 
+  prepareBinding(envelope: TaskEnvelopeV1, ctx: DispatchContext): RemoteTaskBinding {
+    return {
+      adapter: ADAPTER_ID,
+      remote_task_id: `kimi:${envelope.identity.task_id}:${envelope.identity.revision}`,
+      protocol: 'kimi-cli-stream-json',
+      protocol_version: ADAPTER_VERSION,
+      runner_id: ctx.runner_id,
+    }
+  }
+
   async #start(
     envelope: TaskEnvelopeV1,
     ctx: DispatchContext,
@@ -156,26 +166,34 @@ export class KimiAdapter implements AgentAdapter {
       this.#credentialHome,
       this.#bin,
     )
-    const prompt = await renderPrompt(envelope)
-    const args = [
-      '-p',
-      runtime.sandboxProfile,
-      this.#bin,
-      '--agent-file',
-      runtime.agentFile,
-      '--skills-dir',
-      runtime.skillsDir,
-      '-p',
-      prompt,
-      '--output-format',
-      'stream-json',
-    ]
-    const child = spawn(this.#sandboxBin, args, {
-      cwd: runtime.workDir,
-      detached: true,
-      env: childEnv(runtime, envelope, ctx),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const binding = this.prepareBinding(envelope, ctx)
+    let child: ChildProcess
+    try {
+      const prompt = await renderPrompt(envelope)
+      const args = [
+        '-p',
+        runtime.sandboxProfile,
+        this.#bin,
+        '--agent-file',
+        runtime.agentFile,
+        '--skills-dir',
+        runtime.skillsDir,
+        '-p',
+        prompt,
+        '--output-format',
+        'stream-json',
+      ]
+      await ctx.beforeSend?.(binding)
+      child = spawn(this.#sandboxBin, args, {
+        cwd: runtime.workDir,
+        detached: true,
+        env: childEnv(runtime, envelope, ctx),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      await rm(runtime.runtimeDir, { recursive: true, force: true })
+      throw error
+    }
 
     const state: RunState = {
       child,
@@ -208,13 +226,6 @@ export class KimiAdapter implements AgentAdapter {
     }
     this.#wire(state)
 
-    const binding: RemoteTaskBinding = {
-      adapter: ADAPTER_ID,
-      remote_task_id: `kimi:${envelope.identity.task_id}:${envelope.identity.revision}`,
-      protocol: 'kimi-cli-stream-json',
-      protocol_version: ADAPTER_VERSION,
-      runner_id: ctx.runner_id,
-    }
     this.#runs.set(binding.remote_task_id, state)
     return binding
   }

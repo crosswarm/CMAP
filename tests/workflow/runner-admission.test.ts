@@ -139,7 +139,9 @@ test('post-intent denial receipt outranks binding recovery, survives a lost retu
     assert.equal((await f.store.getTask(id))?.state,'FAILED_TERMINAL')
     assert.ok((await f.store.getTask(id))?.binding)
     assert.equal(adapter.startCalls.length,0)
-    assert.deepEqual((await fresh.collectTaskResult(id)).admissionDenied,expected.admissionDenied)
+    const collected=await fresh.collectTaskResult(id)
+    assert.ok(!('executionUncertain' in collected))
+    assert.deepEqual(collected.admissionDenied,expected.admissionDenied)
   }
 })
 

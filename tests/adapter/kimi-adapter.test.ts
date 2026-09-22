@@ -2,6 +2,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   stat,
   writeFile,
@@ -90,6 +91,13 @@ const fileExists = async (path: string): Promise<boolean> => {
   }
 }
 
+const kimiRuntimeDirs = async (): Promise<Set<string>> =>
+  new Set(
+    (await readdir(tmpdir(), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name.startsWith('cmap-kimi-'))
+      .map((entry) => entry.name),
+  )
+
 const adapter = (
   bin: string,
   sandboxBin: string,
@@ -133,6 +141,34 @@ test('discover reports Kimi bounded capabilities', async () => {
     supports_worktree_isolation: true,
     execution_level: 'B',
   })
+})
+
+test('prepareBinding is deterministic and performs no runtime IO', async () => {
+  const a = new KimiAdapter({
+    bin: '/bin/false',
+    sandboxBin: '/bin/false',
+    credentialHome: tmpdir(),
+  })
+  const e = envelope('tsk-prepare')
+  const ctx = {
+    token: 'test',
+    runner_id: 'runner-1',
+    trace_id: 'trace-1',
+    correlation_id: 'corr-1',
+    worktree: tmpdir(),
+    deadline_at: new Date(Date.now() + 30_000).toISOString(),
+  }
+  const before = await kimiRuntimeDirs()
+
+  assert.deepEqual(a.prepareBinding(e, ctx), {
+    adapter: 'kimi-adapter',
+    remote_task_id: 'kimi:tsk-prepare:3',
+    protocol: 'kimi-cli-stream-json',
+    protocol_version: '0.1.0',
+    runner_id: 'runner-1',
+  })
+  assert.deepEqual(a.prepareBinding(e, ctx), a.prepareBinding(e, ctx))
+  assert.deepEqual(await kimiRuntimeDirs(), before)
 })
 
 test('exit 0 without valid final assistant JSON fails', async () => {
@@ -293,6 +329,109 @@ setTimeout(() => console.log(JSON.stringify({ role: 'assistant', content: '{}' }
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   assert.equal(await readFile(countFile, 'utf8'), '1')
+})
+
+test('startTask reuses the prepared binding and guards before launch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-binding-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const marker = join(root, 'spawned.txt')
+  const kimi = await makeKimi(
+    root,
+    `require('node:fs').writeFileSync('${marker}', 'spawned')
+setTimeout(() => console.log(JSON.stringify({ role: 'assistant', content: '{}' })), 10)`,
+  )
+  const a = adapter(kimi, sandboxBin, root)
+  const e = envelope('tsk-binding')
+  const ctx = {
+    token: 'test',
+    runner_id: 'runner-1',
+    trace_id: 'trace-1',
+    correlation_id: 'corr-1',
+    worktree: root,
+    deadline_at: new Date(Date.now() + 30_000).toISOString(),
+    beforeSend: async (binding: ReturnType<KimiAdapter['prepareBinding']>) => {
+      assert.deepEqual(binding, a.prepareBinding(e, ctx))
+      assert.equal(await fileExists(marker), false)
+    },
+  }
+
+  const binding = await a.startTask(e, ctx)
+  assert.deepEqual(binding, a.prepareBinding(e, ctx))
+  for (;;) {
+    if ((await a.getStatus(binding)).terminal_observed) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(await fileExists(marker), true)
+})
+
+test('beforeSend rejection blocks Kimi launch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-before-send-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const marker = join(root, 'spawned.txt')
+  const kimi = await makeKimi(
+    root,
+    `require('node:fs').writeFileSync('${marker}', 'spawned')`,
+  )
+  const a = adapter(kimi, sandboxBin, root)
+  const before = await kimiRuntimeDirs()
+
+  await assert.rejects(
+    a.startTask(envelope('tsk-before-send'), {
+      token: 'test',
+      runner_id: 'runner-1',
+      trace_id: 'trace-1',
+      correlation_id: 'corr-1',
+      worktree: root,
+      deadline_at: new Date(Date.now() + 30_000).toISOString(),
+      beforeSend: async () => {
+        throw new Error('blocked')
+      },
+    }),
+    /blocked/,
+  )
+  assert.equal(await fileExists(marker), false)
+  assert.equal(await fileExists(root), true)
+  const leaked = [...(await kimiRuntimeDirs())].filter((name) => !before.has(name))
+  assert.deepEqual(leaked, [])
+})
+
+test('beforeSend rejection cleans owned Kimi runtime without launching', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-before-send-owned-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const marker = join(root, 'spawned.txt')
+  const kimi = await makeKimi(
+    root,
+    `require('node:fs').writeFileSync('${marker}', 'spawned')`,
+  )
+  const a = adapter(kimi, sandboxBin, root)
+  const before = await kimiRuntimeDirs()
+  let runtimeDir = ''
+
+  await assert.rejects(
+    a.startTask(envelope('tsk-before-send-owned'), {
+      token: 'test',
+      runner_id: 'runner-1',
+      trace_id: 'trace-1',
+      correlation_id: 'corr-1',
+      deadline_at: new Date(Date.now() + 30_000).toISOString(),
+      beforeSend: async () => {
+        const created = [...(await kimiRuntimeDirs())].filter(
+          (name) => !before.has(name),
+        )
+        assert.equal(created.length, 1)
+        runtimeDir = join(tmpdir(), created[0]!)
+        assert.equal(await fileExists(join(runtimeDir, 'home/credentials')), true)
+        assert.equal(await fileExists(join(runtimeDir, 'work')), true)
+        throw new Error('blocked')
+      },
+    }),
+    /blocked/,
+  )
+  assert.equal(await fileExists(marker), false)
+  assert.equal(await fileExists(runtimeDir), false)
 })
 
 test('timeout cancels the process group and reports failed status', async () => {

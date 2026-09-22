@@ -58,7 +58,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * 漏答等同未通过：只看 status 会让「干完了但没答标准」被当成成功，
  * 那正是无证据即失败要防的情形。
  */
-const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectOutput => {
+const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectedResult => {
   const answered = new Map(result.criterion_results.map((c) => [c.criterion_id, c]))
   const failedCriteria = (envelope.goal.success_definition ?? [])
     .filter((c) => !recomputeCriterionPassed(c, answered.get(c.criterion_id)))
@@ -195,7 +195,7 @@ export interface HardGateOutput {
   readonly progress: ProgressSnapshot
 }
 
-export interface CollectOutput {
+interface CollectedResult {
   readonly admissionDenied?: AdmissionDenial['admissionDenied']
   readonly status: TaskResultV1['status']
   /** 全部验收标准都被逐条回应且通过，才为 true。 */
@@ -203,6 +203,13 @@ export interface CollectOutput {
   /** 未通过或 Agent 压根没回应的标准。沉默不算通过。 */
   readonly failedCriteria: readonly string[]
   readonly summary: string
+}
+
+export type CollectOutput = CollectedResult | {
+  readonly executionUncertain: {
+    readonly code: 'BINDING_NOT_FOUND'
+    readonly terminalObserved: false
+  }
 }
 
 export interface ApplyReviewInput {
@@ -431,28 +438,36 @@ export const createActivities = (deps: ActivityDeps) => {
       const assertPreparedAuthority = async (expectedBinding?: RemoteTaskBinding, observedPolicy?: string): Promise<void> => {
         const task = await store.getTask(taskId)
         if (task) await assertStoredTaskAdmission(store,runner,task)
-        const policy = envelope.inputs?.parameters?.['yonwork_policy_sha256']
         if (!task || !isDeepStrictEqual(task.envelope, envelope) ||
-          task.capability !== 'yonwork.validate' || task.risk !== 'controlled' ||
-          envelope.classification.risk_level !== 'controlled' ||
-          !yonWorkProfileFromRoute(envelope.execution_policy.preferred_agent) ||
-          envelope.execution_policy.preferred_agent !== selectedAdapter.agentId ||
-          envelope.execution_policy.fallback_agents?.length ||
-          envelope.permissions.yonwork?.chat_send !== true ||
-          typeof policy !== 'string' || !/^[a-f0-9]{64}$/.test(policy) ||
-          (observedPolicy !== undefined && observedPolicy !== policy) ||
-          !envelope.execution_policy.required_resource_locks?.some(lock => lock.resource === 'yonwork:host') ||
           (expectedBinding ? task.state !== 'RUNNING' || !isDeepStrictEqual(task.binding, expectedBinding)
             : !['READY','QUEUED','WAITING_RESOURCE'].includes(task.state))) {
-          throw new Error('Prepared dispatch task, profile, permission or policy mismatch')
+          throw new Error('Prepared dispatch task or binding mismatch')
+        }
+        if (selectedAdapter.adapterId === 'yonwork-adapter') {
+          const policy = envelope.inputs?.parameters?.['yonwork_policy_sha256']
+          if (task.capability !== 'yonwork.validate' || task.risk !== 'controlled' ||
+            envelope.classification.risk_level !== 'controlled' ||
+            !yonWorkProfileFromRoute(envelope.execution_policy.preferred_agent) ||
+            envelope.execution_policy.preferred_agent !== selectedAdapter.agentId ||
+            envelope.execution_policy.fallback_agents?.length ||
+            envelope.permissions.yonwork?.chat_send !== true ||
+            typeof policy !== 'string' || !/^[a-f0-9]{64}$/.test(policy) ||
+            (observedPolicy !== undefined && observedPolicy !== policy) ||
+            !envelope.execution_policy.required_resource_locks?.some(lock => lock.resource === 'yonwork:host')) {
+            throw new Error('Prepared dispatch profile, permission or policy mismatch')
+          }
         }
         await assertCurrentTaskApproval(store,task)
-        const now = Date.now()
-        const locks = await store.listActiveLocks(new Date(now).toISOString())
-        if (!locks.some(lock => lock.resource === 'yonwork:host' && lock.task_id === taskId &&
-          lock.mission_id === task.mission_id && lock.holder_runner_id === runnerId &&
-          lock.released_at === null && Date.parse(lock.expires_at) > Date.now())) {
-          throw new Error('Prepared dispatch requires an active owned YonWork host lease')
+        const required = envelope.execution_policy.required_resource_locks ?? []
+        if (required.length) {
+          const locks = await store.listActiveLocks(new Date().toISOString())
+          for (const requirement of required) {
+            if (!locks.some(lock => lock.resource === requirement.resource && lock.task_id === taskId &&
+              lock.mission_id === task.mission_id && lock.holder_runner_id === runnerId &&
+              lock.released_at === null && Date.parse(lock.expires_at) > Date.now())) {
+              throw new Error('Prepared dispatch requires active owned resource leases')
+            }
+          }
         }
       }
       // Adapter health may await external I/O. Recheck authoritative scope before local preparation.
@@ -522,6 +537,9 @@ export const createActivities = (deps: ActivityDeps) => {
           await checkPrepared()
           binding = await selectedAdapter.startTask(envelope, {...context,beforeSend:async (candidate,policySha256) => {
             if (checked) throw new Error('Prepared beforeSend invoked more than once')
+            if (selectedAdapter.adapterId === 'yonwork-adapter' && policySha256 === undefined) {
+              throw new Error('YonWork beforeSend requires verified policy hash')
+            }
             if (!isDeepStrictEqual(candidate,prepared)) throw new Error('Prepared binding changed before send')
             await checkPrepared(policySha256)
             checked = true
@@ -531,7 +549,13 @@ export const createActivities = (deps: ActivityDeps) => {
           throw error
         }
         if (!checked || !isDeepStrictEqual(binding,prepared)) throw new Error('Prepared dispatch contract mismatch')
-        // RUNNING and intent were persisted before effects; startTask return is not remote completion.
+        // This acknowledges the start call, not remote completion. Recovery never invents it.
+        await store.appendEvent({event:{
+          event_type:'TASK_STARTED',event_version:1,occurred_at:new Date().toISOString(),
+          mission_id:existing.mission_id,task_id:taskId,attempt:existing.attempt,actor:ACTOR,
+          causation_id:null,correlation_id:existing.mission_id,trace_id:taskId,
+          idempotency_key:`running:${taskId}`,payload:{},
+        }})
         return {dispatched:true,remoteTaskId:binding.remote_task_id}
       }
 
@@ -546,9 +570,7 @@ export const createActivities = (deps: ActivityDeps) => {
         throw new Error(`Adapter binding mismatch: selected ${selectedAdapter.adapterId}, got ${binding.adapter}`)
       }
 
-      // 先写库再返回：Activity 内部保证「调用与记录」不分离。
-      // 顺序反过来的话，进程在这两步之间崩溃就会留下一个已在跑、
-      // 账本却不知道的 Agent 进程——重试会再 spawn 一个。
+      // Third-party adapters without prepareBinding still have a start-before-binding window.
       await store.setTaskBinding(taskId, binding)
 
       await store.transitionTask({
@@ -607,7 +629,33 @@ export const createActivities = (deps: ActivityDeps) => {
           finally {throw new Error('RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
         }
         if(revoked)return {status:'failed',passed:false,failedCriteria:[],summary:admissionDenialReason(revoked),...revoked}
-        const status = await a.getStatus(t.binding)
+        let status
+        try { status = await a.getStatus(t.binding) }
+        catch (error) {
+          if (!(error instanceof AdapterError) || error.code !== 'BINDING_NOT_FOUND' ||
+            !['codex-adapter','kimi-adapter'].includes(t.binding.adapter)) throw error
+          const current = await store.getTask(taskId)
+          if (!current || !isDeepStrictEqual(current.binding,t.binding)) throw new Error('CLI_RECOVERY_BINDING_CHANGED')
+          if (current.result) {
+            await recordResultArtifacts(current,current.result,a,t.binding)
+            return judge(envelope,current.result)
+          }
+          const idempotencyKey = `execution-uncertain:${taskId}`
+          const executionUncertain = {code:'BINDING_NOT_FOUND',terminalObserved:false} as const
+          if (current.state === 'RUNNING') {
+            await store.transitionTask({taskId,to:'INPUT_REQUIRED',expectedFrom:'RUNNING',actor:ACTOR,
+              eventType:'INPUT_REQUIRED',idempotencyKey,payload:executionUncertain})
+          } else {
+            // Older bound QUEUED tasks retain their last known phase; no invented RUNNING.
+            await store.appendEvent({event:{
+              event_type:'INPUT_REQUIRED',event_version:1,occurred_at:new Date().toISOString(),
+              mission_id:current.mission_id,task_id:taskId,attempt:current.attempt,actor:ACTOR,
+              causation_id:null,correlation_id:current.mission_id,trace_id:taskId,
+              idempotency_key:idempotencyKey,payload:executionUncertain,
+            }})
+          }
+          return {executionUncertain}
+        }
         if (status.terminal_observed) break
         if (Date.now() > deadline) {
           await a.cancel(t.binding, `等待终态超时（${waitMs}ms）`)

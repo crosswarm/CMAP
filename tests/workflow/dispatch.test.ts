@@ -14,6 +14,7 @@ import type { Artifact, Mission, RemoteTaskBinding, Store, TaskEnvelopeV1, TaskR
 import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
+import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 
 const ACTOR = { type: 'system', id: 'test' } as const
 
@@ -223,6 +224,7 @@ describe('收结果并落账本', () => {
     await acts.dispatchTask(taskId)
 
     const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
 
     assert.equal(out.passed, true)
     assert.equal(out.status, 'completed')
@@ -312,6 +314,7 @@ describe('收结果并落账本', () => {
     const collectCalls = counting.collectCalls
 
     const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
 
     assert.equal(out.passed, true)
     assert.equal(counting.statusCalls, statusCalls, '缓存结果修复不得重新轮询 Adapter')
@@ -337,6 +340,7 @@ describe('收结果并落账本', () => {
     }
     await acts.dispatchTask(taskId)
     const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
 
     assert.equal(out.passed, false)
     assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
@@ -354,6 +358,7 @@ describe('收结果并落账本', () => {
     }
     await acts.dispatchTask(taskId)
     const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
 
     assert.equal(out.passed, false)
     assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
@@ -372,6 +377,7 @@ describe('收结果并落账本', () => {
     }
     await acts.dispatchTask(taskId)
     const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
 
     assert.equal(out.passed, false)
     assert.deepEqual(out.failedCriteria, ['FILE-COUNT'])
@@ -384,6 +390,7 @@ describe('收结果并落账本', () => {
     await acts.dispatchTask(taskId)
 
     const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
     const t = await store.getTask(taskId)
 
     assert.equal(out.status, 'failed')
@@ -423,6 +430,7 @@ describe('收结果并落账本', () => {
       await acts.dispatchTask(taskId)
 
       const out = await acts.collectTaskResult(taskId)
+      assert.ok(!('executionUncertain' in out))
       const result = (await store.getTask(taskId))?.result
 
       assert.equal(out.status, 'failed')
@@ -447,4 +455,21 @@ describe('收结果并落账本', () => {
     )
     assert.equal(adapter.cancelCalls.length, 1, '超时后必须终止 Agent，不能留下孤儿进程继续占资源')
   })
+})
+
+
+test('fresh CLI runtime loss is a durable nonterminal uncertainty, not a TaskResult', async () => {
+  const taskId = await startTask()
+  await acts.dispatchTask(taskId)
+  const binding = {adapter:'codex-adapter',remote_task_id:`codex:${taskId}:1`,protocol:'codex-exec',protocol_version:'0.1.0',runner_id:'runner-test'}
+  await store.setTaskBinding(taskId,binding)
+  const fresh = createActivities({store,adapter:new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json'}),runner:syntheticRunner({runner_id:'runner-test'})})
+  const expected = {executionUncertain:{code:'BINDING_NOT_FOUND',terminalObserved:false}}
+  assert.deepEqual(await fresh.collectTaskResult(taskId),expected)
+  assert.deepEqual(await fresh.collectTaskResult(taskId),expected)
+  const saved=await store.getTask(taskId)
+  assert.equal(saved?.state,'INPUT_REQUIRED')
+  assert.equal(saved?.result,null)
+  assert.deepEqual(saved?.binding,binding)
+  assert.equal((await store.listEvents('mis-1')).filter(e=>e.idempotency_key===`execution-uncertain:${taskId}`).length,1)
 })

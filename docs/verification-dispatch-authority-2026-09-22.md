@@ -21,6 +21,6 @@ Mission `mis-approval-e2e-muc5cq2i` 在批准前为 AWAITING_APPROVAL，Task 为
 
 ## 未关闭事项
 
-Codex/Kimi 仍先 `startTask` 后写 binding；Worker 在两者之间崩溃仍有重复启动风险。Adapter 内存去重不足以跨进程保证，下一步需要将预写意图扩展到这两个 Adapter，并验证恢复与不确定状态。
+本轮发现的 Codex/Kimi 启动后写 binding 窗口已由后续[CLI 派发意图修复](verification-cli-dispatch-intent-2026-09-22.md)关闭；进程重接管仍未实现。
 审批者目前仍是本机记录中的声明；OIDC、工作负载身份、远程 token、完整隔离及部署继续待 P4。
 YonWork 专用 profile 与诊断授权保持待答复，Claude Planner 鉴权拒绝尚未解除。
