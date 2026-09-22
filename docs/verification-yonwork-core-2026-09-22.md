@@ -27,6 +27,7 @@ YonWork Adapter 已完成本地实现与合成集成回归，尚未通过真实 
 默认 Runtime 现按 `yonworkctl` 的真实安装目录选择同目录 OpenClaw；毒化 PATH 与缺失同目录 CLI 的回归分别证明正确配对和拒绝回退。
 有效工具响应必须有匹配的 `agentId`、非空字符串 `profile` 和合法 `groups`；只有省略 notices 可视为空，显式 null 或未解决 notices 均拒绝。
 这修复了代码中的版本混用，不需要先迁移用户配置。
+使用当前 YonWork.app 同包 CLI、同 profile 配置和状态目录执行只读 `gateway call health`，返回可解析 JSON 且 `ok: true`，未出现配置无效错误。此证据证明匹配 CLI 的真实 Gateway 连接；专用任务策略与聊天闭环仍未验收。
 
 ## 当前边界
 
