@@ -37,6 +37,14 @@ Worker 与两个 API 首次并发启动时，一个 API 因 PostgreSQL 23505 退
 ## 保留的边界
 
 本地配置标签不是远程认证。P4 注册/心跳、WSS/mTLS、OIDC、短期令牌、完整隔离、远程产物与上线仍未完成。
-Claude Planner 本轮真实重试仍返回 `PLANNER_AUTH_REJECTED`；qcl 只读探测达到 12 秒截止，不能推断服务器已下线。
+Claude Planner 本轮真实重试仍返回 `PLANNER_AUTH_REJECTED`；早先 qcl 只读探测达到 12 秒截止，后续已通过现有密钥直连验证主机可达，见 [部署主机核验](adr/0002-control-plane-host.md)。
 YonWork 的专用 profile 与 controlled 诊断已提供[具体待授权方案](yonwork-live-acceptance.md)，当前没有收到批准，没有修改业务 Agent 或发送真实诊断。
 Jev 对先落实际准入点的建议为 gate（confidence/probability 0.99），只作为方案参考，未用于授予权限。
+
+## 后续修复：连接会话初始化
+
+`Pool` 的 `connect` 事件不等待异步监听器。旧实现丢弃 `SET search_path` 的 Promise；普通查询虽然目前被 pg 串行排队，但初始化失败不会可靠地反馈给调用方，还会产生 pg 9 将禁止的查询重叠警告。
+现直接使用已安装 pg 8.22 / pg-pool 3.14 的 `onConnect`，等待 schema 初始化完成后才交出连接；失败时由连接池关闭该连接并拒绝调用方。无新依赖，未改变 schema 配置或 SQL 契约。行为由[官方连接池文档](https://node-postgres.com/apis/pool)及已安装源码确认。
+
+新回归先在旧实现复现应用查询过早发出；修复后验证延迟初始化、初始化失败及真实 PostgreSQL 并发迁移。另建两个独立随机 schema，保存同名 Mission 的不同目标，关闭后重新建立连接、不再调用 migrate，并发读取仍分别得到正确目标；只删除测试自身 schema。
+`npm run check` 通过 360 基础 + 58 API + 157 Workflow 共 575 项；`npm run test:pg` 通过 85 项，最终 typecheck 通过。本机现有库另行用全新连接读取健康状态通过，未再出现查询重叠警告。

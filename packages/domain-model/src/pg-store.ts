@@ -225,9 +225,9 @@ export class PgStore implements Store {
       // 显式超时：宁可明确失败，也不要静默挂起
       connectionTimeoutMillis: 10_000,
       idle_in_transaction_session_timeout: 30_000,
-    })
-    this.#pool.on('connect', (c) => {
-      void c.query(`SET search_path TO ${this.#schema}`)
+      onConnect: async (c) => {
+        await c.query(`SET search_path TO ${this.#schema}`)
+      },
     })
   }
 
