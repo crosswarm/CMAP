@@ -12,6 +12,7 @@ export const RUNNER_ADMISSION_CODES = [
   'HOST_MISMATCH',
   'IDENTITY_MISMATCH',
   'CLASSIFICATION_MISMATCH',
+  'APPROVAL_INVALID',
 ] as const
 
 export type RunnerAdmissionErrorCode = (typeof RUNNER_ADMISSION_CODES)[number]

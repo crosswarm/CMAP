@@ -36,7 +36,7 @@ import type {
 import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
 import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError } from '#domain-model'
 import { AdapterError, type AgentAdapter, type DispatchContext } from '#adapter-sdk'
-import { preflightTaskAdmission, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
+import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
 
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -407,8 +407,8 @@ export const createActivities = (deps: ActivityDeps) => {
     /**
      * 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
      *
-     * 拆成两个 Activity 会留下「Adapter 已调用但 Ledger 未记录」的窗口，
-     * 而跨 Activity 没有事务保护。合并后失败即整体标记失败。
+     * 合并 Activity 不等于外部启动与 Ledger 写入原子化。
+     * prepareBinding 路径先持久化意图；legacy 路径仍有启动后、写 binding 前的崩溃窗口。
      *
      * 幂等：先查 Ledger 中的 binding。Adapter 的内存缓存在 Worker 重启后
      * 失效，只有落库的 binding 才能让重试的 Activity 认出「已派发过」。
@@ -417,7 +417,7 @@ export const createActivities = (deps: ActivityDeps) => {
       const existing = await store.getTask(taskId)
       if (!existing) throw new Error(`任务不存在：${taskId}`)
 
-      const denied = await preflightTaskAdmission(store,runner,existing)
+      const denied = await preflightTaskDispatch(store,runner,existing)
       if (denied) return {dispatched:false,...denied}
 
       if (existing.binding) {
@@ -446,16 +446,8 @@ export const createActivities = (deps: ActivityDeps) => {
             : !['READY','QUEUED','WAITING_RESOURCE'].includes(task.state))) {
           throw new Error('Prepared dispatch task, profile, permission or policy mismatch')
         }
+        await assertCurrentTaskApproval(store,task)
         const now = Date.now()
-        const approval = await store.getApproval(`apr:${taskId}:controlled`)
-        if (!approval || approval.task_id !== taskId || approval.mission_id !== task.mission_id ||
-          approval.scope !== 'controlled' || approval.decision !== 'approved' ||
-          !approval.decided_by || approval.decided_by === approval.requested_by ||
-          /^(agent|system):/i.test(approval.decided_by) ||
-          !Number.isFinite(Date.parse(approval.decided_at ?? '')) || Date.parse(approval.decided_at!) > now ||
-          !Number.isFinite(Date.parse(approval.expires_at)) || Date.parse(approval.expires_at) <= now) {
-          throw new Error('Prepared dispatch requires a current controlled approval')
-        }
         const locks = await store.listActiveLocks(new Date(now).toISOString())
         if (!locks.some(lock => lock.resource === 'yonwork:host' && lock.task_id === taskId &&
           lock.mission_id === task.mission_id && lock.holder_runner_id === runnerId &&
@@ -466,7 +458,7 @@ export const createActivities = (deps: ActivityDeps) => {
       // Adapter health may await external I/O. Recheck authoritative scope before local preparation.
       const current = await store.getTask(taskId)
       if (!current) throw new Error('TASK_NOT_FOUND')
-      const rechecked = await preflightTaskAdmission(store,runner,current)
+      const rechecked = await preflightTaskDispatch(store,runner,current)
       if (rechecked) return {dispatched:false,...rechecked}
       if (current.binding) return {dispatched:false,remoteTaskId:current.binding.remote_task_id}
       if (selectedAdapter.prepareBinding) {
@@ -477,9 +469,9 @@ export const createActivities = (deps: ActivityDeps) => {
         }
       }
 
-      if (existing.state === 'READY') {
+      if (current.state === 'READY') {
         await store.transitionTask({
-          taskId, to: 'QUEUED', actor: ACTOR,
+          taskId, to: 'QUEUED', expectedFrom:'READY', actor: ACTOR,
           eventType: 'TASK_ASSIGNED', idempotencyKey: `queued:${taskId}`,
         })
       }
@@ -543,6 +535,11 @@ export const createActivities = (deps: ActivityDeps) => {
         return {dispatched:true,remoteTaskId:binding.remote_task_id}
       }
 
+      const beforeStart=await store.getTask(taskId)
+      if(!beforeStart)throw new Error('TASK_NOT_FOUND')
+      const finalDenial=await preflightTaskDispatch(store,runner,beforeStart)
+      if(finalDenial)return {dispatched:false,...finalDenial}
+      if(beforeStart.binding)return {dispatched:false,remoteTaskId:beforeStart.binding.remote_task_id}
       const binding = await selectedAdapter.startTask(envelope, context)
 
       if (binding.adapter !== selectedAdapter.adapterId) {

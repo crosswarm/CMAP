@@ -34,6 +34,12 @@ async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['
   }
   await store.createTask({actor:ACTOR,task:{id:taskId,mission_id:mission.id,parent_task_id:null,supersedes_task_id:null,capability:'code.analyze',risk,state:'DRAFT',attempt:1,max_attempts:1,lamport:0,envelope,result:null,binding:null,deps:[],created_at:now,updated_at:now}})
   await acts.markReady(taskId)
+  if(risk==='controlled'||risk==='mutating') {
+    // Synthetic authority for fake routing candidates only.
+    const gate=await acts.requestApproval(taskId)
+    await store.decideApproval(gate.approvalId!,'approved','test-harness:human',new Date().toISOString())
+    await acts.waitForApproval({taskId,approvalId:gate.approvalId!,scope:risk})
+  }
   return { acts, store, taskId }
 }
 

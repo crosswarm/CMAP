@@ -197,6 +197,7 @@ const makeTask = async (store: MemoryStore, id: string): Promise<{ missionId: st
 };
 
 const approveAndLock = async (store: MemoryStore, missionId: string, taskId: string): Promise<void> => {
+  const approvalTime = nowIso();
   const approval: Approval = {
     id: `apr:${taskId}:controlled`,
     mission_id: missionId,
@@ -209,9 +210,9 @@ const approveAndLock = async (store: MemoryStore, missionId: string, taskId: str
     evidence_artifact_ids: [],
     decision: "approved",
     decided_by: "human:test-approver",
-    decided_at: nowIso(),
+    decided_at: approvalTime,
     expires_at: new Date(Date.now() + 60_000).toISOString(),
-    created_at: nowIso(),
+    created_at: approvalTime,
   };
   const lock: ResourceLock = {
     lock_id: `lk-${taskId}`,

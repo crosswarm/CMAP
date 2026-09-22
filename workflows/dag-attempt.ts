@@ -6,7 +6,7 @@ import type { RemoteTaskBinding, ResourceLock, Store, TaskEnvelopeV1, TaskRecord
 import { LockUnavailableError, snapshotRunnerDescriptor } from '#domain-model'
 import type { AgentAdapter, NormalizedAgentStatus } from '#adapter-sdk'
 import { createActivities, type ActivityDeps } from './activities.ts'
-import { preflightTaskAdmission, readAdmissionDenial, admissionDenialReason } from './runner-admission.ts'
+import { preflightTaskDispatch, readAdmissionDenial, admissionDenialReason } from './runner-admission.ts'
 
 export type DagAttemptOutcome = {
   readonly outcome: 'collected' | 'waiting_resource' | 'escalated'
@@ -176,7 +176,7 @@ export const createDagAttemptRunner = (
       if(collected.admissionDenied)return {outcome:'escalated',taskId,reason:admissionDenialReason({admissionDenied:collected.admissionDenied})}
       return { outcome: 'collected', taskId }
     }
-    const denied=await preflightTaskAdmission(store,runner,initial)
+    const denied=await preflightTaskDispatch(store,runner,initial)
     if(denied)return {outcome:'escalated',taskId,reason:admissionDenialReason(denied)}
 
     const envelope = initial.envelope as TaskEnvelopeV1

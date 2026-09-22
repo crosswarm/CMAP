@@ -12,6 +12,7 @@ Agent inventory 来自已注册 Adapter 的 `agent_id`，不是 `adapter_id`；�
 API 的 `CMAP_TENANT`/`CMAP_OWNER` 必须与 Worker 许可匹配，但不会用作 Worker 缺失配置的默认值。
 例如现有 8789 预览使用 `test-harness:dag`，不能只填 `.env.example` 中的 `local-operator`。
 风险上限不会代替批准：controlled 和 mutating 仍分别走原有审批。
+所有 Adapter 的新派发都会复核当前批准和合法执行状态，详见 [派发授权验证](verification-dispatch-authority-2026-09-22.md)。
 
 ## 执行与恢复
 

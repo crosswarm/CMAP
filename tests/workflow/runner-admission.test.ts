@@ -14,7 +14,7 @@ const runner = ():RunnerDescriptor => ({
   runner_id:'admission-runner',tenant:'test',host:'test-host',agents:['fake'],resources:[],health:'healthy',
   last_heartbeat_at:new Date().toISOString(),admission:{allowed_tenants:['test'],allowed_owners:['allowed-user'],allowed_capabilities:['code.analyze'],max_risk:'read-meta'},
 })
-async function fixture(owner='denied-user') {
+async function fixture(owner='denied-user', ready=true) {
   const store=new MemoryStore(),adapter=new FakeAdapter(),workRoot=await mkdtemp(join(tmpdir(),'cmap-admission-'))
   const calls={discover:0,health:0}
   const discover=adapter.discover.bind(adapter),health=adapter.health.bind(adapter)
@@ -26,9 +26,34 @@ async function fixture(owner='denied-user') {
   const deps={store,adapter,runner:runner(),workRoot}
   const acts=createActivities(deps)
   const {taskId}=await acts.createTask({missionId:mission.id,capability:'code.analyze'})
-  await acts.markReady(taskId)
+  if(ready)await acts.markReady(taskId)
   return {store,adapter,workRoot,acts,taskId,deps,calls}
 }
+
+test('a host grant cannot start a draft or approval-waiting task',async t=>{
+  for(const state of ['DRAFT','APPROVAL_REQUIRED']) {
+    const f=await fixture('allowed-user',state!=='DRAFT');t.after(()=>rm(f.workRoot,{recursive:true,force:true}))
+    if(state==='APPROVAL_REQUIRED')await f.store.transitionTask({taskId:f.taskId,to:'APPROVAL_REQUIRED',actor,eventType:'APPROVAL_REQUESTED',idempotencyKey:'waiting'})
+    await assert.rejects(()=>f.acts.dispatchTask(f.taskId))
+    assert.equal(f.adapter.startCalls.length,0,state)
+    assert.deepEqual(f.calls,{discover:0,health:0})
+    assert.deepEqual(await readdir(f.workRoot),[])
+    assert.equal((await f.store.getTask(f.taskId))?.binding,null)
+    assert.equal((await f.store.getTask(f.taskId))?.state,state)
+  }
+})
+
+test('dispatch rechecks a task entering approval wait during Adapter health',async t=>{
+  const f=await fixture('allowed-user');t.after(()=>rm(f.workRoot,{recursive:true,force:true}))
+  const health=f.adapter.health.bind(f.adapter)
+  f.adapter.health=async()=>{
+    await f.store.transitionTask({taskId:f.taskId,to:'APPROVAL_REQUIRED',actor,eventType:'APPROVAL_REQUESTED',idempotencyKey:'late-wait'})
+    return health()
+  }
+  await assert.rejects(()=>f.acts.dispatchTask(f.taskId),/TASK_NOT_DISPATCHABLE/)
+  assert.equal(f.adapter.startCalls.length,0)
+  assert.deepEqual(await readdir(f.workRoot),[])
+})
 
 test('runner denies owner before Adapter launch, binding, assignment or work directory',async t=>{
   const f=await fixture();t.after(()=>rm(f.workRoot,{recursive:true,force:true}))

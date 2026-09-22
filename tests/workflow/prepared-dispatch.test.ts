@@ -103,7 +103,7 @@ test('wrong scope, expired and self-issued approvals cannot dispatch',async()=>{
       const approval=await getApproval(id)
       return approval?{...approval,...patch}:approval
     }
-    await assert.rejects(()=>acts.dispatchTask('prepared'),/current controlled approval/)
+    assert.deepEqual(await acts.dispatchTask('prepared'),{dispatched:false,admissionDenied:{phase:'initial',code:'APPROVAL_INVALID'}})
     assert.equal(adapter.sends,0)
     assert.equal((await store.getTask('prepared'))?.binding,null)
   }

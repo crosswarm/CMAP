@@ -5,7 +5,7 @@
  */
 
 /**
- * Store 审批终态转换。仅 pending 可转换；同一 decision 和 decided_by 的重试返回原记录，不改首次时间；冲突决定必须拒绝。批准时间必须在 created_at（含）与 expires_at（不含）之间。at 由可信控制面提供，不接受浏览器时间。expired 也可用于控制面等待预算耗尽，不覆盖已决策记录。
+ * Store 审批终态转换。仅 pending 可转换；同一 decision 和 decided_by 的重试返回原记录，不改首次时间；冲突决定必须拒绝。批准时间必须在 created_at（含）与 expires_at（不含）之间。at 由可信控制面提供，不接受浏览器时间。所有 Adapter 的新派发须重验当前 task/mission/独立 scope、approved 决定、决策者及有效期，先前等待成功不能代替派发时的授权。expired 也可用于控制面等待预算耗尽，不覆盖已决策记录。
  */
 export interface ApprovalDecisionInputV1 {
   decision: 'approved' | 'rejected' | 'expired'
