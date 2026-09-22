@@ -1,5 +1,9 @@
 # 外部自然语言 Planner
 
+2026-09-22 再次运行真实 `plan-mission.mjs`，仍返回 `PLANNER_AUTH_REJECTED`，未产生计划。
+这项外部认证阻断与语义 Reviewer 尚未实现是两件事：当前 Workflow 仅执行确定性硬门槛评审；
+多分支真实执行验证中的 Reviewer 决定是明确标注的合成夹具。
+
 [plan-mission.mjs](../scripts/plan-mission.mjs) 从 stdin 读取现有
 [mission-create v1](../schemas/mission-create.v1.schema.json)，调用独立 Claude CLI，
 输出同一请求加上经过校验的 `plan`。控制面和 Temporal 不运行模型，不解析自然语言结果。

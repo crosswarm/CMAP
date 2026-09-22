@@ -8,15 +8,22 @@
  */
 import { test, describe, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { MemoryStore } from '#domain-model'
 import type { Artifact, Mission, RemoteTaskBinding, Store, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
+import { normalizeAgentOutput } from '../../packages/adapter-sdk/src/structured-output.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter, syntheticRunner, syntheticActivityDeps, syntheticAdapterAuthorization } from './fake-adapter.ts'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 
 const ACTOR = { type: 'system', id: 'test' } as const
+const SYNTHETIC_SECRET = ['AKIA', '1234567890ABCDEF'].join('')
+const containsSyntheticSecret = (value: unknown): boolean => JSON.stringify(value).includes(SYNTHETIC_SECRET)
 
 const mission = (id: string): Mission => ({
   id,
@@ -92,6 +99,38 @@ class CountingAdapter extends FakeAdapter {
   override async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
     this.collectCalls += 1
     return super.collectResult(binding)
+  }
+}
+
+class NormalizingSecretAdapter extends FakeAdapter {
+  override async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
+    const index = this.startCalls.findIndex(envelope => `fake:${envelope.identity.task_id}` === binding.remote_task_id)
+    const envelope = this.startCalls[index]
+    const worktree = this.contexts[index]?.worktree
+    if (!envelope || !worktree) throw new Error('normalizing fixture requires dispatched worktree')
+    const bytes = Buffer.from(`synthetic fixture ${SYNTHETIC_SECRET}\n`)
+    await mkdir(join(worktree, 'evidence'), { recursive: true })
+    await writeFile(join(worktree, 'evidence/report.txt'), bytes)
+    return normalizeAgentOutput({
+      status: 'completed',
+      summary: 'done',
+      findings: [],
+      criterion_results: envelope.goal.success_definition.map((criterion) => ({
+        criterion_id: criterion.criterion_id,
+        actual: String(criterion.expected),
+        passed: true,
+        evidence_artifact_ids: ['report'],
+      })),
+      artifacts: [{
+        artifact_id: 'report',
+        role: 'report',
+        uri: 'evidence/report.txt',
+        media_type: 'text/plain',
+        size_bytes: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+      }],
+      error: null,
+    }, envelope, worktree)
   }
 }
 
@@ -407,6 +446,34 @@ describe('收结果并落账本', () => {
     assert.equal(t?.result?.error?.code, 'RESULT_UNPARSABLE')
     assert.equal(t?.result?.error?.fingerprint, 'result-unparsable')
     assert.doesNotMatch(t?.result?.error?.message ?? '', /raw provider output|prompt|stack/)
+  })
+
+  test('共享归一化发现结果证据疑似凭据时落成受控失败且不落证据', async (t) => {
+    adapter = new NormalizingSecretAdapter()
+    const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dispatch-secret-'))
+    t.after(() => rm(workRoot, { recursive: true, force: true }))
+    acts = createActivities(syntheticActivityDeps({
+      store,
+      adapter,
+      runner: syntheticRunner({ runner_id: 'runner-test' }),
+      pollIntervalMs: 1,
+      workRoot,
+    }))
+    const taskId = await startTask()
+    await acts.dispatchTask(taskId)
+
+    const out = await acts.collectTaskResult(taskId)
+    assert.ok(!('executionUncertain' in out))
+    const task = await store.getTask(taskId)
+    const events = await store.listEvents('mis-1')
+
+    assert.equal(out.status, 'failed')
+    assert.equal(task?.result?.status, 'failed')
+    assert.equal(task?.result?.error?.code, 'EVIDENCE_SECRET_DETECTED')
+    assert.deepEqual(task?.result?.artifacts, [])
+    assert.deepEqual(await store.listArtifacts(taskId), [])
+    assert.equal(containsSyntheticSecret(task?.result), false)
+    assert.equal(containsSyntheticSecret(events), false)
   })
 
   test('非终态 collectResult AdapterError 继续抛出，不落 failed 结果', async () => {

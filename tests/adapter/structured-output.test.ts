@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 
 import type { TaskEnvelopeV1 } from "#domain-model";
 import { AdapterError } from "#adapter-sdk";
-import { normalizeAgentOutput, renderTaskPrompt } from "../../packages/adapter-sdk/src/structured-output.ts";
+import { normalizeAgentOutput, readVerifiedArtifact, renderTaskPrompt } from "../../packages/adapter-sdk/src/structured-output.ts";
 
 const envelope: TaskEnvelopeV1 = {
   schema: "cmap/task-envelope/v1",
@@ -207,4 +207,67 @@ test("normalizeAgentOutput 把目录型证据读取错误归一化为受控 Adap
     (err) =>
       err instanceof AdapterError && err.code === "EVIDENCE_FILE_MISSING",
   );
+});
+
+// Synthetic credential-shaped fixtures only; no account credentials are used.
+const syntheticSecret = 'sk-' + 'SyntheticOnly'.repeat(4);
+const safeOutput = () => ({
+  status: 'completed', summary: 'clean', findings: [], error: null,
+  criterion_results: [{ criterion_id: 'C1', actual: 'ok', passed: true, evidence_artifact_ids: [] }],
+  artifacts: [],
+});
+const secretError = (code: string) => (error: unknown): boolean => {
+  assert.ok(error instanceof AdapterError);
+  assert.equal(error.code, code);
+  assert.equal(error.retryable, false);
+  assert.ok(!JSON.stringify(error).includes(syntheticSecret));
+  assert.ok(!error.message.includes(syntheticSecret));
+  assert.equal(error.fingerprint, code.toLowerCase().replaceAll('_', '-'));
+  return true;
+};
+
+test('known credentials in result metadata are rejected before schema diagnostics or persistence', async () => {
+  const samples = [
+    {...safeOutput(), summary: syntheticSecret},
+    {...safeOutput(), findings: [{detail: syntheticSecret}]},
+    {...safeOutput(), error: {code: syntheticSecret, message: 'error', retryable: false}},
+    {...safeOutput(), criterion_results: [{criterion_id: 'C1', actual: syntheticSecret, passed: true, evidence_artifact_ids: []}]},
+    {...safeOutput(), artifacts: [{uri: syntheticSecret}]},
+    {...safeOutput(), [syntheticSecret]: 'additional property'},
+  ];
+  for (const raw of samples) {
+    await assert.rejects(normalizeAgentOutput(raw, envelope, '/unused'), secretError('RESULT_SECRET_DETECTED'));
+  }
+  await assert.rejects(normalizeAgentOutput(safeOutput(), envelope, '/unused', syntheticSecret), secretError('RESULT_SECRET_DETECTED'));
+});
+
+test('verified artifact rejects synthetic credentials with correct hashes and no git exemptions', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-secret-artifact-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  for (const prefix of ['', 'example placeholder secretref://safe\n', 'precommit-allow-secrets: fixture\n']) {
+    const bytes = prefix + syntheticSecret;
+    await writeFile(join(root, 'report.txt'), bytes);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(readVerifiedArtifact(root, {uri: 'report.txt', role: 'report', sha256: sha256(bytes)}), secretError('EVIDENCE_SECRET_DETECTED'));
+    }
+  }
+  await assert.rejects(readVerifiedArtifact(root, {uri: syntheticSecret, role: 'report', sha256: '0'.repeat(64)}), secretError('EVIDENCE_SECRET_DETECTED'));
+  await assert.rejects(readVerifiedArtifact(root, {uri: 'missing', role: syntheticSecret, sha256: '0'.repeat(64)}), secretError('EVIDENCE_SECRET_DETECTED'));
+  await writeFile(join(root, 'clean.txt'), 'safe report');
+  assert.equal((await readVerifiedArtifact(root, {uri: 'clean.txt', role: 'report', sha256: sha256('safe report')})).bytes.toString(), 'safe report');
+});
+
+test('result and descriptor snapshots cannot be changed while validation or IO awaits', async t => {
+  const raw = safeOutput();
+  const normalization = normalizeAgentOutput(raw, envelope, '/unused');
+  raw.summary = syntheticSecret;
+  assert.equal((await normalization).summary, 'clean');
+  const root = await mkdtemp(join(tmpdir(), 'cmap-secret-snapshot-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  await writeFile(join(root, 'clean.txt'), 'safe');
+  const descriptor = {uri: 'clean.txt', role: 'report', sha256: sha256('safe')};
+  const reading = readVerifiedArtifact(root, descriptor);
+  descriptor.role = syntheticSecret;
+  descriptor.sha256 = '0'.repeat(64);
+  assert.equal((await reading).bytes.toString(), 'safe');
 });

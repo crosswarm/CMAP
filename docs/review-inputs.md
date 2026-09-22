@@ -18,6 +18,9 @@ intent 写入前解析元数据；重试通过冻结的矩阵恢复缺失子任�
 
 这只支持本机 Runner 的受限输入交付。远程文件传输、实际角色 ACL 和受限/未评估内容共享尚未实现。Jev 建议不代替授权。
 
+历史 Artifact 的 `contains_secrets:false` / `contains_pii:false` 是原有本机策略默认值，不是内容评估证据。
+复制时还会对实际源字节执行[已知凭据模式检查](evidence-credential-guard.md)；未命中不证明内容不含秘密或 PII。
+
 ## 验证入口
 
 ```sh

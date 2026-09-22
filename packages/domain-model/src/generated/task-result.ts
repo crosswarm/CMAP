@@ -90,6 +90,9 @@ export interface TaskResultV1 {
     capability_gaps?: string[]
   }
   error?: {
+    /**
+     * RESULT_SECRET_DETECTED / EVIDENCE_SECRET_DETECTED 表示控制面共享接收入口命中已知凭据模式；非重试型失败，消息与指纹不得携带命中内容、路径或角色。模式未命中不代表完整的秘密/PII 内容评估。
+     */
     code?: string
     message?: string
     retryable?: boolean

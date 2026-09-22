@@ -7,6 +7,7 @@
  */
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { SECRET_PATTERNS } from '../packages/adapter-sdk/src/secret-patterns.ts'
 
 // ------------------------------------------------------------ 禁止入库
 
@@ -39,18 +40,8 @@ export const explainForbidden = (file) => {
 
 // -------------------------------------------------------------- 凭据模式
 
-export const SECRET_PATTERNS = [
-  { label: 'OpenAI/Anthropic API key', pattern: /\b(sk|pk)-[A-Za-z0-9_-]{20,}/ },
-  { label: '私钥块', pattern: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/ },
-  { label: 'JWT', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/ },
-  { label: 'AWS Access Key', pattern: /\bAKIA[0-9A-Z]{16}\b/ },
-  { label: 'GitHub token', pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}/ },
-  {
-    label: 'Host API token 赋值',
-    pattern: /\b[A-Z_]*(?:API_TOKEN|ACCESS_TOKEN|SECRET_KEY|PRIVATE_TOKEN)\s*[:=]\s*['"]?[A-Za-z0-9_\-.]{12,}/,
-  },
-  { label: 'Authorization 头明文', pattern: /Authorization\s*[:=]\s*['"]?(?:Bearer|Basic)\s+[A-Za-z0-9_\-.=]{16,}/i },
-]
+export { SECRET_PATTERNS } from '../packages/adapter-sdk/src/secret-patterns.ts'
+
 
 /** 明显是占位符或本地开发值，不算泄漏 */
 const PLACEHOLDER = /(<[^>]*>|\bxxx+\b|\byour[-_]|example|placeholder|changeme|dummy|local-dev|localhost|secretref:\/\/)/i

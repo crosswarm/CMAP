@@ -7,6 +7,7 @@ import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 
 import type { TaskEnvelopeV1, TaskResultV1 } from "#domain-model";
 import { AdapterError } from "./index.ts";
+import { hasKnownSecret } from "./secret-patterns.ts";
 
 import type { CodexOutputV1 as StructuredAgentOutput } from "../../domain-model/src/generated/codex-output.ts";
 
@@ -152,12 +153,19 @@ export const readVerifiedArtifact = async (
   workDir: string,
   artifact: { uri: string; role: string; sha256: string },
 ): Promise<{ bytes: Buffer; sha256: string }> => {
+  artifact = { ...artifact };
+  if (hasKnownSecret(JSON.stringify(artifact))) {
+    throw new AdapterError('EVIDENCE_SECRET_DETECTED', '证据命中已知凭据模式', false, 'evidence-secret-detected');
+  }
   const path = await resolveEvidencePath(workDir, artifact.uri, artifact.role);
   let bytes: Buffer;
   try {
     bytes = await readFile(path);
   } catch {
     throw evidenceFileMissing(artifact.uri, artifact.role);
+  }
+  if (hasKnownSecret(bytes.toString('utf8'))) {
+    throw new AdapterError('EVIDENCE_SECRET_DETECTED', '证据命中已知凭据模式', false, 'evidence-secret-detected');
   }
   const actual = createHash('sha256').update(bytes).digest('hex');
   if (actual !== artifact.sha256.toLowerCase()) {
@@ -172,6 +180,16 @@ export const normalizeAgentOutput = async (
   workDir: string,
   sessionId?: string,
 ): Promise<TaskResultV1> => {
+  let serialized: string;
+  try {
+    raw = structuredClone(raw);
+    serialized = JSON.stringify({ raw, sessionId });
+  } catch {
+    throw new AdapterError('RESULT_INVALID', '结果不是可序列化数据', false, 'result-invalid');
+  }
+  if (hasKnownSecret(serialized)) {
+    throw new AdapterError('RESULT_SECRET_DETECTED', '结果命中已知凭据模式', false, 'result-secret-detected');
+  }
   const validate = await validator();
   if (!validate(raw)) {
     throw new AdapterError(

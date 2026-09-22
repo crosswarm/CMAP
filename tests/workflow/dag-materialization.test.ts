@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
-import { access, mkdtemp, mkdir, writeFile, readFile, symlink, rename } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, rm, writeFile, readFile, symlink, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { MemoryStore } from '#domain-model'
+import { AdapterError } from '#adapter-sdk'
 import type {
   AcceptanceCriterion,
   Artifact,
@@ -28,6 +29,7 @@ import {
 
 const ACTOR: EventActor = { type: 'system', id: 'dag-materialization-test' }
 const T0 = '2026-09-21T00:00:00.000Z'
+const SYNTHETIC_SECRET = ['AKIA', '1234567890ABCDEF'].join('')
 
 const acceptance: readonly AcceptanceCriterion[] = [
   { criterion_id: 'A', metric: 'ok_a', operator: 'eq', expected: true, hard_gate: true },
@@ -380,6 +382,44 @@ describe('DAG materialization', () => {
     const task = (await store.getTask(out[0]!.taskId))!
     await writeFile(join(workRoot, task.id, task.envelope.inputs!.artifact_refs![0]!.uri!), 'different')
     await assert.rejects(() => materializeDagNode({ store, workRoot, runner: syntheticRunner() }, input), /input conflict/i)
+  })
+
+  test('rejects parent artifact bytes with known secret patterns before creating the child task', async (t) => {
+    const store = new MemoryStore()
+    const m = mission('mis-dag-secret-parent')
+    await store.createMission({ mission: m, actor: ACTOR })
+    const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-secret-'))
+    t.after(() => rm(workRoot, { recursive: true, force: true }))
+    const parentA = dagTaskId(m.id, 'rootA', 1)
+    const parentB = dagTaskId(m.id, 'rootB', 1)
+    await createAcceptedNode(store, m, 'rootA', 1, {
+      resultArtifactId: 'art-A',
+      resultArtifactSha: sha(SYNTHETIC_SECRET),
+      resultArtifactSize: Buffer.byteLength(SYNTHETIC_SECRET),
+      putLedgerArtifact: true,
+    })
+    await createAcceptedNode(store, m, 'rootB', 1, {
+      resultArtifactId: 'art-B',
+      resultArtifactSha: sha('safe-B'),
+      resultArtifactSize: Buffer.byteLength('safe-B'),
+      putLedgerArtifact: true,
+    })
+    await seedParentArtifact(store, workRoot, m.id, parentA, 'art-A', SYNTHETIC_SECRET)
+    await seedParentArtifact(store, workRoot, m.id, parentB, 'art-B', 'safe-B')
+
+    const childId = dagTaskId(m.id, 'join', 1)
+    await assert.rejects(
+      () => materializeDagNode({ store, workRoot, runner: syntheticRunner() }, {
+        missionId: m.id,
+        nodeId: 'join',
+        attempt: 1,
+        acceptedDeps: { rootA: parentA, rootB: parentB },
+      }),
+      (error) => error instanceof AdapterError && error.code === 'EVIDENCE_SECRET_DETECTED' && !JSON.stringify(error).includes(SYNTHETIC_SECRET),
+    )
+
+    assert.equal(await store.getTask(childId), null)
+    await assert.rejects(() => access(join(workRoot, childId, 'inputs', 'rootA', sha('art-A'), 'payload')), /ENOENT/)
   })
 
   test('rejects parent completed without exact accept review', async () => {

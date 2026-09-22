@@ -1,5 +1,5 @@
 /**
- * P0 出口验证：Claude → Codex 单跳闭环。
+ * P0 出口验证：合成控制面信封 → 真实 Codex 单跳闭环。
  *
  * 验证链路（每一步都必须真实通过，不接受表象）：
  *   1. 构造自洽的 TaskEnvelope，经 Schema 校验
@@ -242,6 +242,6 @@ for (const c of envelope.goal.success_definition) {
 await adapter.cleanup(binding)
 
 console.log('\n════════════════════════════════════════')
-console.log('P0 出口验证通过：Claude→Codex 单跳闭环打通')
+console.log('P0 出口验证通过：合成控制面信封→真实 Codex 单跳闭环打通')
 console.log('════════════════════════════════════════')
 console.log(`工作区：${workDir}`)

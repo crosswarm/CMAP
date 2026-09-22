@@ -16,6 +16,7 @@ import {
 
 const ACTOR: EventActor = { type: 'system', id: 'review-inputs-test' }
 const T0 = '2026-09-22T00:00:00.000Z'
+const SYNTHETIC_SECRET = ['AKIA', '1234567890ABCDEF'].join('')
 const sha = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 type EnvelopeArtifactRef = NonNullable<NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs']>[number]
 
@@ -285,6 +286,17 @@ test('prepareReviewInputs copies verified bytes idempotently and rejects target 
 
   await writeFile(join(workRoot, child.id, reviewArtifactUri('art-1')), 'different')
   await inputInvalid(() => prepareReviewInputs(store, child, workRoot))
+})
+
+test('prepareReviewInputs rejects verified source bytes with known secret patterns despite legacy safe metadata', async (t) => {
+  const { store, m, digest } = await seed({ bytes: SYNTHETIC_SECRET })
+  const workRoot = await mkdtemp(join(tmpdir(), 'cmap-review-secret-'))
+  t.after(() => rm(workRoot, { recursive: true, force: true }))
+  await writeSourceBytes(workRoot, 'producer', SYNTHETIC_SECRET)
+  const child = await childWithRef(store, m, 'producer', 'art-1', digest)
+
+  await inputInvalid(() => prepareReviewInputs(store, child, workRoot))
+  await assert.rejects(readFile(join(workRoot, child.id, reviewArtifactUri('art-1'))), /ENOENT/)
 })
 
 test('prepareReviewInputs leaves legacy refs and already-bound workspaces untouched', async () => {
