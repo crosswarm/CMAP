@@ -9,7 +9,7 @@ Codex/Kimi 的控制面派发改为：确定性 binding → 原子写 binding/RU
 - 成功返回且绑定一致时只记一次 TASK_STARTED。响应丢失或事件写入失败后的恢复不能伪造启动确认，持久意图仍阻止再次启动。
 - 新 CLI Adapter 无法观察旧进程时，仅对明确 BINDING_NOT_FOUND 返回 executionUncertain；RUNNING 原子转 INPUT_REQUIRED，重复收取只保留一条待处理事件，无 TaskResult/终态伪造。历史 QUEUED 绑定保持原状态。
 - 旧 Mission 和 DAG 均升级处理；DAG 外层轮询也进入同一不确定记录路径，不杀未知进程，不凭未知状态释放锁。
-- 这解决重复启动窗口，不提供进程重接管、全局 exactly-once 或远程身份认证。未实现 prepareBinding 的第三方 Adapter 仍有旧窗口；不带控制面回调的直接 SDK 用法也没有账本保证。
+- 这解决重复启动窗口，不提供进程重接管、全局 exactly-once 或远程身份认证。后续[派发凭据阶段](dispatch-permit.md)已禁止无 prepareBinding 的 Adapter 进入受管执行；显式 standalone 直接 SDK 用法仍没有账本保证。
 
 ## 验证
 

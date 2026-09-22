@@ -61,6 +61,48 @@ export interface DispatchContext {
   readonly beforeSend?: (binding: RemoteTaskBinding, policySha256?: string) => Promise<void>
 }
 
+/** Own the dispatch fields before async preparation; retain only the trusted callback reference. */
+export const snapshotDispatchContext = (ctx: DispatchContext): DispatchContext => ({
+  token: ctx.token,
+  runner_id: ctx.runner_id,
+  trace_id: ctx.trace_id,
+  correlation_id: ctx.correlation_id,
+  ...(ctx.worktree !== undefined ? {worktree:ctx.worktree} : {}),
+  deadline_at: ctx.deadline_at,
+  ...(ctx.beforeSend ? {beforeSend:ctx.beforeSend} : {}),
+})
+
+export type DispatchPermitSigner = (
+  envelope: TaskEnvelopeV1,
+  audience: { readonly runnerId: string; readonly adapterId: string },
+) => string
+
+export type DispatchPermitVerifier = (
+  token: string, envelope: TaskEnvelopeV1, adapterId: string, runnerId: string,
+) => undefined
+
+export type AdapterAuthorization =
+  | { readonly mode: 'managed'; readonly verifier: DispatchPermitVerifier }
+  | { readonly mode: 'standalone' }
+
+export function snapshotAdapterAuthorization(authorization: AdapterAuthorization): AdapterAuthorization {
+  if (authorization?.mode === 'standalone') return Object.freeze({mode:'standalone'})
+  if (authorization?.mode !== 'managed' || typeof authorization.verifier !== 'function') {
+    throw new Error('ADAPTER_AUTHORIZATION_REQUIRED')
+  }
+  return Object.freeze({mode:'managed',verifier:authorization.verifier})
+}
+
+export function assertAdapterAuthorization(
+  authorization: AdapterAuthorization, envelope: TaskEnvelopeV1, ctx: DispatchContext, adapterId: string,
+): void {
+  if (authorization.mode === 'standalone') return
+  if (!ctx.beforeSend) throw new Error('MANAGED_BEFORE_SEND_REQUIRED')
+  if (authorization.verifier(ctx.token,envelope,adapterId,ctx.runner_id) !== undefined) {
+    throw new Error('DISPATCH_VERIFIER_MUST_BE_SYNCHRONOUS')
+  }
+}
+
 // -------------------------------------------------------------- 归一化事件
 
 export const AGENT_EVENT_KINDS = [
@@ -120,6 +162,7 @@ export interface SubscriptionHandle {
 export interface AgentAdapter {
   readonly adapterId: string
   readonly agentId: string
+  readonly authorizationMode: AdapterAuthorization['mode']
 
   discover(): Promise<AdapterDescriptor>
 

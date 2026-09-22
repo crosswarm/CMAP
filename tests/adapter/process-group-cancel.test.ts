@@ -166,7 +166,7 @@ test('Codex cancel waits for its owned process group before reporting terminal',
   const root = await mkdtemp(join(tmpdir(), 'cmap-codex-pg-cancel-'))
   const pidFile = join(root, 'pids.json')
   const bin = await makeTermResistantCli(root, pidFile)
-  const adapter = new CodexAdapter({
+  const adapter = new CodexAdapter({ authorization: { mode: 'standalone' },
     bin,
     outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
   })
@@ -190,7 +190,7 @@ test('Kimi cancel waits for sandbox descendants with ignored stdio before report
   const pidFile = join(root, 'pids.json')
   const sandboxBin = await makeSandboxWrapper(root)
   const bin = await makeTermResistantCli(root, pidFile)
-  const adapter = new KimiAdapter({ bin, sandboxBin, credentialHome: root })
+  const adapter = new KimiAdapter({ authorization: { mode: 'standalone' }, bin, sandboxBin, credentialHome: root })
   const binding = await adapter.startTask(envelope('tsk-kimi-cancel'), {
     token: 'test',
     runner_id: 'runner-1',
@@ -211,7 +211,7 @@ test('cancel cleanup does not leave delayed kills after the group is gone', asyn
   const sandboxBin = await makeSandboxWrapper(root)
   const bin = join(root, 'short-kimi')
   await writeExecutable(bin, '#!/usr/bin/env node\nprocess.exit(0)\n')
-  const adapter = new KimiAdapter({ bin, sandboxBin, credentialHome: root })
+  const adapter = new KimiAdapter({ authorization: { mode: 'standalone' }, bin, sandboxBin, credentialHome: root })
   const binding = await adapter.startTask(envelope('tsk-kimi-normal'), {
     token: 'test',
     runner_id: 'runner-1',
@@ -246,8 +246,8 @@ fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ parent: process.pi
 const ready = setInterval(() => { if (fs.existsSync(${JSON.stringify(pidFile + '.ready')})) { clearInterval(ready); process.exit(0) } }, 10)
 `)
     const adapter: AgentAdapter = kind === 'Codex'
-      ? new CodexAdapter({ bin, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json') })
-      : new KimiAdapter({ bin, sandboxBin: bin, credentialHome: root })
+      ? new CodexAdapter({ authorization: { mode: 'standalone' }, bin, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json') })
+      : new KimiAdapter({ authorization: { mode: 'standalone' }, bin, sandboxBin: bin, credentialHome: root })
     const binding = await adapter.startTask(envelope(`tsk-natural-${kind}`), {
       token: 'test', runner_id: 'runner-1', trace_id: 'trace-1', correlation_id: 'corr-1',
       worktree: root, deadline_at: new Date(Date.now() + 30_000).toISOString(),

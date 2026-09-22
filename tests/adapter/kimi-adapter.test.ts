@@ -4,16 +4,20 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  realpath,
+  rm,
   stat,
   writeFile,
 } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import type { TaskEnvelopeV1 } from '#domain-model'
+import type { RemoteTaskBinding, TaskEnvelopeV1 } from '#domain-model'
+import { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit } from '#domain-model'
+import type { DispatchContext } from '#adapter-sdk'
 import { AdapterError } from '#adapter-sdk'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
 
@@ -102,7 +106,32 @@ const adapter = (
   bin: string,
   sandboxBin: string,
   credentialHome: string,
-): KimiAdapter => new KimiAdapter({ bin, sandboxBin, credentialHome })
+): KimiAdapter => new KimiAdapter({ authorization: { mode: 'standalone' }, bin, sandboxBin, credentialHome })
+
+const aBinding = (e: TaskEnvelopeV1): RemoteTaskBinding => ({
+  adapter: 'kimi-adapter',
+  remote_task_id: `kimi:${e.identity.task_id}:${e.identity.revision}`,
+  protocol: 'kimi-cli-stream-json',
+  protocol_version: '0.1.0',
+  runner_id: 'runner-1',
+})
+
+const permitTrust = (adapterId: string, runnerId = 'runner-1') => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+  const issuer = 'adapter-test-control'
+  const issuedMs = 1_800_000_000_000
+  let nowMs = issuedMs
+  return {
+    expire: () => { nowMs = issuedMs + 1_000 },
+    issue: (e: TaskEnvelopeV1) => issueDispatchPermit({
+      privateKey, issuer, runnerId, adapterId, envelope: e, nowMs: issuedMs, ttlSeconds: 1,
+    }),
+    verifier: (token: string, e: TaskEnvelopeV1, actualAdapterId: string, actualRunnerId: string) =>
+      verifyDispatchPermit(token, {
+        publicKey, issuer, runnerId: actualRunnerId, adapterId: actualAdapterId, envelope: e, nowMs,
+      }),
+  }
+}
 
 const startAndWait = async (
   a: KimiAdapter,
@@ -125,7 +154,7 @@ const startAndWait = async (
 }
 
 test('discover reports Kimi bounded capabilities', async () => {
-  const a = new KimiAdapter({
+  const a = new KimiAdapter({ authorization: { mode: 'standalone' },
     bin: '/bin/false',
     sandboxBin: '/bin/false',
     credentialHome: tmpdir(),
@@ -144,7 +173,7 @@ test('discover reports Kimi bounded capabilities', async () => {
 })
 
 test('prepareBinding is deterministic and performs no runtime IO', async () => {
-  const a = new KimiAdapter({
+  const a = new KimiAdapter({ authorization: { mode: 'standalone' },
     bin: '/bin/false',
     sandboxBin: '/bin/false',
     credentialHome: tmpdir(),
@@ -434,6 +463,183 @@ test('beforeSend rejection cleans owned Kimi runtime without launching', async (
   assert.equal(await fileExists(runtimeDir), false)
 })
 
+test('managed Kimi rejects malformed permit before idempotency reuse or preparation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-managed-first-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const marker = join(root, 'spawned.txt')
+  const kimi = await makeKimi(
+    root,
+    `require('node:fs').writeFileSync('${marker}', 'spawned')`,
+  )
+  const before = await kimiRuntimeDirs()
+  const trust = permitTrust('kimi-adapter')
+  const e = envelope('tsk-managed-first')
+  const a = new KimiAdapter({
+    authorization: { mode: 'managed', verifier: trust.verifier },
+    bin: kimi,
+    sandboxBin,
+    credentialHome: root,
+    idempotencyStore: new Map([[e.identity.idempotency_key, Promise.resolve(aBinding(e))]]),
+  })
+
+  await assert.rejects(
+    a.startTask(e, {
+      token: '',
+      runner_id: 'runner-1',
+      trace_id: 'trace-1',
+      correlation_id: 'corr-1',
+      worktree: root,
+      deadline_at: new Date(Date.now() + 30_000).toISOString(),
+      beforeSend: async () => undefined,
+    }),
+    (err) => err instanceof DispatchPermitError && err.code === 'MALFORMED',
+  )
+  assert.equal(await fileExists(marker), false)
+  const leaked = [...(await kimiRuntimeDirs())].filter((name) => !before.has(name))
+  assert.deepEqual(leaked, [])
+})
+
+test('managed Kimi rejects a permit that expires after beforeSend and before spawn', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-managed-final-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const marker = join(root, 'spawned.txt')
+  const kimi = await makeKimi(
+    root,
+    `require('node:fs').writeFileSync('${marker}', 'spawned')`,
+  )
+  const before = await kimiRuntimeDirs()
+  const trust = permitTrust('kimi-adapter')
+  const e = envelope('tsk-managed-final')
+  const a = new KimiAdapter({
+    authorization: { mode: 'managed', verifier: trust.verifier },
+    bin: kimi,
+    sandboxBin,
+    credentialHome: root,
+  })
+
+  await assert.rejects(
+    a.startTask(e, {
+      token: trust.issue(e),
+      runner_id: 'runner-1',
+      trace_id: 'trace-1',
+      correlation_id: 'corr-1',
+      worktree: root,
+      deadline_at: new Date(Date.now() + 30_000).toISOString(),
+      beforeSend: async () => { trust.expire() },
+    }),
+    (err) => err instanceof DispatchPermitError && err.code === 'EXPIRED',
+  )
+  assert.equal(await fileExists(marker), false)
+  const leaked = [...(await kimiRuntimeDirs())].filter((name) => !before.has(name))
+  assert.deepEqual(leaked, [])
+})
+
+test('managed Kimi renders the signed envelope snapshot despite caller mutation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-envelope-snapshot-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const promptFile = join(root, 'prompt.json')
+  const kimi = await makeKimi(
+    root,
+    `const args = process.argv.slice(2)
+const prompt = args[args.lastIndexOf('-p') + 1]
+require('node:fs').writeFileSync('${promptFile}', JSON.stringify({
+  original: prompt.includes('SIGNED ORIGINAL'),
+  mutated: prompt.includes('UNSIGNED MUTATION')
+}))`,
+  )
+  const trust = permitTrust('kimi-adapter')
+  const e = envelope('tsk-kimi-envelope-snapshot')
+  e.goal.statement = 'SIGNED ORIGINAL'
+  const a = new KimiAdapter({
+    authorization: { mode: 'managed', verifier: trust.verifier },
+    bin: kimi,
+    sandboxBin,
+    credentialHome: root,
+  })
+
+  const starting = a.startTask(e, {
+    token: trust.issue(e),
+    runner_id: 'runner-1',
+    trace_id: 'trace-1',
+    correlation_id: 'corr-1',
+    worktree: root,
+    deadline_at: new Date(Date.now() + 30_000).toISOString(),
+    beforeSend: async () => { e.goal.statement = 'SIGNED ORIGINAL' },
+  })
+  e.goal.statement = 'UNSIGNED MUTATION'
+  const binding = await starting
+  const deadline = Date.now() + 5000
+  while (!(await fileExists(promptFile))) {
+    assert.ok(Date.now() < deadline)
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.deepEqual(JSON.parse(await readFile(promptFile, 'utf8')), {
+    original: true,
+    mutated: false,
+  })
+  await a.cancel(binding, 'test cleanup')
+})
+
+test('Kimi snapshots dispatch context before async startup can be redirected', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-ctx-snapshot-'))
+  await makeCredentialHome(root)
+  const other = await mkdtemp(join(tmpdir(), 'cmap-kimi-ctx-other-'))
+  const sandboxBin = await makeSandbox(root)
+  const cwdFile = join(root, 'cwd.txt')
+  const kimi = await makeKimi(
+    root,
+    `require('node:fs').writeFileSync('${cwdFile}', process.cwd())`,
+  )
+  const a = adapter(kimi, sandboxBin, root)
+  let originalCalled = false
+  let mutatedCalled = false
+  const ctx = {
+    token: 'test',
+    runner_id: 'runner-1',
+    trace_id: 'trace-1',
+    correlation_id: 'corr-1',
+    worktree: root,
+    deadline_at: new Date(Date.now() + 30_000).toISOString(),
+    beforeSend: async () => { originalCalled = true },
+  }
+  try {
+    const starting = a.startTask(envelope('tsk-kimi-ctx-snapshot'), ctx)
+    ;(ctx as { beforeSend: DispatchContext['beforeSend']; worktree: string }).beforeSend = async () => {
+      mutatedCalled = true
+      throw new Error('redirected callback')
+    }
+    ;(ctx as { worktree: string }).worktree = other
+    const binding = await starting
+    const deadline = Date.now() + 5000
+    while (!(await fileExists(cwdFile))) {
+      assert.ok(Date.now() < deadline)
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(originalCalled, true)
+    assert.equal(mutatedCalled, false)
+    assert.equal(await readFile(cwdFile, 'utf8'), await realpath(root))
+    await a.cancel(binding, 'test cleanup')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(other, { recursive: true, force: true })
+  }
+})
+
+test('Kimi authorization mode is snapshotted at construction', () => {
+  const authorization = { mode: 'standalone' } as const
+  const a = new KimiAdapter({
+    authorization,
+    bin: '/bin/false',
+    sandboxBin: '/bin/false',
+    credentialHome: tmpdir(),
+  })
+  ;(authorization as unknown as { mode: 'managed' }).mode = 'managed'
+  assert.equal(a.authorizationMode, 'standalone')
+})
+
 test('timeout cancels the process group and reports failed status', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-timeout-'))
   await makeCredentialHome(root)
@@ -613,6 +819,52 @@ process.exit(99)`,
   assert.equal(health.detail, 'kimi 2.0.1')
   assert.match(health.checked_at, /^\d{4}-\d{2}-\d{2}T/)
   assert.equal(await fileExists(join(root, 'home')), false)
+})
+
+test('health probes use only provider env allowlist', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-health-env-'))
+  await makeCredentialHome(root)
+  const envFile = join(root, 'health-env.jsonl')
+  const appendEnv = `require('node:fs').appendFileSync(${JSON.stringify(envFile)}, JSON.stringify({
+  path: !!process.env.PATH,
+  home: !!process.env.HOME,
+  runnerToken: !!process.env.CMAP_RUNNER_TOKEN,
+  database: !!process.env.CMAP_DATABASE_URL,
+  typesafe: !!process.env.TYPESAFE_API_KEY,
+  other: !!process.env.OTHER_SECRET,
+  nodeOptions: !!process.env.NODE_OPTIONS
+}) + '\\n')`
+  const sandboxBin = join(root, 'fake-sandbox-health')
+  await writeExecutable(sandboxBin, `#!/usr/bin/env node\n${appendEnv}\nprocess.exit(0)\n`)
+  const kimi = await makeKimi(root, `${appendEnv}\nconsole.log('kimi-test')`)
+  const saved = snapshotEnv(['CMAP_RUNNER_TOKEN', 'CMAP_DATABASE_URL', 'TYPESAFE_API_KEY', 'OTHER_SECRET', 'NODE_OPTIONS'])
+  Object.assign(process.env, {
+    CMAP_RUNNER_TOKEN: 'runner-token',
+    CMAP_DATABASE_URL: 'postgres://secret',
+    TYPESAFE_API_KEY: 'typesafe-secret',
+    OTHER_SECRET: 'other-secret',
+    NODE_OPTIONS: '--max-old-space-size=64',
+  })
+  try {
+    const a = adapter(kimi, sandboxBin, root)
+    assert.equal((await a.health()).state, 'healthy')
+    const records = (await readFile(envFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, boolean>)
+    assert.equal(records.length, 2)
+    for (const seen of records) {
+      assert.equal(seen['path'], true)
+      assert.equal(seen['home'], true)
+      assert.equal(seen['runnerToken'], false)
+      assert.equal(seen['database'], false)
+      assert.equal(seen['typesafe'], false)
+      assert.equal(seen['other'], false)
+      assert.equal(seen['nodeOptions'], false)
+    }
+  } finally {
+    restoreEnv(saved)
+  }
 })
 
 test('cleanup removes owned runtime but preserves caller worktree', async () => {
@@ -795,7 +1047,7 @@ test('unknown risk level is rejected before spawning Kimi', async () => {
 })
 
 test('model policy is rejected explicitly', async () => {
-  const a = new KimiAdapter({
+  const a = new KimiAdapter({ authorization: { mode: 'standalone' },
     bin: '/bin/false',
     sandboxBin: '/bin/false',
     credentialHome: tmpdir(),
@@ -826,3 +1078,13 @@ test('model policy is rejected explicitly', async () => {
       err instanceof AdapterError && err.code === 'MODEL_POLICY_UNSUPPORTED',
   )
 })
+
+const snapshotEnv = (keys: readonly string[]): Map<string, string | undefined> =>
+  new Map(keys.map((key) => [key, process.env[key]]))
+
+const restoreEnv = (snapshot: Map<string, string | undefined>): void => {
+  for (const [key, value] of snapshot) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+}

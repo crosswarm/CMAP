@@ -4,7 +4,7 @@ import { MemoryStore } from '#domain-model'
 import type { Mission, RiskLevel, TaskEnvelopeV1 } from '#domain-model'
 import type { AdapterHealth } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 
 const ACTOR = { type: 'system', id: 'routing-test' } as const
 const candidate = (id: string, caps = ['code.analyze'], state: AdapterHealth['state'] = 'healthy') => {
@@ -21,7 +21,7 @@ async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['
   const now = new Date().toISOString()
   const mission: Mission = { id: 'routing-mission', tenant: 'local', owner: 'test', type: 'inspect', goal: 'routing', constraints: {}, acceptance: [{ criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: true, hard_gate: true }], workflow_template: 'inspect/v1', state: 'DRAFT', revision: 1, created_at: now, updated_at: now }
   await store.createMission({ mission, actor: ACTOR })
-  const acts = createActivities({ store, adapters, runner: syntheticRunner(), pollIntervalMs: 1 })
+  const acts = createActivities(syntheticActivityDeps({ store, adapters, runner: syntheticRunner(), pollIntervalMs: 1 }))
   const taskId = 'routing-task'
   const envelope: TaskEnvelopeV1 = {
     schema:'cmap/task-envelope/v1',
@@ -99,14 +99,14 @@ test('注册表缺少已绑定 Adapter 时拒绝收取，不转给另一 Agent',
   const original = candidate('original')
   const { acts, store, taskId } = await fixture([original])
   await acts.dispatchTask(taskId)
-  const replacement = createActivities({ store, adapters: [candidate('replacement')], runner: syntheticRunner() })
+  const replacement = createActivities(syntheticActivityDeps({ store, adapters: [candidate('replacement')], runner: syntheticRunner() }))
   await assert.rejects(replacement.collectTaskResult(taskId), /已绑定 Adapter 不可用/)
 })
 
 test('重复注册身份和双配置在初始化时拒绝', () => {
   const store = new MemoryStore()
-  assert.throws(() => createActivities({ store, adapters: [candidate('dup'), candidate('dup')], runner: syntheticRunner() }), /ID 重复/)
-  assert.throws(() => createActivities({ store, adapter: candidate('a'), adapters: [candidate('b')], runner: syntheticRunner() }), /不能同时配置/)
+  assert.throws(() => createActivities(syntheticActivityDeps({ store, adapters: [candidate('dup'), candidate('dup')], runner: syntheticRunner() })), /ID 重复/)
+  assert.throws(() => createActivities(syntheticActivityDeps({ store, adapter: candidate('a'), adapters: [candidate('b')], runner: syntheticRunner() })), /不能同时配置/)
 })
 
 test('Adapter 返回错误绑定身份时拒绝入账', async () => {
@@ -115,7 +115,15 @@ test('Adapter 返回错误绑定身份时拒绝入账', async () => {
   a.startTask = async (env, ctx) => ({ ...await start(env, ctx), adapter: 'other-adapter' })
   const other = candidate('other')
   const { acts, store, taskId } = await fixture([a, other])
-  await assert.rejects(acts.dispatchTask(taskId), /Adapter binding mismatch/)
-  assert.equal((await store.getTask(taskId))!.binding, null)
+  await assert.rejects(acts.dispatchTask(taskId), /Prepared dispatch contract mismatch/)
+  const task = (await store.getTask(taskId))!
+  assert.deepEqual(task.binding, {
+    adapter: a.adapterId,
+    remote_task_id: `fake:${taskId}`,
+    protocol: 'fake-exec',
+    protocol_version: '0.0.1',
+    runner_id: 'runner-test',
+  })
+  assert.equal((await store.listEvents(task.mission_id)).filter((e) => e.event_type === 'TASK_STARTED').length, 0)
   assert.equal(other.startCalls.length, 0)
 })

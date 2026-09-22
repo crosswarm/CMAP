@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   AgentAdapter,
   AgentInput,
+  AdapterAuthorization,
   AdapterDescriptor,
   AdapterHealth,
   DispatchContext,
@@ -10,7 +11,7 @@ import type {
   NormalizedAgentStatus,
   SubscriptionHandle,
 } from "#adapter-sdk";
-import { AdapterError } from "#adapter-sdk";
+import { AdapterError, assertAdapterAuthorization, snapshotAdapterAuthorization, snapshotDispatchContext } from "#adapter-sdk";
 import type { RemoteTaskBinding, TaskEnvelopeV1, TaskResultV1 } from "#domain-model";
 import { yonWorkProfileFromRoute } from "#domain-model";
 import { buildYonWorkPrompt, captureYonWorkOutput } from "./output.ts";
@@ -29,6 +30,7 @@ export type YonWorkRuntimeLike = Pick<YonWorkRuntime,
 >;
 
 export interface YonWorkAdapterOptions {
+  readonly authorization: AdapterAuthorization;
   readonly profileId: string;
   readonly runnerId: string;
   readonly runtime?: YonWorkRuntimeLike;
@@ -70,6 +72,7 @@ const digest = (value: unknown): string =>
 
 const cloneEnvelope = (envelope: TaskEnvelopeV1): TaskEnvelopeV1 =>
   JSON.parse(JSON.stringify(envelope)) as TaskEnvelopeV1;
+
 
 const reservationKey = (envelope: TaskEnvelopeV1): string =>
   `${envelope.identity.tenant ?? ""}:${envelope.identity.owner ?? ""}:${envelope.identity.idempotency_key}`;
@@ -127,6 +130,8 @@ export class YonWorkAdapter implements AgentAdapter {
   readonly #profileId: string;
   readonly #runnerId: string;
   readonly #runtime: YonWorkRuntimeLike;
+  readonly #authorization: AdapterAuthorization;
+  readonly authorizationMode: AdapterAuthorization["mode"];
   readonly #runs = new Map<string, RunState>();
   readonly #reservations = new Map<string, RunState | Promise<RunState>>();
 
@@ -134,6 +139,8 @@ export class YonWorkAdapter implements AgentAdapter {
     const route = `yonwork:${opts.profileId}`;
     const profileId = yonWorkProfileFromRoute(route);
     if (!profileId) throw err("YONWORK_PROFILE_INVALID", "YonWork profile must be cmap-*");
+    this.#authorization = snapshotAdapterAuthorization(opts.authorization);
+    this.authorizationMode = this.#authorization.mode;
     this.#profileId = profileId;
     this.#runnerId = opts.runnerId;
     this.agentId = route;
@@ -178,9 +185,11 @@ export class YonWorkAdapter implements AgentAdapter {
   }
 
   async startTask(envelope: TaskEnvelopeV1, ctx: DispatchContext): Promise<RemoteTaskBinding> {
-    assertSupported(envelope, this.agentId, this.#runnerId, ctx);
-    const key = reservationKey(envelope);
     const frozen = cloneEnvelope(envelope);
+    const frozenCtx = snapshotDispatchContext(ctx);
+    assertAdapterAuthorization(this.#authorization, frozen, frozenCtx, ADAPTER_ID);
+    assertSupported(frozen, this.agentId, this.#runnerId, frozenCtx);
+    const key = reservationKey(frozen);
     const frozenDigest = digest(frozen);
     const reserved = this.#reservations.get(key);
     if (reserved) {
@@ -190,7 +199,7 @@ export class YonWorkAdapter implements AgentAdapter {
       }
       return run.binding;
     }
-    const binding = this.prepareBinding(envelope, ctx);
+    const binding = this.prepareBinding(frozen, frozenCtx);
     const existing = this.#runs.get(binding.remote_task_id);
     if (existing) {
       if (existing.envelopeDigest !== frozenDigest) {
@@ -204,14 +213,14 @@ export class YonWorkAdapter implements AgentAdapter {
       envelopeDigest: frozenDigest,
       binding,
       reservationKey: key,
-      worktree: ctx.worktree!,
+      worktree: frozenCtx.worktree!,
       reducer: new YonWorkSseReducer({
         expectedRunId: binding.remote_task_id,
         expectedSessionKey: binding.remote_context_id!,
       }),
       subscribers: new Set(),
     };
-    const starting = this.#start(run, ctx).then(() => run);
+    const starting = this.#start(run, frozenCtx).then(() => run);
     starting.catch(() => undefined);
     this.#reservations.set(key, starting);
     this.#runs.set(binding.remote_task_id, run);
@@ -275,6 +284,7 @@ export class YonWorkAdapter implements AgentAdapter {
       return;
     }
     await ctx.beforeSend!(binding, current.policySha256);
+    assertAdapterAuthorization(this.#authorization, envelope, ctx, ADAPTER_ID);
     if (run.cancelRequested) {
       run.error = err("YONWORK_CANCELED_BEFORE_SEND", "YonWork start was canceled before send", true);
       return;

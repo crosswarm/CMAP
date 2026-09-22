@@ -15,7 +15,7 @@ process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
 import { MemoryStore } from '#domain-model'
 import type { Mission, Store, EventActor, ReviewDecisionV1 } from '#domain-model'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test' }
 const T0 = '2026-08-04T00:00:00.000Z'
@@ -69,7 +69,7 @@ const toReviewable = async (acts: ReturnType<typeof createActivities>, missionId
 
 describe('返工闭环', () => {
   test('rework 决策创建后继 Task，并以 supersedes 关联原任务', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-rw'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-rw')
@@ -90,7 +90,7 @@ describe('返工闭环', () => {
   })
 
   test('原任务落 COMPLETED，不回到 RUNNING', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-rw2'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-rw2')
@@ -105,7 +105,7 @@ describe('返工闭环', () => {
   })
 
   test('accept 决策不创建后继任务', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-rw3'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-rw3')
@@ -119,7 +119,7 @@ describe('返工闭环', () => {
   })
 
   test('轮次达到 max_additional_cycles 时停止返工并升级', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-rw4'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-rw4')
@@ -148,7 +148,7 @@ describe('返工闭环', () => {
   })
 
   test('检测到无进展时停止返工并升级', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-rw5'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-rw5')
@@ -173,7 +173,7 @@ describe('返工闭环', () => {
   })
 
   test('重复调用 applyReviewDecision 不产生重复 review 与孤儿后继任务', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-idem'), actor: ACTOR })
 
     const taskId = await toReviewable(acts, 'mis-idem')
@@ -204,7 +204,7 @@ describe('返工闭环', () => {
   })
 
   test('端到端：执行 → 评审 rework → 后继任务 → 再评审 accept → 完成', async () => {
-    const acts = createActivities({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: new FakeAdapter(), runner: syntheticRunner(), pollIntervalMs: 1 }))
     await store.createMission({ mission: mission('mis-e2e'), actor: ACTOR })
 
     // 第一轮：执行后被打回

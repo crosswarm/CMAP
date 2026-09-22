@@ -11,7 +11,7 @@ import type { DispatchContext } from '#adapter-sdk'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
 import { createActivities } from '../../workflows/activities.ts'
-import { syntheticRunner } from './fake-adapter.ts'
+import { syntheticRunner, syntheticActivityDeps, syntheticAdapterAuthorization } from './fake-adapter.ts'
 
 const ACTOR = { type: 'system', id: 'cli-prepared-test' } as const
 const NODE = '/Users/cfone/.nvm/versions/node/v24.13.0/bin/node'
@@ -319,8 +319,9 @@ test('Codex prepared dispatch records intent before process launch and one start
     adapter = new ObservedCodexAdapter({
       bin: await makeCodex(root, launches),
       outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
 
     assert.deepEqual(await acts.dispatchTask('tsk-codex'), { dispatched: true, remoteTaskId: 'codex:tsk-codex:1' })
 
@@ -345,16 +346,18 @@ test('lost Codex start return is not retried by a fresh adapter and does not inv
     first = new LostReturnCodexAdapter({
       bin,
       outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const acts = createActivities({ store, adapter: first, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter: first, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
 
     await assert.rejects(acts.dispatchTask('tsk-lost'), /lost codex start return/)
 
     const fresh = new ObservedCodexAdapter({
       bin,
       outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const retry = createActivities({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root })
+    const retry = createActivities(syntheticActivityDeps({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
 
     assert.deepEqual(await retry.dispatchTask('tsk-lost'), { dispatched: false, remoteTaskId: 'codex:tsk-lost:1' })
     await waitForLaunches(launches, 1)
@@ -376,8 +379,9 @@ test('concurrent Codex prepared dispatch claims once and spawns once', async () 
     adapter = new ObservedCodexAdapter({
       bin: await makeCodex(root, launches),
       outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
 
     const results = await Promise.allSettled([acts.dispatchTask('tsk-concurrent'), acts.dispatchTask('tsk-concurrent')])
 
@@ -402,12 +406,13 @@ test('fresh Codex runtime reports uncertain collection instead of retrying a pre
     adapter = new ObservedCodexAdapter({
       bin,
       outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
     await acts.dispatchTask('tsk-uncertain')
 
-    const fresh = new CodexAdapter({ bin, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json') })
-    const retry = createActivities({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 1 })
+    const fresh = new CodexAdapter({ bin, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'), authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }) })
+    const retry = createActivities(syntheticActivityDeps({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 1 }))
 
     assert.deepEqual(await retry.collectTaskResult('tsk-uncertain'), {
       executionUncertain: { code: 'BINDING_NOT_FOUND', terminalObserved: false },
@@ -433,14 +438,15 @@ test('fresh Kimi runtime BINDING_NOT_FOUND records one input-required wait witho
       bin,
       sandboxBin,
       credentialHome: root,
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 1 })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 1 }))
 
     await acts.dispatchTask('tsk-kimi-uncertain')
     await waitForLaunches(launches, 1)
 
-    const fresh = new KimiAdapter({ bin, sandboxBin, credentialHome: root })
-    const retry = createActivities({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 1 })
+    const fresh = new KimiAdapter({ bin, sandboxBin, credentialHome: root, authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }) })
+    const retry = createActivities(syntheticActivityDeps({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 1 }))
 
     const expected = {
       executionUncertain: { code: 'BINDING_NOT_FOUND', terminalObserved: false },
@@ -479,8 +485,9 @@ test('historical queued task with binding keeps its state and never relaunches',
     const adapter = new ObservedCodexAdapter({
       bin: await makeCodex(root, launches),
       outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
     }, store, launches)
-    const acts = createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root })
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
 
     assert.deepEqual(await acts.dispatchTask('tsk-historical'), { dispatched: false, remoteTaskId: 'codex:tsk-historical:1' })
     assert.equal((await store.getTask('tsk-historical'))?.state, 'QUEUED')

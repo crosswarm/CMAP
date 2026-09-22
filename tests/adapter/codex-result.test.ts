@@ -48,7 +48,7 @@ require('node:fs').writeFileSync(out, JSON.stringify({
   )
   await chmod(bin, 0o755)
 
-  const adapter = new CodexAdapter({
+  const adapter = new CodexAdapter({ authorization: { mode: 'standalone' },
     bin,
     outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
   })

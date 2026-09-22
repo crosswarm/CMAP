@@ -76,7 +76,7 @@ const startSettled = async (
   result: unknown,
 ): Promise<{ adapter: CodexAdapter; binding: Awaited<ReturnType<CodexAdapter['startTask']>> }> => {
   const bin = await makeCodex(worktree, result)
-  const adapter = new CodexAdapter({
+  const adapter = new CodexAdapter({ authorization: { mode: 'standalone' },
     bin,
     outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
   })

@@ -48,7 +48,7 @@ const envCheck = ajv.compile(
   ),
 )
 assert.ok(envCheck(envelope), JSON.stringify(envCheck.errors))
-const adapter = new KimiAdapter()
+const adapter = new KimiAdapter({ authorization: { mode: 'standalone' } })
 assert.equal((await adapter.health()).state, 'healthy')
 let binding
 try {

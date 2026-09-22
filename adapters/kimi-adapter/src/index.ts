@@ -15,6 +15,7 @@ import type {
   TaskResultV1,
 } from '#domain-model'
 import type {
+  AdapterAuthorization,
   AdapterDescriptor,
   AdapterHealth,
   AgentAdapter,
@@ -24,11 +25,18 @@ import type {
   NormalizedAgentStatus,
   SubscriptionHandle,
 } from '#adapter-sdk'
-import { AdapterError, RiskCeilingExceededError } from '#adapter-sdk'
+import {
+  AdapterError,
+  RiskCeilingExceededError,
+  assertAdapterAuthorization,
+  snapshotAdapterAuthorization,
+  snapshotDispatchContext,
+} from '#adapter-sdk'
 import {
   normalizeAgentOutput,
   renderTaskPrompt,
 } from '../../../packages/adapter-sdk/src/structured-output.ts'
+import { providerBaseEnv } from '../../../packages/adapter-sdk/src/provider-env.ts'
 import { prepareKimiRun, resolveKimiBin } from './runtime.ts'
 
 const ADAPTER_ID = 'kimi-adapter'
@@ -43,7 +51,9 @@ const RISK_ORDER: readonly RiskLevel[] = [
   'mutating',
 ]
 
+
 export interface KimiAdapterOptions {
+  readonly authorization: AdapterAuthorization
   readonly bin?: string
   readonly sandboxBin?: string
   readonly credentialHome?: string
@@ -84,10 +94,14 @@ export class KimiAdapter implements AgentAdapter {
   readonly #bin: string
   readonly #sandboxBin: string
   readonly #credentialHome: string | undefined
+  readonly #authorization: AdapterAuthorization
+  readonly authorizationMode: AdapterAuthorization['mode']
   readonly #runs = new Map<string, RunState>()
   readonly #idempotency: Map<string, Promise<RemoteTaskBinding>>
 
-  constructor(opts: KimiAdapterOptions = {}) {
+  constructor(opts: KimiAdapterOptions) {
+    this.#authorization = snapshotAdapterAuthorization(opts.authorization)
+    this.authorizationMode = this.#authorization.mode
     this.#bin = opts.bin ?? process.env['KIMI_BIN'] ?? 'kimi'
     this.#sandboxBin = opts.sandboxBin ?? 'sandbox-exec'
     this.#credentialHome = opts.credentialHome
@@ -112,11 +126,14 @@ export class KimiAdapter implements AgentAdapter {
     envelope: TaskEnvelopeV1,
     ctx: DispatchContext,
   ): Promise<RemoteTaskBinding> {
-    const key = envelope.identity.idempotency_key
+    const frozenEnvelope = structuredClone(envelope)
+    const frozenCtx = snapshotDispatchContext(ctx)
+    assertAdapterAuthorization(this.#authorization, frozenEnvelope, frozenCtx, ADAPTER_ID)
+    const key = frozenEnvelope.identity.idempotency_key
     const existing = this.#idempotency.get(key)
     if (existing) return existing
 
-    const pending = this.#start(envelope, ctx).catch((err) => {
+    const pending = this.#start(frozenEnvelope, frozenCtx).catch((err) => {
       this.#idempotency.delete(key)
       throw err
     })
@@ -184,6 +201,7 @@ export class KimiAdapter implements AgentAdapter {
         'stream-json',
       ]
       await ctx.beforeSend?.(binding)
+      assertAdapterAuthorization(this.#authorization, envelope, ctx, ADAPTER_ID)
       child = spawn(this.#sandboxBin, args, {
         cwd: runtime.workDir,
         detached: true,
@@ -477,39 +495,12 @@ const childEnv = (
   envelope: TaskEnvelopeV1,
   ctx: DispatchContext,
 ): NodeJS.ProcessEnv => {
-  const env: NodeJS.ProcessEnv = {
+  return providerBaseEnv(process.env, {
     KIMI_CODE_HOME: runtime.homeDir,
     TMPDIR: runtime.runtimeDir,
     CMAP_TASK_ID: envelope.identity.task_id,
     CMAP_TRACE_ID: ctx.trace_id,
-  }
-  for (const key of [
-    'PATH',
-    'HOME',
-    'LANG',
-    'TERM',
-    'TZ',
-    'SSL_CERT_FILE',
-    'SSL_CERT_DIR',
-  ]) {
-    const value = process.env[key]
-    if (value !== undefined) env[key] = value
-  }
-  for (const [key, value] of Object.entries(process.env)) {
-    if (
-      value !== undefined &&
-      (key.startsWith('LC_') ||
-        key === 'HTTP_PROXY' ||
-        key === 'HTTPS_PROXY' ||
-        key === 'NO_PROXY' ||
-        key === 'http_proxy' ||
-        key === 'https_proxy' ||
-        key === 'no_proxy')
-    ) {
-      env[key] = value
-    }
-  }
-  return env
+  })
 }
 
 const probeCommand = async (
@@ -523,7 +514,10 @@ const probeCommand = async (
       done = true
       resolve(result)
     }
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, args, {
+      env: providerBaseEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
     let out = ''
     let err = ''
     const timer = setTimeout(() => {

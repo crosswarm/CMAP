@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { generateKeyPairSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -7,6 +8,7 @@ import { test } from "node:test";
 import type { DispatchContext } from "#adapter-sdk";
 import { AdapterError } from "#adapter-sdk";
 import type { RemoteTaskBinding, TaskEnvelopeV1 } from "#domain-model";
+import { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit } from "#domain-model";
 import { YonWorkAdapter, type YonWorkRuntimeLike } from "../../adapters/yonwork-adapter/src/index.ts";
 
 const policy = "a".repeat(64);
@@ -67,6 +69,23 @@ const context = (
   ...(beforeSend ? { beforeSend } : {}),
 });
 
+const permitTrust = (adapterId: string, runnerId = "runner-1") => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const issuer = "adapter-test-control";
+  const issuedMs = 1_800_000_000_000;
+  let nowMs = issuedMs;
+  return {
+    expire: () => { nowMs = issuedMs + 1_000; },
+    issue: (e: TaskEnvelopeV1) => issueDispatchPermit({
+      privateKey, issuer, runnerId, adapterId, envelope: e, nowMs: issuedMs, ttlSeconds: 1,
+    }),
+    verifier: (token: string, e: TaskEnvelopeV1, actualAdapterId: string, actualRunnerId: string) =>
+      verifyDispatchPermit(token, {
+        publicKey, issuer, runnerId: actualRunnerId, adapterId: actualAdapterId, envelope: e, nowMs,
+      }),
+  };
+};
+
 class FakeHandle {
   pid = 1;
   stopped = false;
@@ -107,6 +126,7 @@ class FakeRuntime implements YonWorkRuntimeLike {
   sendChunks: string[] = [];
   watcherChunks: string[] = [];
   sends = 0;
+  lastMessage = "";
   chatHandle = new FakeHandle();
   watcherHandle = new FakeHandle();
 
@@ -133,6 +153,7 @@ class FakeRuntime implements YonWorkRuntimeLike {
   async sendChat(input: { sessionKey: string; message: string; idempotencyKey: string; timeoutMs: number; onChunk: (chunk: Buffer) => void }) {
     this.calls.push(`send:${input.sessionKey}:${input.idempotencyKey}:timeout=${input.timeoutMs}`);
     this.sends += 1;
+    this.lastMessage = input.message;
     if (this.failSend) throw new Error("accepted maybe, lost local stream");
     for (const chunk of this.sendChunks) {
       setTimeout(() => input.onChunk(Buffer.from(chunk)), 0);
@@ -219,7 +240,7 @@ const terminalChunk = (binding: RemoteTaskBinding, state: "final" | "error" | "a
 
 const makeAdapter = (runtime = new FakeRuntime()): { adapter: YonWorkAdapter; runtime: FakeRuntime } => ({
   runtime,
-  adapter: new YonWorkAdapter({ profileId: "cmap-test", runnerId: "runner-1", runtime }),
+  adapter: new YonWorkAdapter({ authorization: { mode: 'standalone' }, profileId: "cmap-test", runnerId: "runner-1", runtime }),
 });
 
 test("discovers the dedicated controlled YonWork capability", async () => {
@@ -345,6 +366,94 @@ test("policy drift and pre-send guard failure reject without send", async (t) =>
   }
 });
 
+test("managed YonWork rejects malformed permit before reservation or runtime reads", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-yonwork-managed-first-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new FakeRuntime();
+  const trust = permitTrust("yonwork-adapter");
+  const adapter = new YonWorkAdapter({
+    authorization: { mode: "managed", verifier: trust.verifier },
+    profileId: "cmap-test",
+    runnerId: "runner-1",
+    runtime,
+  });
+
+  await assert.rejects(
+    adapter.startTask(envelope(), { ...context(dir, async () => undefined), token: "" }),
+    (err) => err instanceof DispatchPermitError && err.code === "MALFORMED",
+  );
+  assert.deepEqual(runtime.calls, []);
+  assert.equal(runtime.sends, 0);
+});
+
+test("managed YonWork rejects a permit that expires after beforeSend and before chat send", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-yonwork-managed-final-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const runtime = new FakeRuntime();
+  const trust = permitTrust("yonwork-adapter");
+  const adapter = new YonWorkAdapter({
+    authorization: { mode: "managed", verifier: trust.verifier },
+    profileId: "cmap-test",
+    runnerId: "runner-1",
+    runtime,
+  });
+  const e = envelope();
+  const binding = adapter.prepareBinding(e, context(dir));
+
+  await assert.rejects(
+    adapter.startTask(e, {
+      ...context(dir, async () => { trust.expire(); }),
+      token: trust.issue(e),
+    }),
+    (err) => err instanceof DispatchPermitError && err.code === "EXPIRED",
+  );
+  assert.equal(runtime.sends, 0);
+  assert.deepEqual(runtime.calls.slice(0, 4), [
+    "metadata:yonwork:cmap-test",
+    "policy:agent:cmap-test:explicit:cmap-policy",
+    `prepare:${binding.remote_context_id}`,
+    `policy:${binding.remote_context_id}`,
+  ]);
+});
+
+test("YonWork authorization mode is snapshotted at construction", () => {
+  const authorization = { mode: "standalone" } as const;
+  const adapter = new YonWorkAdapter({
+    authorization,
+    profileId: "cmap-test",
+    runnerId: "runner-1",
+    runtime: new FakeRuntime(),
+  });
+  (authorization as unknown as { mode: "managed" }).mode = "managed";
+  assert.equal(adapter.authorizationMode, "standalone");
+});
+
+test("YonWork snapshots dispatch context before async startup can be redirected", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-yonwork-ctx-snapshot-"));
+  const other = await mkdtemp(join(tmpdir(), "cmap-yonwork-ctx-other-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  const runtime = new DelayedMetadataRuntime();
+  const adapter = new YonWorkAdapter({ authorization: { mode: "standalone" }, profileId: "cmap-test", runnerId: "runner-1", runtime });
+  let originalCalled = false;
+  let mutatedCalled = false;
+  const ctx = context(dir, async () => { originalCalled = true; });
+  const e = envelope();
+  const starting = adapter.startTask(e, ctx);
+  (ctx as { beforeSend: DispatchContext["beforeSend"]; worktree: string }).beforeSend = async () => {
+    mutatedCalled = true;
+    throw new Error("redirected callback");
+  };
+  (ctx as { worktree: string }).worktree = other;
+  runtime.releaseMetadata();
+  const binding = await starting;
+
+  assert.deepEqual(binding, adapter.prepareBinding(e, context(dir)));
+  assert.equal(originalCalled, true);
+  assert.equal(mutatedCalled, false);
+  assert.equal(runtime.sends, 1);
+});
+
 test("stream close without exact terminal stays running and collect refuses uncertainty", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "cmap-yonwork-open-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -397,7 +506,7 @@ test("tampered persisted binding is rejected, but fresh adapter can scoped-cance
 
   const runtime = new FakeRuntime();
   runtime.watcherChunks = [terminalChunk(binding, "aborted", "")];
-  const fresh = new YonWorkAdapter({ profileId: "cmap-test", runnerId: "runner-1", runtime });
+  const fresh = new YonWorkAdapter({ authorization: { mode: 'standalone' }, profileId: "cmap-test", runnerId: "runner-1", runtime });
   await fresh.cancel(binding, "recover");
   assert.equal((await fresh.getStatus(binding)).status, "canceled");
   await assert.rejects(
@@ -412,7 +521,7 @@ test("cancel keeps one 5s budget across hanging watch creation, ready, abort, an
   for (const mode of ["watch", "ready", "abort", "stop"] as const) {
     const runtime = new HangingRuntime();
     runtime.mode = mode;
-    const adapter = new YonWorkAdapter({ profileId: "cmap-test", runnerId: "runner-1", runtime });
+    const adapter = new YonWorkAdapter({ authorization: { mode: 'standalone' }, profileId: "cmap-test", runnerId: "runner-1", runtime });
     const binding = adapter.prepareBinding(envelope({ identity: { ...envelope().identity, idempotency_key: `key-${mode}` } }), context(dir));
     const started = Date.now();
     const outcome = await Promise.race([
@@ -433,7 +542,7 @@ test("cancel during in-flight start does not wait for metadata or allow late sen
   const dir = await mkdtemp(join(tmpdir(), "cmap-yonwork-cancel-start-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const runtime = new DelayedMetadataRuntime();
-  const adapter = new YonWorkAdapter({ profileId: "cmap-test", runnerId: "runner-1", runtime });
+  const adapter = new YonWorkAdapter({ authorization: { mode: 'standalone' }, profileId: "cmap-test", runnerId: "runner-1", runtime });
   const e = envelope();
   const binding = adapter.prepareBinding(e, context(dir));
   const starting = adapter.startTask(e, context(dir, async () => undefined)).catch((error: unknown) => error);
@@ -454,7 +563,7 @@ test("cancel before delayed send handle arrives performs late scoped abort and s
   const dir = await mkdtemp(join(tmpdir(), "cmap-yonwork-cancel-send-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const runtime = new DelayedSendRuntime();
-  const adapter = new YonWorkAdapter({ profileId: "cmap-test", runnerId: "runner-1", runtime });
+  const adapter = new YonWorkAdapter({ authorization: { mode: 'standalone' }, profileId: "cmap-test", runnerId: "runner-1", runtime });
   const e = envelope();
   const binding = adapter.prepareBinding(e, context(dir));
   const starting = adapter.startTask(e, context(dir, async () => undefined));

@@ -9,6 +9,9 @@
  */
 
 export type { TaskEnvelopeV1 } from './generated/task-envelope.ts'
+export type { DispatchPermitV1 } from './generated/dispatch-permit.ts'
+export { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit } from './dispatch-permit.ts'
+export type { DispatchPermitErrorCode } from './dispatch-permit.ts'
 export type { MissionPlanV1 } from './generated/mission-plan.ts'
 export { normalizeMissionPlan, yonWorkProfileFromRoute } from './mission-plan.ts'
 export type { YonWorkOutputV1 } from './generated/yonwork-output.ts'

@@ -124,7 +124,7 @@ ok('信封通过 task-envelope v1 校验')
 
 step(2, '派发给 codex-adapter（将真实调用 codex，耗时约 1-3 分钟）')
 
-const adapter = new CodexAdapter({
+const adapter = new CodexAdapter({ authorization: { mode: 'standalone' },
   // 传给 codex 的是 OpenAI structured outputs 兼容子集，
   // 不是控制面用来校验账本的严格 schema
   outputSchemaPath: join(schemaDir, 'codex-output.v1.schema.json'),

@@ -73,6 +73,7 @@ spawn 出的 worker **不继承任何上下文**——所以任务信封必须�
 | `task-result.v1` | 账本格式。严格校验 | ✅ 已实现 |
 | `review-decision.v1` | 返工契约 | ✅ 已实现 |
 | `codex-output.v1` | 传给 Agent 的输出格式 | ✅ 已实现 |
+| `dispatch-permit.v1` | 本机受管启动的短期签名凭据 | ✅ 本机契约；远程身份仍未实现，见 [派发凭据](dispatch-permit.md) |
 
 ### 为什么 Agent 输出与账本格式必须分开
 
@@ -148,6 +149,8 @@ DRAFT → READY → QUEUED → RUNNING → VERIFYING → REVIEWING → COMPLETED
 ## Adapter 层
 
 统一 SPI（`packages/adapter-sdk`）：`discover` / `startTask` / `sendInput` / `getStatus` / `subscribe` / `cancel` / `collectResult` / `health`。
+
+受管执行还要求确定性 `prepareBinding` 与显式 managed 授权配置，Activities 必须持有签发器；无 prepared 能力或 standalone 的 Adapter 不进入 Workflow。直接 SDK 单跳使用显式 standalone 模式。见[派发凭据](dispatch-permit.md)。
 
 **不提供续跑（`resumeSession`）**：返工一律派生新 Task 以保留证据历史与因果链，不向已结束的会话追加。这与状态机中「`REWORK` 不允许回到 `RUNNING`」是同一条设计。
 

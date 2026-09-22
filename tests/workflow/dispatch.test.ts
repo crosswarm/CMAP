@@ -13,7 +13,7 @@ import { MemoryStore } from '#domain-model'
 import type { Artifact, Mission, RemoteTaskBinding, Store, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner, syntheticActivityDeps, syntheticAdapterAuthorization } from './fake-adapter.ts'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 
 const ACTOR = { type: 'system', id: 'test' } as const
@@ -108,7 +108,7 @@ class FailingArtifactStore extends MemoryStore {
 }
 
 const newActs = () =>
-  createActivities({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), pollIntervalMs: 1 })
+  createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), pollIntervalMs: 1 }))
 
 beforeEach(async () => {
   store = new MemoryStore()
@@ -450,7 +450,7 @@ describe('收结果并落账本', () => {
     await acts.dispatchTask(taskId)
 
     await assert.rejects(
-      () => createActivities({ store, adapter, runner: syntheticRunner(), pollIntervalMs: 1, waitTimeoutMs: 5 }).collectTaskResult(taskId),
+      () => createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner(), pollIntervalMs: 1, waitTimeoutMs: 5 })).collectTaskResult(taskId),
       /超时/,
     )
     assert.equal(adapter.cancelCalls.length, 1, '超时后必须终止 Agent，不能留下孤儿进程继续占资源')
@@ -463,7 +463,7 @@ test('fresh CLI runtime loss is a durable nonterminal uncertainty, not a TaskRes
   await acts.dispatchTask(taskId)
   const binding = {adapter:'codex-adapter',remote_task_id:`codex:${taskId}:1`,protocol:'codex-exec',protocol_version:'0.1.0',runner_id:'runner-test'}
   await store.setTaskBinding(taskId,binding)
-  const fresh = createActivities({store,adapter:new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json'}),runner:syntheticRunner({runner_id:'runner-test'})})
+  const fresh = createActivities(syntheticActivityDeps({store,adapter:new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json', authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' })}),runner:syntheticRunner({runner_id:'runner-test'})}))
   const expected = {executionUncertain:{code:'BINDING_NOT_FOUND',terminalObserved:false}}
   assert.deepEqual(await fresh.collectTaskResult(taskId),expected)
   assert.deepEqual(await fresh.collectTaskResult(taskId),expected)

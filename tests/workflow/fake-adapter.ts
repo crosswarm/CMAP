@@ -7,14 +7,56 @@
  *
  * 本文件不以 .test.ts 结尾，避免被测试运行器当作独立用例执行。
  */
-import type { RemoteTaskBinding, RunnerDescriptor, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
+import { generateKeyPairSync } from 'node:crypto'
+
+import {
+  issueDispatchPermit,
+  verifyDispatchPermit,
+  type RemoteTaskBinding,
+  type RunnerDescriptor,
+  type TaskEnvelopeV1,
+  type TaskResultV1,
+} from '#domain-model'
 import type {
   AgentAdapter,
+  AdapterAuthorization,
   AdapterDescriptor,
   AdapterHealth,
   DispatchContext,
+  DispatchPermitSigner,
   NormalizedAgentStatus,
 } from '#adapter-sdk'
+import { assertAdapterAuthorization } from '#adapter-sdk'
+
+const syntheticTrust = generateKeyPairSync('ed25519')
+const syntheticIssuer = 'cmap-test-synthetic-dispatch-permit'
+
+export const syntheticPermitSigner: DispatchPermitSigner = (envelope, audience) =>
+  issueDispatchPermit({
+    privateKey: syntheticTrust.privateKey,
+    issuer: syntheticIssuer,
+    runnerId: audience.runnerId,
+    adapterId: audience.adapterId,
+    envelope,
+  })
+
+export const syntheticAdapterAuthorization = (pin?: { readonly runnerId?: string }): AdapterAuthorization => ({
+  mode: 'managed',
+  verifier: (token, envelope, adapterId, runnerId) => verifyDispatchPermit(token, {
+    publicKey: syntheticTrust.publicKey,
+    issuer: syntheticIssuer,
+    runnerId: pin?.runnerId ?? runnerId,
+    adapterId,
+    envelope,
+  }),
+})
+
+export const syntheticActivityDeps = <T extends object>(
+  deps: T,
+): T & { readonly signDispatchPermit: DispatchPermitSigner } => ({
+  ...deps,
+  signDispatchPermit: syntheticPermitSigner,
+})
 
 export const syntheticRunner = (
   overrides: Partial<RunnerDescriptor> = {},
@@ -61,11 +103,13 @@ export const syntheticRunner = (
 export class FakeAdapter implements AgentAdapter {
   readonly adapterId = 'fake-adapter'
   readonly agentId = 'fake'
+  readonly authorizationMode = 'managed'
 
   /** 每次 startTask 的信封，用于断言「Adapter 真的被调用了几次」。 */
   readonly startCalls: TaskEnvelopeV1[] = []
   readonly contexts: DispatchContext[] = []
   readonly cancelCalls: RemoteTaskBinding[] = []
+  readonly authorization = syntheticAdapterAuthorization()
 
   /** getStatus 前几次返回 running，模拟真实的等待过程。 */
   runningRounds = 1
@@ -87,18 +131,25 @@ export class FakeAdapter implements AgentAdapter {
     }
   }
 
-  async startTask(envelope: TaskEnvelopeV1, ctx: DispatchContext): Promise<RemoteTaskBinding> {
-    this.startCalls.push(envelope)
-    this.contexts.push(ctx)
-    const remoteTaskId = `fake:${envelope.identity.task_id}`
-    this.#envelopes.set(remoteTaskId, envelope)
+  prepareBinding(envelope: TaskEnvelopeV1, ctx: DispatchContext): RemoteTaskBinding {
     return {
       adapter: this.adapterId,
-      remote_task_id: remoteTaskId,
+      remote_task_id: `fake:${envelope.identity.task_id}`,
       protocol: 'fake-exec',
       protocol_version: '0.0.1',
       runner_id: ctx.runner_id,
     }
+  }
+
+  async startTask(envelope: TaskEnvelopeV1, ctx: DispatchContext): Promise<RemoteTaskBinding> {
+    assertAdapterAuthorization(this.authorization, envelope, ctx, this.adapterId)
+    const binding = this.prepareBinding(envelope, ctx)
+    await ctx.beforeSend!(binding)
+    assertAdapterAuthorization(this.authorization, envelope, ctx, this.adapterId)
+    this.startCalls.push(envelope)
+    this.contexts.push(ctx)
+    this.#envelopes.set(binding.remote_task_id, envelope)
+    return binding
   }
 
   async sendInput(): Promise<void> {}

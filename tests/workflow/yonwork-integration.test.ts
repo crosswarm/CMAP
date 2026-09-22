@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { MemoryStore, type Approval, type EventActor, type Mission, type ResourceLock, type TaskEnvelopeV1, type TaskRecord } from "#domain-model";
 import { createActivities } from "../../workflows/activities.ts";
 import { YonWorkAdapter, type YonWorkRuntimeLike } from "../../adapters/yonwork-adapter/src/index.ts";
-import { syntheticRunner } from "./fake-adapter.ts";
+import { syntheticRunner, syntheticActivityDeps, syntheticAdapterAuthorization } from "./fake-adapter.ts";
 
 const ACTOR: EventActor = { type: "system", id: "yonwork-integration-test" };
 const RUNNER = "runner-yonwork-test";
@@ -234,8 +234,8 @@ const makeActivities = async (id: string, mode: SendMode = "final") => {
   const ids = await makeTask(store, id);
   const runtime = new SyntheticRuntime(store, ids.missionId, ids.taskId);
   runtime.mode = mode;
-  const adapter = new YonWorkAdapter({ profileId: PROFILE, runnerId: RUNNER, runtime });
-  const acts = createActivities({ store, adapters: [adapter], runner: runner(), workRoot, pollIntervalMs: 1, waitTimeoutMs: 25 });
+  const adapter = new YonWorkAdapter({ profileId: PROFILE, runnerId: RUNNER, runtime, authorization: syntheticAdapterAuthorization({ runnerId: RUNNER }) });
+  const acts = createActivities(syntheticActivityDeps({ store, adapters: [adapter], runner: runner(), workRoot, pollIntervalMs: 1, waitTimeoutMs: 25 }));
   return { store, workRoot, runtime, adapter, acts, ...ids };
 };
 

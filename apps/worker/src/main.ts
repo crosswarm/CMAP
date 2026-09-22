@@ -20,10 +20,12 @@ process.env['grpc_proxy'] = ''
 
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { generateKeyPairSync } from 'node:crypto'
 
 import { Worker, NativeConnection } from '@temporalio/worker'
 
-import { PgStore } from '#domain-model'
+import { PgStore, issueDispatchPermit, verifyDispatchPermit, DispatchPermitError } from '#domain-model'
+import type { AdapterAuthorization, DispatchPermitSigner } from '#adapter-sdk'
 import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
@@ -46,13 +48,24 @@ const repoRoot = join(here, '../../..')
 // 每个任务一个子目录，避免并发任务互相污染工作区。
 const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
 
+// Local ephemeral trust exercises the managed boundary; it is not remote host identity.
+const {privateKey,publicKey}=generateKeyPairSync('ed25519')
+const issuer='cmap:local-control-plane'
+const signDispatchPermit:DispatchPermitSigner=(envelope,{runnerId:audienceRunner,adapterId})=>
+  issueDispatchPermit({privateKey,issuer,runnerId:audienceRunner,adapterId,envelope})
+const authorization:AdapterAuthorization={mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{
+  if(contextRunner!==runnerId)throw new DispatchPermitError('CLAIM_MISMATCH')
+  return verifyDispatchPermit(token,{publicKey,issuer,runnerId,adapterId,envelope})
+}}
+
 const adapterNames = parseAdapterNames(process.env['CMAP_AGENTS'])
 const adapters = adapterNames.map((name) =>
   name === 'kimi'
-    ? new KimiAdapter()
+    ? new KimiAdapter({authorization})
     : name === 'yonwork'
-      ? new YonWorkAdapter({profileId:process.env['CMAP_YONWORK_AGENT_ID'] ?? '',runnerId})
+      ? new YonWorkAdapter({profileId:process.env['CMAP_YONWORK_AGENT_ID'] ?? '',runnerId,authorization})
     : new CodexAdapter({
+        authorization,
         outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
       }),
 )
@@ -91,12 +104,14 @@ const worker = await Worker.create({
       // 不是控制面校验账本用的严格 schema（见 ADR-0003）。
       adapters,
       runner,
+      signDispatchPermit,
       workRoot,
     }),
     ...createDagActivities({
       store,
       adapters,
       runner,
+      signDispatchPermit,
       workRoot,
     }),
   },

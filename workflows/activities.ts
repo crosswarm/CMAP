@@ -34,8 +34,8 @@ import type {
   RunnerDescriptor,
 } from '#domain-model'
 import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
-import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError } from '#domain-model'
-import { AdapterError, type AgentAdapter, type DispatchContext } from '#adapter-sdk'
+import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError, DispatchPermitError } from '#domain-model'
+import { AdapterError, type AgentAdapter, type DispatchContext, type DispatchPermitSigner } from '#adapter-sdk'
 import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
 
 /**
@@ -129,6 +129,7 @@ export interface ActivityDeps {
   /** 注册顺序是无显式首选时的稳定路由顺序；不能与 adapter 同时传入。 */
   readonly adapters?: readonly AgentAdapter[]
   readonly runner: RunnerDescriptor
+  readonly signDispatchPermit: DispatchPermitSigner
   /**
    * 工作目录根。每个任务分一个子目录，避免并发任务互相污染。
    * 不给则由 Adapter 自建临时目录。
@@ -232,7 +233,12 @@ export interface ApplyReviewOutput {
 export const createActivities = (deps: ActivityDeps) => {
   const { store, adapter, workRoot } = deps
   if (adapter && deps.adapters) throw new Error('adapter 与 adapters 不能同时配置')
-  const adapters = deps.adapters ?? (adapter ? [adapter] : [])
+  if (typeof deps.signDispatchPermit !== 'function') throw new Error('DISPATCH_PERMIT_SIGNER_REQUIRED')
+  const adapters = [...(deps.adapters ?? (adapter ? [adapter] : []))]
+  for (const candidate of adapters) {
+    if (candidate.authorizationMode !== 'managed') throw new Error('MANAGED_ADAPTER_REQUIRED')
+    if (typeof candidate.prepareBinding !== 'function') throw new Error('PREPARED_ADAPTER_REQUIRED')
+  }
   if (new Set(adapters.map((a) => a.adapterId)).size !== adapters.length ||
       new Set(adapters.map((a) => a.agentId)).size !== adapters.length) {
     throw new Error('Adapter / Agent ID 重复')
@@ -415,7 +421,7 @@ export const createActivities = (deps: ActivityDeps) => {
      * 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
      *
      * 合并 Activity 不等于外部启动与 Ledger 写入原子化。
-     * prepareBinding 路径先持久化意图；legacy 路径仍有启动后、写 binding 前的崩溃窗口。
+     * 受管 Adapter 必须先准备确定性 binding；不支持预写意图的 Adapter 不进入派发。
      *
      * 幂等：先查 Ledger 中的 binding。Adapter 的内存缓存在 Worker 重启后
      * 失效，只有落库的 binding 才能让重试的 Activity 认出「已派发过」。
@@ -491,6 +497,8 @@ export const createActivities = (deps: ActivityDeps) => {
         })
       }
 
+      const token = deps.signDispatchPermit(envelope,{runnerId,adapterId:selectedAdapter.adapterId})
+      if (typeof token !== 'string' || token.length === 0) throw new Error('DISPATCH_PERMIT_SIGNER_INVALID')
       const timeoutMs = (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
 
       // 工作目录由 runner 侧准备。不存在时 spawn 会直接失败，
@@ -499,9 +507,7 @@ export const createActivities = (deps: ActivityDeps) => {
       if (worktree) await mkdir(worktree, { recursive: true })
 
       const context: DispatchContext = {
-        // P4 接入鉴权后换成短期、受众绑定的令牌。现在是本机单租户，
-        // 但字段先占住位置，免得那时才发现调用方根本没有令牌可传。
-        token: process.env['CMAP_RUNNER_TOKEN'] ?? 'local-dev-token',
+        token,
         runner_id: runnerId,
         trace_id: taskId,
         correlation_id: envelope.identity.idempotency_key,
@@ -546,6 +552,12 @@ export const createActivities = (deps: ActivityDeps) => {
           }})
         } catch (error) {
           if (revoked) return {dispatched:false,...revoked}
+          if (error instanceof DispatchPermitError) {
+            const task = await store.getTask(taskId)
+            if (!task) throw new Error('TASK_NOT_FOUND')
+            const denial = await persistAdmissionDenial(store,runner,task,new RunnerAdmissionError('PERMIT_INVALID'),'post-intent')
+            return {dispatched:false,...denial}
+          }
           throw error
         }
         if (!checked || !isDeepStrictEqual(binding,prepared)) throw new Error('Prepared dispatch contract mismatch')
@@ -559,26 +571,7 @@ export const createActivities = (deps: ActivityDeps) => {
         return {dispatched:true,remoteTaskId:binding.remote_task_id}
       }
 
-      const beforeStart=await store.getTask(taskId)
-      if(!beforeStart)throw new Error('TASK_NOT_FOUND')
-      const finalDenial=await preflightTaskDispatch(store,runner,beforeStart)
-      if(finalDenial)return {dispatched:false,...finalDenial}
-      if(beforeStart.binding)return {dispatched:false,remoteTaskId:beforeStart.binding.remote_task_id}
-      const binding = await selectedAdapter.startTask(envelope, context)
-
-      if (binding.adapter !== selectedAdapter.adapterId) {
-        throw new Error(`Adapter binding mismatch: selected ${selectedAdapter.adapterId}, got ${binding.adapter}`)
-      }
-
-      // Third-party adapters without prepareBinding still have a start-before-binding window.
-      await store.setTaskBinding(taskId, binding)
-
-      await store.transitionTask({
-        taskId, to: 'RUNNING', actor: ACTOR,
-        eventType: 'TASK_STARTED', idempotencyKey: `running:${taskId}`,
-      })
-
-      return { dispatched: true, remoteTaskId: binding.remote_task_id }
+      throw new Error('PREPARED_ADAPTER_REQUIRED')
     },
 
     /**

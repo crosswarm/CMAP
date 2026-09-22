@@ -14,7 +14,7 @@ import addFormats from 'ajv-formats'
 
 import { MemoryStore } from '#domain-model'
 import { createActivities } from '../../workflows/activities.ts'
-import { FakeAdapter, syntheticRunner } from '../workflow/fake-adapter.ts'
+import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from '../workflow/fake-adapter.ts'
 
 const schemaDir = join(dirname(fileURLToPath(import.meta.url)), '../../schemas')
 const ajv = new Ajv({ strict: true, allErrors: true })
@@ -30,7 +30,7 @@ const setup = async (failNext) => {
   const store = new MemoryStore()
   const adapter = new FakeAdapter()
   adapter.failNext = failNext
-  const acts = createActivities({ store, adapter, runner:syntheticRunner(), pollIntervalMs: 1 })
+  const acts = createActivities(syntheticActivityDeps({ store, adapter, runner:syntheticRunner(), pollIntervalMs: 1 }))
 
   await store.createMission({
     mission: {

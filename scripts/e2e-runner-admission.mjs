@@ -3,15 +3,16 @@
  * No human approval is synthesized; the controlled child must be denied before it runs.
  */
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { access, readFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 import { Client, Connection } from '@temporalio/client'
 import { Worker } from '@temporalio/worker'
-import { PgStore } from '#domain-model'
+import { PgStore, issueDispatchPermit, verifyDispatchPermit } from '#domain-model'
+import { CodexAdapter } from '../adapters/codex-adapter/src/index.ts'
 import { dagTaskId } from '../workflows/dag-materialization.ts'
 import { createActivities } from '../workflows/activities.ts'
-import { FakeAdapter, syntheticRunner } from '../tests/workflow/fake-adapter.ts'
+import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from '../tests/workflow/fake-adapter.ts'
 
 process.env.NO_PROXY=process.env.no_proxy='localhost,127.0.0.1,::1'
 process.env.grpc_proxy=''
@@ -38,6 +39,39 @@ async function run(port,request){
 }
 try {
   if(process.argv[2]!=='--dag-only') {
+  // Real PgStore and vendor boundary, isolated synthetic trust, no provider exec.
+  const keys=generateKeyPairSync('ed25519'),issuer='cmap-permit-live-test',runnerId='permit-live-negative'
+  const permitRunner=syntheticRunner({runner_id:runnerId})
+  const authorization={mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{
+    assert.equal(contextRunner,runnerId)
+    return verifyDispatchPermit(token,{publicKey:keys.publicKey,issuer,runnerId,adapterId,envelope})
+  }}
+  for(const variant of ['wrong-audience','expired','tampered']) {
+    const missionId=`permit-${variant}-${Date.now()}`,at=new Date().toISOString(),actor={type:'system',id:'permit-live-test'}
+    await store.createMission({actor,mission:{id:missionId,tenant:'team-ycc',owner:'test-harness',type:'inspect',goal:'Synthetic pre-execution permit rejection',constraints:{},acceptance:[{...criterion('value'),hard_gate:true}],workflow_template:'inspect/v1',state:'RUNNING',revision:1,created_at:at,updated_at:at}})
+    const adapter=new CodexAdapter({outputSchemaPath:resolve('schemas/codex-output.v1.schema.json'),authorization})
+    const activities=createActivities({store,adapter,runner:permitRunner,workRoot,signDispatchPermit:(envelope,audience)=>{
+      const token=issueDispatchPermit({privateKey:keys.privateKey,issuer,runnerId:audience.runnerId,adapterId:variant==='wrong-audience'?'kimi-adapter':audience.adapterId,envelope,...(variant==='expired'?{nowMs:Date.now()-120000}:{})})
+      if(variant!=='tampered')return token
+      const parts=token.split('.');parts[2]=(parts[2][0]==='A'?'B':'A')+parts[2].slice(1);return parts.join('.')
+    }})
+    const {taskId}=await activities.createTask({missionId,capability:'code.analyze'})
+    await activities.markReady(taskId)
+    const beforePermit=await launches(),expected={dispatched:false,admissionDenied:{phase:'post-intent',code:'PERMIT_INVALID'}}
+    assert.deepEqual(await activities.dispatchTask(taskId),expected)
+    const retry=createActivities({store,runner:permitRunner,adapter:new CodexAdapter({outputSchemaPath:resolve('schemas/codex-output.v1.schema.json'),authorization}),signDispatchPermit:()=>{throw new Error('MUST_NOT_REISSUE')}})
+    assert.deepEqual(await retry.dispatchTask(taskId),expected)
+    const saved=await store.getTask(taskId)
+    assert.equal(saved.state,'FAILED_TERMINAL');assert.equal(saved.result,null);assert.ok(saved.binding)
+    await assert.rejects(adapter.getStatus(saved.binding),{code:'BINDING_NOT_FOUND'})
+    assert.equal(await launches(),beforePermit)
+    const permitEvents=await store.listEvents(missionId)
+    assert.equal(permitEvents.filter(e=>e.idempotency_key===`runner-admission:${taskId}`).length,1)
+    assert.equal(permitEvents.some(e=>e.event_type==='TASK_STARTED'),false)
+    assert.equal(JSON.stringify(permitEvents).includes('cmap1.'),false)
+    await store.setMissionState(missionId,'ESCALATED',actor)
+    console.log(JSON.stringify({case:`permit-${variant}`,missionId,launchDelta:0,pgReceiptReplay:'passed'}))
+  }
   const before=await launches()
   const denied=await run(deniedPort,{request_id:`admission-owner-${Date.now()}`,goal:'Write a private structured report with value 42.',risk_level:'read-meta',max_additional_cycles:0,acceptance:[criterion('value')]})
   const tasks=await store.queryTasks({missionId:denied.mission.id})
@@ -54,7 +88,7 @@ try {
   // Restart/retry semantics against real PostgreSQL, with an inert Adapter and a
   // newly relaxed synthetic grant. This is not another real Agent execution.
   const adapter=new FakeAdapter(),runner=syntheticRunner({runner_id:'receipt-recheck',tenant:task.envelope.identity.tenant,agents:['fake'],admission:{allowed_tenants:[task.envelope.identity.tenant],allowed_owners:[task.envelope.identity.owner],allowed_capabilities:['code.analyze'],max_risk:'read-meta'}})
-  const retry=createActivities({store,adapter,runner,workRoot})
+  const retry=createActivities(syntheticActivityDeps({store,adapter,runner,workRoot}))
   assert.deepEqual(await retry.dispatchTask(task.id),{dispatched:false,admissionDenied:{phase:'initial',code:'OWNER_DENIED'}})
   assert.equal(adapter.startCalls.length,0)
   await Worker.runReplayHistory({workflowsPath:resolve('workflows/index.ts')},await denied.handle.fetchHistory())

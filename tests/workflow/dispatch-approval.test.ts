@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {MemoryStore,type Mission,type ApprovalScope} from '#domain-model'
 import {createActivities} from '../../workflows/activities.ts'
-import {FakeAdapter,syntheticRunner} from './fake-adapter.ts'
+import {FakeAdapter,syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 
 const actor={type:'system',id:'approval-dispatch-test'} as const
 async function fixture(scope:ApprovalScope,approved=true) {
@@ -13,7 +13,7 @@ async function fixture(scope:ApprovalScope,approved=true) {
   const now=new Date().toISOString()
   const mission:Mission={id:'mis-approval-dispatch',tenant:'team-ycc',owner:'crosswarm',type:'inspect',goal:'synthetic approval boundary',constraints:{risk_level:scope},acceptance:[{criterion_id:'C',metric:'value',operator:'eq',expected:true,hard_gate:true}],workflow_template:'inspect/v1',state:'RUNNING',revision:1,created_at:now,updated_at:now}
   await store.createMission({mission,actor})
-  const acts=createActivities({store,adapter,runner:syntheticRunner(),workRoot})
+  const acts=createActivities(syntheticActivityDeps({store,adapter,runner:syntheticRunner(),workRoot}))
   const {taskId}=await acts.createTask({missionId:mission.id,capability:'code.analyze'})
   await acts.markReady(taskId)
   if(approved){

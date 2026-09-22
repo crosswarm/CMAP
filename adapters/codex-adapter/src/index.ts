@@ -24,6 +24,7 @@ import type {
 } from '#domain-model'
 import type {
   AgentAdapter,
+  AdapterAuthorization,
   AdapterDescriptor,
   AdapterHealth,
   DispatchContext,
@@ -35,11 +36,15 @@ import type {
 import {
   AdapterError,
   RiskCeilingExceededError,
+  assertAdapterAuthorization,
+  snapshotAdapterAuthorization,
+  snapshotDispatchContext,
 } from '#adapter-sdk'
 import {
   normalizeAgentOutput,
   renderTaskPrompt,
 } from '../../../packages/adapter-sdk/src/structured-output.ts'
+import { codexProviderEnv } from '../../../packages/adapter-sdk/src/provider-env.ts'
 
 const ADAPTER_ID = 'codex-adapter'
 const AGENT_ID = 'codex'
@@ -70,6 +75,7 @@ const chooseSandbox = (envelope: TaskEnvelopeV1): CodexSandbox =>
 
 /** 契约允许的四档。codex 恰好原生支持全部，无需降级映射。 */
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
+
 
 /**
  * 努力度档位非法。
@@ -159,6 +165,7 @@ interface RunState {
 }
 
 export interface CodexAdapterOptions {
+  readonly authorization: AdapterAuthorization
   readonly bin?: string
   /**
    * 传给 codex --output-schema 的 schema 路径。
@@ -178,11 +185,15 @@ export class CodexAdapter implements AgentAdapter {
 
   readonly #bin: string
   readonly #outputSchemaPath: string
+  readonly #authorization: AdapterAuthorization
+  readonly authorizationMode: AdapterAuthorization['mode']
   readonly #runs = new Map<string, RunState>()
   readonly #idempotency: Map<string, RemoteTaskBinding>
   readonly #pending = new Map<string, Promise<RemoteTaskBinding>>()
 
   constructor(opts: CodexAdapterOptions) {
+    this.#authorization = snapshotAdapterAuthorization(opts.authorization)
+    this.authorizationMode = this.#authorization.mode
     this.#bin = opts.bin ?? process.env['CODEX_BIN'] ?? 'codex'
     this.#outputSchemaPath = opts.outputSchemaPath
     this.#idempotency = opts.idempotencyStore ?? new Map()
@@ -215,7 +226,10 @@ export class CodexAdapter implements AgentAdapter {
     envelope: TaskEnvelopeV1,
     ctx: DispatchContext,
   ): Promise<RemoteTaskBinding> {
-    const key = envelope.identity.idempotency_key
+    const frozenEnvelope = structuredClone(envelope)
+    const frozenCtx = snapshotDispatchContext(ctx)
+    assertAdapterAuthorization(this.#authorization, frozenEnvelope, frozenCtx, ADAPTER_ID)
+    const key = frozenEnvelope.identity.idempotency_key
 
     // 外部副作用去重：即使引擎声称 exactly-once，超时后也无法确认
     // 副作用是否已发生，因此重复派发必须复用而非重跑。
@@ -224,7 +238,7 @@ export class CodexAdapter implements AgentAdapter {
     const inFlight = this.#pending.get(key)
     if (inFlight) return inFlight
 
-    const pending = this.#start(envelope, ctx).finally(() => this.#pending.delete(key))
+    const pending = this.#start(frozenEnvelope, frozenCtx).finally(() => this.#pending.delete(key))
     this.#pending.set(key, pending)
     return pending
   }
@@ -266,6 +280,7 @@ export class CodexAdapter implements AgentAdapter {
 
     try {
       await ctx.beforeSend?.(binding)
+      assertAdapterAuthorization(this.#authorization, envelope, ctx, ADAPTER_ID)
     } catch (cause) {
       if (ownsWorkDir) {
         await rm(workDir, { recursive: true, force: true })
@@ -274,8 +289,7 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     const child = spawn(this.#bin, args, {
-      env: {
-        ...process.env,
+      env: codexProviderEnv(process.env, {
         // macOS 上 TMPDIR 可能经 /Volumes/<disk> 符号链接指回 /Users。
         // Codex workspace-write 拒绝带符号链接的 writable root，传物理路径即可。
         TMPDIR: physicalTmpDir,
@@ -285,7 +299,7 @@ export class CodexAdapter implements AgentAdapter {
         no_proxy: 'localhost,127.0.0.1,::1',
         CMAP_TASK_ID: envelope.identity.task_id,
         CMAP_TRACE_ID: ctx.trace_id,
-      },
+      }),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -490,7 +504,10 @@ export class CodexAdapter implements AgentAdapter {
   async health(): Promise<AdapterHealth> {
     const at = new Date().toISOString()
     return await new Promise((resolve) => {
-      const probe = spawn(this.#bin, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const probe = spawn(this.#bin, ['--version'], {
+        env: codexProviderEnv(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
       let out = ''
       probe.stdout?.on('data', (c: Buffer) => { out += c.toString('utf8') })
       probe.on('close', (code) => {

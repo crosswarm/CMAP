@@ -18,7 +18,7 @@ import type {
   TaskResultV1,
 } from '#domain-model'
 import type { MissionPlanV1 } from '../../packages/domain-model/src/generated/mission-plan.ts'
-import { syntheticRunner } from './fake-adapter.ts'
+import { syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 import { createDagActivities } from '../../workflows/dag-activities.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'dag-controller-test' }
@@ -130,7 +130,7 @@ const make = async (m: Mission) => {
   const store = new MemoryStore()
   await store.createMission({ mission: m, actor: ACTOR })
   const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-controller-'))
-  return { store, workRoot, acts: createDagActivities({ store, workRoot, runner: syntheticRunner(), pollIntervalMs: 1, approvalWaitTimeoutMs: 1 }) }
+  return { store, workRoot, acts: createDagActivities(syntheticActivityDeps({ store, workRoot, runner: syntheticRunner(), pollIntervalMs: 1, approvalWaitTimeoutMs: 1 })) }
 }
 
 const assertMaterialized = (out: { taskId: string } | { admissionDenied: unknown }): { taskId: string } => {
@@ -430,7 +430,9 @@ await acts.finishDagNode({ missionId: m.id, nodeId: 'rootA', taskId, status: 'fa
     })
   })
 
-  test('pending approval check returns immediately and stopped pending approval expires without grant', async () => {
+  test('pending approval check returns immediately and stopped pending approval expires without grant', async (t) => {
+    // This fixture has a 1ms approval lifetime; freeze time to test explicit stop, not scheduler timing.
+    t.mock.timers.enable({apis:['Date'],now:Date.now()})
     const m = mission('mis-approval', { rootRisk: 'controlled' })
     const { store, acts } = await make(m)
     const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))

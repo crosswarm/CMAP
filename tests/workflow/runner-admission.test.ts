@@ -7,7 +7,7 @@ import { MemoryStore, type Mission, type RunnerDescriptor, type TaskEnvelopeV1, 
 import type { DispatchContext } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { createDagAttemptRunner } from '../../workflows/dag-attempt.ts'
-import { FakeAdapter } from './fake-adapter.ts'
+import { FakeAdapter, syntheticActivityDeps } from './fake-adapter.ts'
 
 const actor = {type:'system',id:'runner-admission-test'} as const
 const runner = ():RunnerDescriptor => ({
@@ -24,7 +24,7 @@ async function fixture(owner='denied-user', ready=true) {
   const mission:Mission={id:'mis-admission',tenant:'test',owner,type:'inspect',goal:'synthetic admission check',constraints:{},acceptance:[{criterion_id:'C',metric:'value',operator:'eq',expected:true,hard_gate:true}],workflow_template:'inspect/v1',state:'RUNNING',revision:1,created_at:at,updated_at:at}
   await store.createMission({mission,actor})
   const deps={store,adapter,runner:runner(),workRoot}
-  const acts=createActivities(deps)
+  const acts=createActivities(syntheticActivityDeps(deps))
   const {taskId}=await acts.createTask({missionId:mission.id,capability:'code.analyze'})
   if(ready)await acts.markReady(taskId)
   return {store,adapter,workRoot,acts,taskId,deps,calls}
@@ -81,7 +81,7 @@ test('persisted initial denial replays after policy loosens and after commit-bef
   }
   await assert.rejects(()=>f.acts.dispatchTask(f.taskId),/synthetic lost receipt return/)
   const relaxed=runner()
-  const fresh=createActivities({...f.deps,runner:{...relaxed,admission:{...relaxed.admission,allowed_owners:['allowed-user','denied-user']}}})
+  const fresh=createActivities(syntheticActivityDeps({...f.deps,runner:{...relaxed,admission:{...relaxed.admission,allowed_owners:['allowed-user','denied-user']}}}))
   const a=await fresh.dispatchTask(f.taskId),b=await fresh.dispatchTask(f.taskId)
   assert.deepEqual(a,{dispatched:false,admissionDenied:{phase:'initial',code:'OWNER_DENIED'}})
   assert.equal(JSON.stringify(a),JSON.stringify(b))
@@ -99,7 +99,7 @@ class Prepared extends FakeAdapter {
   before: (()=>void)|undefined
   constructor(){super();Object.defineProperty(this,'adapterId',{value:'yonwork-adapter'});Object.defineProperty(this,'agentId',{value:'yonwork:cmap-test'})}
   override async discover(){return {...await super.discover(),adapter_id:this.adapterId,agent_id:this.agentId,capabilities:['yonwork.validate']}}
-  prepareBinding(e:TaskEnvelopeV1,ctx:DispatchContext):RemoteTaskBinding{return {adapter:this.adapterId,remote_task_id:`prepared:${e.identity.task_id}`,protocol:'yonwork-host-sse',protocol_version:'1',runner_id:ctx.runner_id}}
+  override prepareBinding(e:TaskEnvelopeV1,ctx:DispatchContext):RemoteTaskBinding{return {adapter:this.adapterId,remote_task_id:`prepared:${e.identity.task_id}`,protocol:'yonwork-host-sse',protocol_version:'1',runner_id:ctx.runner_id}}
   override async startTask(e:TaskEnvelopeV1,ctx:DispatchContext){
     const binding=this.prepareBinding(e,ctx)
     this.before?.()
@@ -117,7 +117,7 @@ test('post-intent denial receipt outranks binding recovery, survives a lost retu
     const admitted={...policy,agents:[adapter.agentId],admission:{...policy.admission,allowed_capabilities:['yonwork.validate'],max_risk:'controlled' as const}}
     const envelope:TaskEnvelopeV1={...base.envelope,identity:{...base.envelope.identity,task_id:id,idempotency_key:id},classification:{...base.envelope.classification,requested_capability:'yonwork.validate',risk_level:'controlled'},inputs:{parameters:{yonwork_policy_sha256:'a'.repeat(64)}},execution_policy:{...base.envelope.execution_policy,preferred_agent:adapter.agentId,required_resource_locks:[{resource:'yonwork:host',ttl_seconds:15}]},permissions:{forbidden:[],yonwork:{chat_send:true}}}
     await f.store.createTask({actor,task:{...base,id,state:'DRAFT',capability:'yonwork.validate',risk:'controlled',envelope}})
-    const acts=createActivities({store:f.store,adapter,runner:admitted,workRoot:f.workRoot})
+    const acts=createActivities(syntheticActivityDeps({store:f.store,adapter,runner:admitted,workRoot:f.workRoot}))
     await acts.markReady(id)
     const gate=await acts.requestApproval(id)
     // Synthetic approval belongs only to this fake Adapter; no live YonWork call.
@@ -133,7 +133,7 @@ test('post-intent denial receipt outranks binding recovery, survives a lost retu
     if(crash)await assert.rejects(()=>acts.dispatchTask(id),/receipt return lost/)
     else assert.deepEqual(await acts.dispatchTask(id),expected)
     f.store.getMission=getMission
-    const fresh=createActivities({store:f.store,adapter,runner:admitted,workRoot:f.workRoot})
+    const fresh=createActivities(syntheticActivityDeps({store:f.store,adapter,runner:admitted,workRoot:f.workRoot}))
     assert.deepEqual(await fresh.dispatchTask(id),expected)
     assert.deepEqual(await fresh.dispatchTask(id),expected)
     assert.equal((await f.store.getTask(id))?.state,'FAILED_TERMINAL')
@@ -159,7 +159,7 @@ test('an existing unbound DAG attempt is denied before resource acquisition',asy
   let acquisitions=0
   const acquire=f.store.acquireLock.bind(f.store)
   f.store.acquireLock=async lock=>{acquisitions++;return acquire(lock)}
-  const attempt=createDagAttemptRunner(f.deps)
+  const attempt=createDagAttemptRunner(syntheticActivityDeps(f.deps))
   assert.deepEqual(await attempt({taskId:id}),{outcome:'escalated',taskId:id,reason:'RUNNER_ADMISSION_DENIED:OWNER_DENIED'})
   assert.equal(acquisitions,0)
   assert.equal(f.adapter.startCalls.length,0)
