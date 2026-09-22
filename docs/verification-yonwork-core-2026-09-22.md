@@ -14,11 +14,19 @@ YonWork Adapter 已完成本地实现与合成集成回归，尚未通过真实 
 - 独立代码审查通过共享派发、Store CAS、DAG 映射和报告元数据路径；审查运行相关测试 101 项通过。
 - API 58 项、Workflow 132 项通过。后者包括真实 YonWorkAdapter 与合成 Runtime 的 3 项集成检查：预写意图、相关 final 帧、严格 JSON、落库身份与独立报告哈希；仍不代表真实 YonWork 聊天成功。
 - WebUI 生产构建通过；YonWork 只读探测返回 CLI 1.0.0、Host running、Gateway reachable、registry reported，观测范围仅为传输可达。
-- 最终 Node 24 `npm run check` 通过：334 项基础测试 + 58 项 API 测试 + 132 项 Workflow 测试，共 524 项；类型检查通过。
+- Node 24 `npm run check` 通过；CLI 配对修复后为 336 项基础测试 + 58 项 API 测试 + 132 项 Workflow 测试，共 526 项；类型检查通过。
 - Adapter 独立复审通过。取消覆盖启动中断、延迟返回的发送句柄后续取消/清理、统一 5 秒等待上限；过期或无效 deadline 不发送。相关 16 项 Adapter 测试通过。
 - 真实既有链路：使用新 Worker、隔离 PostgreSQL schema `cmap_yon_regression_20260922` 与队列 `cmap-yon-regression-20260922`，运行 `scripts/e2e-mission.mjs`。
   Mission `mis-e2e-mubzqo6b` 在 160.6 秒后 COMPLETED、无返工；实际 Codex 创建 3 个样本文件，29 字节报告由控制面独立复算 SHA256，账本及 10 条领域事件均回读通过。
 - 同一真实执行的 71 条 Temporal 历史事件在内存中重放通过；未将历史或原始提示写入仓库。
+- 本机 API/Worker 在现有任务组全部完成后重载；健康接口、首页和两项静态资源均回读通过。Obsidian 当前主机知识索引已同步并通过 `sync.py --quick --check`。
+
+## CLI 配对修复
+
+实际 `yonworkctl` 指向 YonWork.app，而 PATH 中 `openclaw` 指向另一套安装，旧 YonClaw.app 也仍存在。
+默认 Runtime 现按 `yonworkctl` 的真实安装目录选择同目录 OpenClaw；毒化 PATH 与缺失同目录 CLI 的回归分别证明正确配对和拒绝回退。
+有效工具响应必须有匹配的 `agentId`、非空字符串 `profile` 和合法 `groups`；只有省略 notices 可视为空，显式 null 或未解决 notices 均拒绝。
+这修复了代码中的版本混用，不需要先迁移用户配置。
 
 ## 当前边界
 
@@ -29,7 +37,7 @@ Gateway `final/error/aborted` 必须匹配预定 runId 和 sessionKey；Host com
 ## 尚未完成
 
 - Runtime 使用当前 Host 的 Agent 目录定位对应 OpenClaw 配置和状态目录，并核对 Gateway；拒绝配置指向远程 Gateway，避免误用本机默认 OpenClaw。此路径仍需专用 profile 的真实工具策略查询验收。
-- 专用 `cmap-*` profile、其空工具有效策略和适用受控批准未完成真实链路核验；没有发送真实 YonWork 聊天或修改业务 profile。
+- 当前 Host 的只读 Agent 列表包含 2 个 Agent，`cmap-*` 数量为 0。专用 profile、其空工具有效策略和适用受控批准未完成真实链路核验；没有发送真实 YonWork 聊天或修改业务 profile。
 - Claude Planner 上次真实调用返回 403；P4 远程 runner、身份认证与发布仍未完成。
 
 本轮 Jev 返回 continue，但置信度 0.48、辅助入口 reason_code=uncertain；未据此放宽权限或声明通过。继续本地修改依据用户既有授权、代码审查及测试证据。

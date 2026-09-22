@@ -1,9 +1,9 @@
 // precommit-allow-secrets: synthetic override token verifies that runtime errors do not echo credentials.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   YonWorkRuntime,
   YonWorkRuntimeError,
@@ -43,8 +43,10 @@ const fakeCli = async (
   dir: string,
   name: string,
   handlers: Record<string, string>,
+  exactFile?: string,
 ): Promise<string> => {
-  const file = join(dir, `${name}-${Date.now()}-${Math.random().toString(16).slice(2)}.mjs`)
+  const file = exactFile ?? join(dir, `${name}-${Date.now()}-${Math.random().toString(16).slice(2)}.mjs`)
+  await mkdir(dirname(file), { recursive: true })
   await writeFile(
     file,
     `#!/usr/bin/env node
@@ -105,6 +107,71 @@ const logLines = async (file: string): Promise<Array<{
 const sameArgs = (a: readonly string[], b: readonly string[]): boolean =>
   JSON.stringify(a) === JSON.stringify(b)
 
+test('default OpenClaw binary resolves to yonworkctl sibling and never falls back to PATH', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-sibling-openclaw-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const runtimeDir = await createRuntimeAssociation(dir)
+  const log = logFile(dir)
+  const agentId = 'cmap-audit'
+  const sessionKey = 'agent:cmap-audit:explicit:sibling'
+  const binDir = join(dir, 'app-cli')
+  const poisonDir = join(dir, 'poison-bin')
+  const yonworkBin = await fakeCli(binDir, 'yonwork', {
+    'gateway status': JSON.stringify({ state: 'running', port: 19001, pid: process.pid }),
+    'agents list': JSON.stringify({ agents: [agentRecord(runtimeDir, agentId)] }),
+  }, join(binDir, 'yonworkctl'))
+  await fakeCli(binDir, 'openclaw', {
+    [`gateway call tools.effective --json --params ${JSON.stringify({ agentId, sessionKey })} --timeout 5000`]:
+      JSON.stringify({ result: { agentId, profile: 'minimal', groups: [] } }),
+  }, join(binDir, 'openclaw'))
+  await fakeCli(poisonDir, 'openclaw', {}, join(poisonDir, 'global-openclaw'))
+  await symlink(join(poisonDir, 'global-openclaw'), join(poisonDir, 'openclaw'))
+  const runtime = new YonWorkRuntime({
+    yonworkBin,
+    env: { PATH: `${poisonDir}${process.env.PATH ? `:${process.env.PATH}` : ''}`, HOME: dir, CMAP_FAKE_LOG: log },
+    timeoutMs: 5000,
+  })
+
+  const policy = await runtime.observeEffectivePolicy({ agentId, sessionKey })
+
+  assert.deepEqual(policy.tools, [])
+  const calls = await logLines(log)
+  const gatewayCall = calls.find((call) => call.argv[0] === 'gateway' && call.argv[1] === 'call')
+  assert.equal(gatewayCall?.bin, 'openclaw')
+  assert.deepEqual(gatewayCall?.argv, ['gateway', 'call', 'tools.effective', '--json', '--params', JSON.stringify({ agentId, sessionKey }), '--timeout', '5000'])
+})
+
+test('default OpenClaw binary fails closed when yonworkctl sibling is absent', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-missing-sibling-openclaw-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const runtimeDir = await createRuntimeAssociation(dir)
+  const agentId = 'cmap-audit'
+  const sessionKey = 'agent:cmap-audit:explicit:missing-sibling'
+  const binDir = join(dir, 'app-cli')
+  const poisonDir = join(dir, 'poison-bin')
+  const yonworkBin = await fakeCli(binDir, 'yonwork', {
+    'gateway status': JSON.stringify({ state: 'running', port: 19001, pid: process.pid }),
+    'agents list': JSON.stringify({ agents: [agentRecord(runtimeDir, agentId)] }),
+  }, join(binDir, 'yonworkctl'))
+  await fakeCli(poisonDir, 'openclaw', {
+    [`gateway call tools.effective --json --params ${JSON.stringify({ agentId, sessionKey })} --timeout 5000`]:
+      JSON.stringify({ result: { agentId, profile: 'poison', groups: [] } }),
+  }, join(poisonDir, 'openclaw'))
+  const runtime = new YonWorkRuntime({
+    yonworkBin,
+    env: { PATH: `${poisonDir}${process.env.PATH ? `:${process.env.PATH}` : ''}`, HOME: dir },
+    timeoutMs: 5000,
+  })
+
+  await assert.rejects(
+    runtime.observeEffectivePolicy({ agentId, sessionKey }),
+    (error: unknown) =>
+      error instanceof YonWorkRuntimeError &&
+      error.code === 'YONWORK_CLI_UNAVAILABLE' &&
+      error.retryable,
+  )
+})
+
 test('reads explicit cmap agent metadata and observes exact empty effective policy via gateway call', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-runtime-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
@@ -119,7 +186,7 @@ test('reads explicit cmap agent metadata and observes exact empty effective poli
   })
   const openclawBin = await fakeCli(dir, 'openclaw', {
     [`gateway call tools.effective --json --params ${JSON.stringify({ agentId, sessionKey })} --timeout 5000`]:
-      JSON.stringify({ result: { profile: 'minimal', groups: [] } }),
+      JSON.stringify({ result: { agentId, profile: 'minimal', groups: [] } }),
   })
   const runtime = new YonWorkRuntime({
     yonworkBin,
@@ -166,9 +233,9 @@ test('policy hash ignores the per-attempt session key', async (t) => {
   const second = 'agent:cmap-audit:explicit:second'
   const openclawBin = await fakeCli(dir, 'openclaw', {
     [`gateway call tools.effective --json --params ${JSON.stringify({ agentId, sessionKey: first })} --timeout 5000`]:
-      JSON.stringify({ result: { profile: 'minimal', groups: [] } }),
+      JSON.stringify({ result: { agentId, profile: 'minimal', groups: [] } }),
     [`gateway call tools.effective --json --params ${JSON.stringify({ agentId, sessionKey: second })} --timeout 5000`]:
-      JSON.stringify({ result: { profile: 'minimal', sessionKey: second, groups: [], notices: [] } }),
+      JSON.stringify({ result: { agentId, profile: 'minimal', sessionKey: second, groups: [], notices: [] } }),
   })
   const runtime = new YonWorkRuntime({
     yonworkBin: await fakeCli(dir, 'yonwork', {
@@ -465,10 +532,14 @@ test('fails closed on malformed, non-empty, or noticed effective policy', async 
   const runtimeDir = await createRuntimeAssociation(dir)
   const agentId = 'cmap-audit'
   const cases = [
-    ['missing-groups', { result: { agentId, tools: [] } }],
-    ['non-empty-tools', { result: { agentId, groups: [{ tools: [{ name: 'shell' }] }] } }],
-    ['notice', { result: { agentId, groups: [], notices: [{ message: 'missing MCP catalog' }] } }],
-    ['wrong-agent', { result: { agentId: 'cmap-other', groups: [] } }],
+    ['missing-agent', { result: { profile: 'minimal', groups: [] } }],
+    ['missing-profile', { result: { agentId, groups: [] } }],
+    ['empty-profile', { result: { agentId, profile: '   ', groups: [] } }],
+    ['null-notices', { result: { agentId, profile: 'minimal', groups: [], notices: null } }],
+    ['missing-groups', { result: { agentId, profile: 'minimal', tools: [] } }],
+    ['non-empty-tools', { result: { agentId, profile: 'minimal', groups: [{ tools: [{ name: 'shell' }] }] } }],
+    ['notice', { result: { agentId, profile: 'minimal', groups: [], notices: [{ message: 'missing MCP catalog' }] } }],
+    ['wrong-agent', { result: { agentId: 'cmap-other', profile: 'minimal', groups: [] } }],
   ] as const
   const handlers = Object.fromEntries(cases.map(([, body], index) => [
     `gateway call tools.effective --json --params ${JSON.stringify({ agentId, sessionKey: `s${index + 1}` })} --timeout 5000`,

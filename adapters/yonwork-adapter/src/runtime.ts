@@ -175,6 +175,21 @@ export const selectYonWorkRuntime = async (
   return { source: 'platform_default', userDataDir: null }
 }
 
+const resolveSiblingBin = async (bin: string, sibling: string, env: NodeJS.ProcessEnv): Promise<string> => {
+  const resolved = await resolveBin(bin, env)
+  const candidate = join(dirname(resolved), sibling)
+  try {
+    await access(candidate, constants.X_OK)
+    return await realpath(candidate)
+  } catch {
+    throw new YonWorkRuntimeError(
+      'YONWORK_CLI_UNAVAILABLE',
+      'YonWork sibling CLI is unavailable',
+      true,
+    )
+  }
+}
+
 const resolveBin = async (bin: string, env: NodeJS.ProcessEnv): Promise<string> => {
   const candidates = isAbsolute(bin)
     ? [bin]
@@ -309,17 +324,15 @@ const parseEffectivePolicy = (
   expected: { readonly agentId: string; readonly sessionKey: string },
 ): Omit<YonWorkEffectivePolicy, 'policySha256'> => {
   const result = resultObject(value)
-  const observedAgent =
-    clean(result.agentId) ?? clean(result.agent_id) ?? clean(result.profileId)
-  const observedSession =
-    clean(result.sessionKey) ?? clean(result.session_key)
-  const profile = asRecord(result.profile)
+  const observedAgent = clean(result.agentId)
+  const observedSession = clean(result.sessionKey) ?? clean(result.session_key)
+  const profile = clean(result.profile)
   const groups = result.groups
-  const notices = result.notices ?? []
+  const notices = result.notices === undefined ? [] : result.notices
   if (
-    (observedAgent !== null && observedAgent !== expected.agentId) ||
+    observedAgent !== expected.agentId ||
     (observedSession !== null && observedSession !== expected.sessionKey) ||
-    (Object.keys(profile).length > 0 && agentIdOf(profile) !== expected.agentId) ||
+    !profile ||
     !Array.isArray(groups) ||
     !Array.isArray(notices)
   ) {
@@ -386,14 +399,14 @@ const waitForGroupExit = async (
 
 export class YonWorkRuntime {
   readonly #yonworkBin: string
-  readonly #openclawBin: string
+  readonly #openclawBin: string | null
   readonly #env: NodeJS.ProcessEnv
   readonly #timeoutMs: number
   readonly #maxOutputBytes: number
 
   constructor(opts: YonWorkRuntimeOptions = {}) {
     this.#yonworkBin = opts.yonworkBin ?? opts.bin ?? 'yonworkctl'
-    this.#openclawBin = opts.openclawBin ?? 'openclaw'
+    this.#openclawBin = opts.openclawBin ?? null
     this.#env = opts.env ?? process.env
     this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.#maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
@@ -511,7 +524,8 @@ export class YonWorkRuntime {
       )
     }
     const openclawRuntime = await this.#requiredOpenClawRuntimeForAgent(agentId)
-    const result = await this.#run(this.#openclawBin, [
+    const openclawBin = this.#openclawBin ?? await resolveSiblingBin(this.#yonworkBin, 'openclaw', this.#env)
+    const result = await this.#run(openclawBin, [
       'gateway',
       'call',
       method,

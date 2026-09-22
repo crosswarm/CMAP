@@ -11,7 +11,7 @@ CMAP_YONWORK_AGENT_ID=cmap-<已配置的专用Agent标识>
 ```
 
 仅填写变量不会创建或隔离 Agent。必须事先存在专用 `cmap-*` Agent，禁止使用默认或业务 Agent 代替。
-Adapter 使用现有 `yonworkctl` / `openclaw` CLI；不复制凭据，不接受 Host URL 或令牌覆盖。
+Adapter 使用现有 `yonworkctl`，默认从其真实安装目录选择同目录 `openclaw`；缺失时拒绝运行，不回退 PATH 中的其他版本。程序化显式传入 `openclawBin` 仍受支持。不复制凭据，不接受 Host URL 或令牌覆盖。
 
 ## 任务契约
 
