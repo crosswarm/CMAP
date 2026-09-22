@@ -20,6 +20,18 @@ const forkJoin = {
 }
 
 describe('mission plan normalization', () => {
+  test('YonWork freezes profile, requested chat permission, policy and host lock', () => {
+    const node={...forkJoin.nodes[0],capability:'yonwork.validate',risk_level:'controlled',preferred_agent:'yonwork:cmap-test',yonwork:{chat_send:true,policy_sha256:'a'.repeat(64)},required_resource_locks:[{resource:'yonwork:host',ttl_seconds:15}]}
+    const normalize=(n:unknown)=>normalizeMissionPlan({schema:'cmap/mission-plan/v1',nodes:[n]},[{criterion_id:'a'}],'mutating')
+    assert.equal(normalize(node).nodes[0]?.yonwork?.chat_send,true)
+    for(const bad of [
+      {...node,yonwork:undefined}, {...node,risk_level:'read-meta'}, {...node,risk_level:'mutating'},
+      {...node,preferred_agent:'yonwork'}, {...node,preferred_agent:'yonwork:main'},
+      {...node,fallback_agents:['codex']}, {...node,required_resource_locks:[]},
+      {...node,capability:'code.analyze'},
+    ]) assert.throws(()=>normalize(bad),/YonWork/)
+  })
+
   test('defaults concurrency and locks while preserving declared node order', () => {
     const normalized = normalizeMissionPlan(forkJoin, acceptance, 'read-sensitive')
 

@@ -10,7 +10,8 @@
 
 export type { TaskEnvelopeV1 } from './generated/task-envelope.ts'
 export type { MissionPlanV1 } from './generated/mission-plan.ts'
-export { normalizeMissionPlan } from './mission-plan.ts'
+export { normalizeMissionPlan, yonWorkProfileFromRoute } from './mission-plan.ts'
+export type { YonWorkOutputV1 } from './generated/yonwork-output.ts'
 export type { TaskResultV1 } from './generated/task-result.ts'
 export type { ReviewDecisionV1 } from './generated/review-decision.ts'
 export type { MissionEventV1 } from './generated/mission-event.ts'
@@ -41,11 +42,14 @@ export {
   ArtifactConflictError,
   TaskConflictError,
   ReviewConflictError,
+  BindingConflictError,
 } from './store.ts'
 export type {
   Store,
   CreateMissionInput,
   CreateTaskInput,
+  ClaimTaskBindingInput,
+  ClaimTaskBindingResult,
   TransitionTaskInput,
   AppendEventInput,
   TaskQuery,

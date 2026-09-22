@@ -48,6 +48,7 @@
               }
             }
           },
+          "yonwork": {"type": "object", "additionalProperties": false, "required": ["chat_send", "policy_sha256"], "properties": {"chat_send": {"const": true}, "policy_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}, "description": "YonWork permission request and immutable effective-policy pin. This is not an approval. yonwork.validate requires controlled risk, an explicit yonwork:cmap-* profile without fallback, and the yonwork:host lock."},
           "preferred_agent": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
           "fallback_agents": {
             "type": "array",

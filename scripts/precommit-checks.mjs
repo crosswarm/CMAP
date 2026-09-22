@@ -139,6 +139,7 @@ const GENERATED_MAP = [
   { schema: 'mission-query.v1.schema.json', generated: 'mission-query.ts' },
   { schema: 'mission-event.v1.schema.json', generated: 'mission-event.ts' },
   { schema: 'codex-output.v1.schema.json', generated: 'codex-output.ts' },
+  { schema: 'yonwork-output.v1.schema.json', generated: 'yonwork-output.ts' },
   { schema: 'task-envelope.v1.schema.json', generated: 'task-envelope.ts' },
   { schema: 'task-result.v1.schema.json', generated: 'task-result.ts' },
   { schema: 'review-decision.v1.schema.json', generated: 'review-decision.ts' },

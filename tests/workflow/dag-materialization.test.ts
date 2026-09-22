@@ -211,6 +211,23 @@ const driveNodeToReworkComplete = async (
 }
 
 describe('DAG materialization', () => {
+  test('materializes frozen YonWork permission and policy without inventing approval', async () => {
+    const store=new MemoryStore()
+    const yonPlan={...plan,nodes:plan.nodes.map(n=>n.node_id==='rootA'?{...n,capability:'yonwork.validate',risk_level:'controlled' as const,preferred_agent:'yonwork:cmap-test',fallback_agents:[],required_resource_locks:[{resource:'yonwork:host',ttl_seconds:15}],yonwork:{chat_send:true as const,policy_sha256:'a'.repeat(64)}}:n)}
+    const m=mission('mis-yonwork-materialize',{constraints:{risk_level:'mutating',max_additional_cycles:1,plan:yonPlan}})
+    await store.createMission({mission:m,actor:ACTOR})
+    const {taskId}=await materializeDagNode({store,workRoot:await mkdtemp(join(tmpdir(),'cmap-yon-'))},{missionId:m.id,nodeId:'rootA',attempt:1,acceptedDeps:{}})
+    const task=(await store.getTask(taskId))!
+    assert.equal(task.envelope.permissions.yonwork?.chat_send,true)
+    assert.equal(task.envelope.inputs?.parameters?.['yonwork_policy_sha256'],'a'.repeat(64))
+    assert.equal(task.state,'DRAFT')
+    assert.equal((await store.listPendingApprovals(m.id)).length,0)
+    const completed={...task,result:result(m.id,taskId,1,'A')}
+    assert.equal(dagAttemptSatisfiesNode(m,yonPlan.nodes[0]!,completed),true)
+    assert.equal(dagAttemptSatisfiesNode(m,yonPlan.nodes[0]!,{...completed,envelope:{...task.envelope,permissions:{forbidden:[]}}}),false)
+    assert.equal(dagAttemptSatisfiesNode(m,yonPlan.nodes[0]!,{...completed,envelope:{...task.envelope,inputs:{parameters:{yonwork_policy_sha256:'b'.repeat(64)}}}}),false)
+  })
+
   test('rejects a parent task directory redirected outside the work root', async () => {
     const store = new MemoryStore(), m = mission('mis-parent-symlink')
     await store.createMission({mission:m, actor:ACTOR})

@@ -9,8 +9,10 @@
  * 脏数据，而审计流一旦失真就再也无法复盘。
  */
 
+import { isDeepStrictEqual } from 'node:util'
+
 import type { TaskResultV1 } from './generated/task-result.ts'
-import { assertTransition } from './task-state.ts'
+import { assertTransition, IllegalTransitionError } from './task-state.ts'
 import type {
   Mission,
   MissionState,
@@ -33,12 +35,15 @@ import type {
   AppendEventInput,
   MissionQuery,
   TaskQuery,
+  ClaimTaskBindingInput,
+  ClaimTaskBindingResult,
 } from './store.ts'
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
 import { assertSameMissionInput } from './mission-input.ts'
 import {
   ArtifactConflictError,
+  BindingConflictError,
   ConcurrentModificationError,
   NotFoundError,
   WriteVerificationError,
@@ -61,6 +66,7 @@ const missionEventType = (state: MissionState): EventType => {
 }
 
 const cloneTask = (task: TaskRecord): TaskRecord => structuredClone(task) as TaskRecord
+const cloneEvent = (event: TaskEvent): TaskEvent => structuredClone(event) as TaskEvent
 const cloneReview = (review: Review): Review => structuredClone(review) as Review
 
 export class MemoryStore implements Store {
@@ -106,17 +112,17 @@ export class MemoryStore implements Store {
       mission_id: missionId,
       task_id: taskId,
       attempt: null,
-      actor,
+      actor: structuredClone(actor),
       causation_id: causationId,
       correlation_id: missionId,
       trace_id: null,
       lamport: this.#nextLamport(),
       idempotency_key: idempotencyKey,
-      payload,
+      payload: structuredClone(payload),
     }
     this.#events.push(event)
     this.#seenKeys.set(idempotencyKey, event.event_id)
-    return event
+    return cloneEvent(event)
   }
 
   // ---------------------------------------------------------- Mission
@@ -267,6 +273,41 @@ export class MemoryStore implements Store {
     return cloneTask(back)
   }
 
+  async claimTaskBinding(input: ClaimTaskBindingInput): Promise<ClaimTaskBindingResult> {
+    const t = this.#tasks.get(input.taskId)
+    if (!t) throw new NotFoundError('Task', input.taskId)
+
+    if (t.binding) {
+      if (isDeepStrictEqual(t.binding, input.binding)) {
+        return { task: cloneTask(t), claimed: false }
+      }
+      throw new BindingConflictError(input.taskId)
+    }
+    if (t.state !== 'QUEUED' && t.state !== 'WAITING_RESOURCE') {
+      throw new IllegalTransitionError(t.state, 'RUNNING')
+    }
+
+    const next: TaskRecord = {
+      ...t,
+      state: 'RUNNING',
+      binding: structuredClone(input.binding),
+      lamport: this.#lamport + 1,
+      updated_at: new Date().toISOString(),
+    }
+    this.#tasks.set(t.id, next)
+    this.#record(
+      t.mission_id, t.id, 'TASK_DISPATCH_INTENT', input.actor,
+      `task-dispatch-intent:${t.id}:${input.binding.adapter}:${input.binding.remote_task_id}`,
+      { from: t.state, to: 'RUNNING', binding: input.binding },
+    )
+
+    const back = this.#tasks.get(t.id)
+    if (back?.state !== 'RUNNING' || !isDeepStrictEqual(back.binding, input.binding)) {
+      throw new WriteVerificationError('Task', t.id, 'claim binding 回读不符')
+    }
+    return { task: cloneTask(back), claimed: true }
+  }
+
   async setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord> {
     const t = this.#tasks.get(taskId)
     if (!t) throw new NotFoundError('Task', taskId)
@@ -307,23 +348,24 @@ export class MemoryStore implements Store {
     const existingId = this.#seenKeys.get(input.event.idempotency_key)
     if (existingId) {
       const found = this.#events.find((e) => e.event_id === existingId)
-      if (found) return found
+      if (found) return cloneEvent(found)
     }
 
     const event: TaskEvent = {
-      ...input.event,
+      ...structuredClone(input.event),
       event_id: this.#nextId('evt'),
       lamport: this.#nextLamport(),
     }
     this.#events.push(event)
     this.#seenKeys.set(event.idempotency_key, event.event_id)
-    return event
+    return cloneEvent(event)
   }
 
   async listEvents(missionId: string): Promise<readonly TaskEvent[]> {
     return this.#events
       .filter((e) => e.mission_id === missionId)
       .sort((a, b) => a.lamport - b.lamport)
+      .map(cloneEvent)
   }
 
   async listUndeliveredEvents(limit: number): Promise<readonly TaskEvent[]> {
@@ -331,6 +373,7 @@ export class MemoryStore implements Store {
       .filter((e) => !this.#delivered.has(e.event_id))
       .sort((a, b) => a.lamport - b.lamport)
       .slice(0, limit)
+      .map(cloneEvent)
   }
 
   async markEventDelivered(eventId: string): Promise<void> {

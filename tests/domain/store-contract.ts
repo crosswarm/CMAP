@@ -16,6 +16,7 @@ import type {
   TaskRecord,
   EventActor,
   TaskState,
+  RemoteTaskBinding,
   Approval,
   ResourceLock,
   Artifact,
@@ -27,7 +28,7 @@ import {
   LockUnavailableError,
 } from '#domain-model'
 import { MissionConflictError } from '../../packages/domain-model/src/mission-input.ts'
-import { ReviewConflictError, TaskConflictError } from '../../packages/domain-model/src/store.ts'
+import { BindingConflictError, ReviewConflictError, TaskConflictError } from '../../packages/domain-model/src/store.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test-runner' }
 const T0 = '2026-08-02T00:00:00.000Z'
@@ -154,6 +155,16 @@ const taskResult = (taskId: string, missionId: string, passed = true): TaskResul
       media_type: 'application/json', size_bytes: 42, sha256: 'd'.repeat(64),
     },
   ],
+})
+
+const binding = (remoteTaskId = 'remote-1'): RemoteTaskBinding => ({
+  adapter: 'yonwork-adapter',
+  remote_task_id: remoteTaskId,
+  remote_context_id: 'ctx-1',
+  protocol: 'yonwork-host',
+  protocol_version: '1.0.0',
+  runner_id: 'runner-1',
+  provider_session_id: 'sess-1',
 })
 
 const review = (
@@ -865,6 +876,159 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
     })
 
     describe('任务绑定持久化（跨进程幂等的基础）', () => {
+      test('claimTaskBinding 在 QUEUED 上原子绑定、转 RUNNING 并写派发意图事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY', 'QUEUED'])
+
+        const before = await s.listEvents('mis-1')
+        const out = await s.claimTaskBinding({ taskId: 'tsk-1', binding: binding(), actor: ACTOR })
+        const events = await s.listEvents('mis-1')
+        const intent = events.at(-1)
+
+        assert.equal(out.claimed, true)
+        assert.equal(out.task.state, 'RUNNING')
+        assert.deepEqual(out.task.binding, binding())
+        assert.equal(events.length, before.length + 1)
+        assert.equal(intent?.event_type, 'TASK_DISPATCH_INTENT')
+        assert.deepEqual(intent?.payload, {
+          from: 'QUEUED',
+          to: 'RUNNING',
+          binding: binding(),
+        })
+      })
+
+      test('claimTaskBinding 可从 WAITING_RESOURCE 恢复派发', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY', 'QUEUED', 'WAITING_RESOURCE'])
+
+        const out = await s.claimTaskBinding({ taskId: 'tsk-1', binding: binding(), actor: ACTOR })
+
+        assert.equal(out.claimed, true)
+        assert.equal(out.task.state, 'RUNNING')
+        assert.deepEqual(out.task.binding, binding())
+      })
+
+      test('claimTaskBinding 同一 binding 重放不改当前状态、结果或事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY', 'QUEUED'])
+        await s.claimTaskBinding({ taskId: 'tsk-1', binding: binding(), actor: ACTOR })
+        await s.setTaskResult('tsk-1', taskResult('tsk-1', 'mis-1'))
+        await s.transitionTask({
+          taskId: 'tsk-1', to: 'VERIFYING', actor: ACTOR,
+          eventType: 'HARD_GATE_EVALUATED', idempotencyKey: 'tsk-1:verifying',
+        })
+        const eventCount = (await s.listEvents('mis-1')).length
+
+        const replay = await s.claimTaskBinding({ taskId: 'tsk-1', binding: binding(), actor: ACTOR })
+
+        assert.equal(replay.claimed, false)
+        assert.equal(replay.task.state, 'VERIFYING')
+        assert.equal(replay.task.result?.status, 'completed')
+        assert.equal((await s.listEvents('mis-1')).length, eventCount)
+      })
+
+      test('claimTaskBinding 的审计事件不受调用方对象或读取方对象后续修改影响', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY', 'QUEUED'])
+        const b = binding()
+        const actor: EventActor = { type: 'system', id: 'dispatcher', runner_id: 'runner-1' }
+
+        await s.claimTaskBinding({ taskId: 'tsk-1', binding: b, actor })
+        ;(b as { remote_task_id: string }).remote_task_id = 'mutated-remote'
+        ;(actor as { id: string }).id = 'mutated-actor'
+
+        const first = (await s.listEvents('mis-1')).find((e) => e.event_type === 'TASK_DISPATCH_INTENT')
+        assert.equal(first?.actor.id, 'dispatcher')
+        assert.equal((first?.payload.binding as RemoteTaskBinding | undefined)?.remote_task_id, 'remote-1')
+
+        ;((first?.payload.binding as RemoteTaskBinding) as { remote_task_id: string }).remote_task_id = 'tampered-read'
+        ;(first?.actor as { id: string }).id = 'tampered-reader'
+
+        const reread = (await s.listEvents('mis-1')).find((e) => e.event_type === 'TASK_DISPATCH_INTENT')
+        assert.equal(reread?.actor.id, 'dispatcher')
+        assert.equal((reread?.payload.binding as RemoteTaskBinding | undefined)?.remote_task_id, 'remote-1')
+      })
+
+      test('claimTaskBinding 不同 binding 冲突且不追加事件', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY', 'QUEUED'])
+        await s.claimTaskBinding({ taskId: 'tsk-1', binding: binding(), actor: ACTOR })
+        const eventCount = (await s.listEvents('mis-1')).length
+
+        await assert.rejects(
+          () => s.claimTaskBinding({ taskId: 'tsk-1', binding: binding('remote-2'), actor: ACTOR }),
+          BindingConflictError,
+        )
+        assert.equal((await s.listEvents('mis-1')).length, eventCount)
+      })
+
+      test('claimTaskBinding 只允许未绑定的 QUEUED/WAITING_RESOURCE 任务', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('draft', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('approval', 'mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('done', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'approval', ['READY', 'APPROVAL_REQUIRED'])
+        await driveTo(s, 'done', ['READY', 'QUEUED', 'RUNNING', 'VERIFYING', 'REVIEWING', 'COMPLETED'])
+
+        await assert.rejects(
+          () => s.claimTaskBinding({ taskId: 'ghost', binding: binding(), actor: ACTOR }),
+          /不存在/,
+        )
+        await assert.rejects(
+          () => s.claimTaskBinding({ taskId: 'draft', binding: binding(), actor: ACTOR }),
+          IllegalTransitionError,
+        )
+        await assert.rejects(
+          () => s.claimTaskBinding({ taskId: 'approval', binding: binding(), actor: ACTOR }),
+          IllegalTransitionError,
+        )
+        await assert.rejects(
+          () => s.claimTaskBinding({ taskId: 'done', binding: binding(), actor: ACTOR }),
+          IllegalTransitionError,
+        )
+        assert.equal((await s.getTask('draft'))?.binding, null)
+        assert.equal((await s.getTask('approval'))?.binding, null)
+        assert.equal((await s.getTask('done'))?.binding, null)
+      })
+
+      test('claimTaskBinding 并发时只有一个调用者赢得未绑定任务', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+        await driveTo(s, 'tsk-1', ['READY', 'QUEUED'])
+
+        const results = await Promise.allSettled([
+          s.claimTaskBinding({ taskId: 'tsk-1', binding: binding('remote-a'), actor: ACTOR }),
+          s.claimTaskBinding({ taskId: 'tsk-1', binding: binding('remote-b'), actor: ACTOR }),
+        ])
+        const claimed = results.filter(
+          (r): r is PromiseFulfilledResult<Awaited<ReturnType<Store['claimTaskBinding']>>> =>
+            r.status === 'fulfilled' && r.value.claimed,
+        )
+        const conflicts = results.filter(
+          (r): r is PromiseRejectedResult =>
+            r.status === 'rejected' && r.reason instanceof BindingConflictError,
+        )
+
+        assert.equal(claimed.length, 1)
+        assert.equal(conflicts.length, 1)
+        assert.equal(
+          (await s.listEvents('mis-1')).filter((e) => e.event_type === 'TASK_DISPATCH_INTENT').length,
+          1,
+        )
+      })
+
       test('binding 写入后可读回，runner_id 不丢失', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })

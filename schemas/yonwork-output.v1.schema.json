@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/yonwork-output/v1",
+  "title": "YonWork Output v1",
+  "description": "Strict final reply captured as a local report. No identities, permissions, remote file claims or caller-selected paths. The report proves the reply contents only; business-operation claims need independent observations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "criterion_results", "findings", "error"],
+  "properties": {
+    "status": { "$ref": "codex-output.v1.schema.json#/properties/status" },
+    "summary": { "type": "string", "maxLength": 2000 },
+    "criterion_results": {
+      "type": "array", "maxItems": 50,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["criterion_id", "actual", "passed"],
+        "properties": {
+          "criterion_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "actual": { "type": "string", "maxLength": 8192 },
+          "passed": { "type": "boolean" }
+        }
+      }
+    },
+    "findings": { "$ref": "codex-output.v1.schema.json#/properties/findings" },
+    "error": { "$ref": "codex-output.v1.schema.json#/properties/error" }
+  }
+}

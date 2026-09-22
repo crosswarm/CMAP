@@ -34,6 +34,13 @@ export interface MissionPlanV1 {
         resource: string
         ttl_seconds: number
       }[]
+      /**
+       * YonWork permission request and immutable effective-policy pin. This is not an approval. yonwork.validate requires controlled risk, an explicit yonwork:cmap-* profile without fallback, and the yonwork:host lock.
+       */
+      yonwork?: {
+        chat_send: true
+        policy_sha256: string
+      }
       preferred_agent?: string
       fallback_agents?: string[]
     },
@@ -54,6 +61,13 @@ export interface MissionPlanV1 {
         resource: string
         ttl_seconds: number
       }[]
+      /**
+       * YonWork permission request and immutable effective-policy pin. This is not an approval. yonwork.validate requires controlled risk, an explicit yonwork:cmap-* profile without fallback, and the yonwork:host lock.
+       */
+      yonwork?: {
+        chat_send: true
+        policy_sha256: string
+      }
       preferred_agent?: string
       fallback_agents?: string[]
     }[]

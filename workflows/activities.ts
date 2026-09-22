@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 import { Context } from '@temporalio/activity'
 
@@ -32,8 +33,8 @@ import type {
   ProgressSnapshot,
 } from '#domain-model'
 import { detectNoProgress, needsApproval, RISK_LEVELS, ApprovalDecisionConflictError } from '#domain-model'
-import { recomputeCriterionPassed } from '#domain-model'
-import { AdapterError, type AgentAdapter } from '#adapter-sdk'
+import { recomputeCriterionPassed, yonWorkProfileFromRoute } from '#domain-model'
+import { AdapterError, type AgentAdapter, type DispatchContext } from '#adapter-sdk'
 
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -322,7 +323,9 @@ export const createActivities = (deps: ActivityDeps) => {
           scope,
           requested_by: `system:${runnerId}`,
           risk_level: t.risk,
-          reason: `任务 ${taskId} 风险级别为 ${scope}，执行前需要人工授权`,
+          reason: t.capability === 'yonwork.validate'
+            ? `任务 ${taskId}：${t.envelope.goal.statement}；目标 ${t.envelope.execution_policy.preferred_agent}；policy ${String(t.envelope.inputs?.parameters?.['yonwork_policy_sha256'])}；仅独立会话、无投递/附件、回复报告；controlled 授权不包含配置或业务修改`
+            : `任务 ${taskId} 风险级别为 ${scope}，执行前需要人工授权`,
           evidence_artifact_ids: [],
           decision: 'pending',
           decided_by: null,
@@ -419,6 +422,42 @@ export const createActivities = (deps: ActivityDeps) => {
       const envelope = existing.envelope as TaskEnvelopeV1
       const selectedAdapter = await selectAdapter(envelope)
 
+      const assertPreparedAuthority = async (expectedBinding?: RemoteTaskBinding, observedPolicy?: string): Promise<void> => {
+        const task = await store.getTask(taskId)
+        const policy = envelope.inputs?.parameters?.['yonwork_policy_sha256']
+        if (!task || !isDeepStrictEqual(task.envelope, envelope) ||
+          task.capability !== 'yonwork.validate' || task.risk !== 'controlled' ||
+          envelope.classification.risk_level !== 'controlled' ||
+          !yonWorkProfileFromRoute(envelope.execution_policy.preferred_agent) ||
+          envelope.execution_policy.preferred_agent !== selectedAdapter.agentId ||
+          envelope.execution_policy.fallback_agents?.length ||
+          envelope.permissions.yonwork?.chat_send !== true ||
+          typeof policy !== 'string' || !/^[a-f0-9]{64}$/.test(policy) ||
+          (observedPolicy !== undefined && observedPolicy !== policy) ||
+          !envelope.execution_policy.required_resource_locks?.some(lock => lock.resource === 'yonwork:host') ||
+          (expectedBinding ? task.state !== 'RUNNING' || !isDeepStrictEqual(task.binding, expectedBinding)
+            : !['READY','QUEUED','WAITING_RESOURCE'].includes(task.state))) {
+          throw new Error('Prepared dispatch task, profile, permission or policy mismatch')
+        }
+        const now = Date.now()
+        const approval = await store.getApproval(`apr:${taskId}:controlled`)
+        if (!approval || approval.task_id !== taskId || approval.mission_id !== task.mission_id ||
+          approval.scope !== 'controlled' || approval.decision !== 'approved' ||
+          !approval.decided_by || approval.decided_by === approval.requested_by ||
+          /^(agent|system):/i.test(approval.decided_by) ||
+          !Number.isFinite(Date.parse(approval.decided_at ?? '')) || Date.parse(approval.decided_at!) > now ||
+          !Number.isFinite(Date.parse(approval.expires_at)) || Date.parse(approval.expires_at) <= now) {
+          throw new Error('Prepared dispatch requires a current controlled approval')
+        }
+        const locks = await store.listActiveLocks(new Date(now).toISOString())
+        if (!locks.some(lock => lock.resource === 'yonwork:host' && lock.task_id === taskId &&
+          lock.mission_id === task.mission_id && lock.holder_runner_id === runnerId &&
+          lock.released_at === null && Date.parse(lock.expires_at) > Date.now())) {
+          throw new Error('Prepared dispatch requires an active owned YonWork host lease')
+        }
+      }
+      if (selectedAdapter.prepareBinding) await assertPreparedAuthority()
+
       if (existing.state === 'READY') {
         await store.transitionTask({
           taskId, to: 'QUEUED', actor: ACTOR,
@@ -433,7 +472,7 @@ export const createActivities = (deps: ActivityDeps) => {
       const worktree = workRoot ? join(workRoot, taskId) : null
       if (worktree) await mkdir(worktree, { recursive: true })
 
-      const binding = await selectedAdapter.startTask(envelope, {
+      const context: DispatchContext = {
         // P4 接入鉴权后换成短期、受众绑定的令牌。现在是本机单租户，
         // 但字段先占住位置，免得那时才发现调用方根本没有令牌可传。
         token: process.env['CMAP_RUNNER_TOKEN'] ?? 'local-dev-token',
@@ -442,7 +481,28 @@ export const createActivities = (deps: ActivityDeps) => {
         correlation_id: envelope.identity.idempotency_key,
         ...(worktree ? { worktree } : {}),
         deadline_at: new Date(Date.now() + timeoutMs).toISOString(),
-      })
+      }
+
+      if (selectedAdapter.prepareBinding) {
+        const prepared = selectedAdapter.prepareBinding(envelope, context)
+        if (prepared.adapter !== selectedAdapter.adapterId || prepared.runner_id !== runnerId) {
+          throw new Error('Prepared binding identity mismatch')
+        }
+        const claim = await store.claimTaskBinding({taskId,binding:prepared,actor:ACTOR})
+        if (!claim.claimed) return {dispatched:false,remoteTaskId:claim.task.binding!.remote_task_id}
+        await assertPreparedAuthority(prepared)
+        let checked = false
+        const binding = await selectedAdapter.startTask(envelope, {...context,beforeSend:async (candidate,policySha256) => {
+          if (!isDeepStrictEqual(candidate,prepared)) throw new Error('Prepared binding changed before send')
+          await assertPreparedAuthority(prepared,policySha256)
+          checked = true
+        }})
+        if (!checked || !isDeepStrictEqual(binding,prepared)) throw new Error('Prepared dispatch contract mismatch')
+        // RUNNING and intent were persisted before effects; startTask return is not remote completion.
+        return {dispatched:true,remoteTaskId:binding.remote_task_id}
+      }
+
+      const binding = await selectedAdapter.startTask(envelope, context)
 
       if (binding.adapter !== selectedAdapter.adapterId) {
         throw new Error(`Adapter binding mismatch: selected ${selectedAdapter.adapterId}, got ${binding.adapter}`)
@@ -1054,6 +1114,7 @@ export const createActivities = (deps: ActivityDeps) => {
     // Activity 重试必须用已验证的缓存结果补齐 registry，而不是重跑 Agent。
     const seen = new Set((await store.listArtifacts(t.id)).map((x) => x.artifact_id))
     const now = new Date()
+    const unassessedReply = t.capability === 'yonwork.validate' && binding.adapter === 'yonwork-adapter'
     for (const art of result.artifacts) {
       if (seen.has(art.artifact_id)) continue
       const record: Artifact = {
@@ -1073,15 +1134,15 @@ export const createActivities = (deps: ActivityDeps) => {
           execution_session_id:
             result.session?.provider_session_id ?? binding.remote_task_id,
         },
-        provenance: { runner_id: binding.runner_id },
+        provenance: { runner_id: binding.runner_id, ...(unassessedReply ? {content_assessment:'unassessed'} : {}) },
         retention: {
           retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(),
           immutable: true,
         },
         security: {
-          classification: 'internal',
-          contains_secrets: false,
-          contains_pii: false,
+          classification: unassessedReply ? 'restricted' : 'internal',
+          contains_secrets: unassessedReply,
+          contains_pii: unassessedReply,
           allowed_roles: [],
         },
         created_at: now.toISOString(),

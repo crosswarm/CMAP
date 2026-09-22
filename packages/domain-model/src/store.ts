@@ -65,6 +65,17 @@ export interface TransitionTaskInput {
   readonly expectedFrom?: TaskState
 }
 
+export interface ClaimTaskBindingInput {
+  readonly taskId: string
+  readonly binding: RemoteTaskBinding
+  readonly actor: EventActor
+}
+
+export interface ClaimTaskBindingResult {
+  readonly task: TaskRecord
+  readonly claimed: boolean
+}
+
 export interface AppendEventInput {
   readonly event: Omit<TaskEvent, 'event_id' | 'lamport'>
 }
@@ -135,6 +146,13 @@ export class ReviewConflictError extends Error {
   constructor(reviewId: string) {
     super(`Review ${reviewId} 写入参数与既有记录不一致`)
     this.name = 'ReviewConflictError'
+  }
+}
+
+export class BindingConflictError extends Error {
+  constructor(taskId: string) {
+    super(`Task ${taskId} 已绑定到不同的远端任务`)
+    this.name = 'BindingConflictError'
   }
 }
 
@@ -212,6 +230,7 @@ export interface Store {
    * 没有它，Temporal 重试会重复 spawn Agent 进程。
    */
   setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord>
+  claimTaskBinding(input: ClaimTaskBindingInput): Promise<ClaimTaskBindingResult>
   /**
    * 持久化 Agent 交回的归一化结果。
    *

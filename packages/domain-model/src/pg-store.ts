@@ -18,10 +18,11 @@
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import pg from 'pg'
 
 import type { TaskResultV1 } from './generated/task-result.ts'
-import { assertTransition } from './task-state.ts'
+import { assertTransition, IllegalTransitionError } from './task-state.ts'
 import type { TaskState } from './task-state.ts'
 import type {
   Mission,
@@ -46,12 +47,15 @@ import type {
   AppendEventInput,
   MissionQuery,
   TaskQuery,
+  ClaimTaskBindingInput,
+  ClaimTaskBindingResult,
 } from './store.ts'
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
 import { assertSameMissionInput } from './mission-input.ts'
 import {
   ArtifactConflictError,
+  BindingConflictError,
   ConcurrentModificationError,
   NotFoundError,
   WriteVerificationError,
@@ -491,6 +495,48 @@ export class PgStore implements Store {
       throw new WriteVerificationError('Task', taskId, 'binding 回读不符')
     }
     return back
+  }
+
+  async claimTaskBinding(input: ClaimTaskBindingInput): Promise<ClaimTaskBindingResult> {
+    return this.#tx(async (c) => {
+      const cur = await c.query('SELECT * FROM tasks WHERE id = $1 FOR UPDATE', [input.taskId])
+      if (!cur.rows.length) throw new NotFoundError('Task', input.taskId)
+
+      const task = toTask(cur.rows[0] as Record<string, unknown>)
+      if (task.binding) {
+        if (isDeepStrictEqual(task.binding, input.binding)) {
+          return { task, claimed: false }
+        }
+        throw new BindingConflictError(input.taskId)
+      }
+      if (task.state !== 'QUEUED' && task.state !== 'WAITING_RESOURCE') {
+        throw new IllegalTransitionError(task.state, 'RUNNING')
+      }
+
+      const upd = await c.query(
+        `UPDATE tasks
+         SET state = 'RUNNING', binding = $2, lamport = nextval('lamport_seq'), updated_at = now()
+         WHERE id = $1 AND binding IS NULL AND state = $3
+         RETURNING *`,
+        [input.taskId, JSON.stringify(input.binding), task.state],
+      )
+      if (upd.rowCount !== 1) {
+        throw new ConcurrentModificationError(input.taskId, task.state, task.state)
+      }
+
+      await this.#insertEvent(c, {
+        missionId: task.mission_id, taskId: task.id, type: 'TASK_DISPATCH_INTENT',
+        actor: input.actor,
+        idempotencyKey: `task-dispatch-intent:${task.id}:${input.binding.adapter}:${input.binding.remote_task_id}`,
+        payload: { from: task.state, to: 'RUNNING', binding: input.binding },
+      })
+
+      const back = toTask(upd.rows[0] as Record<string, unknown>)
+      if (back.state !== 'RUNNING' || !isDeepStrictEqual(back.binding, input.binding)) {
+        throw new WriteVerificationError('Task', task.id, 'claim binding 回读不符')
+      }
+      return { task: back, claimed: true }
+    })
   }
 
   async setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord> {

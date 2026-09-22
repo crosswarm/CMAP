@@ -1,0 +1,58 @@
+{
+  "planning_state": "complete",
+  "plan_revision": 3,
+  "planning_artifacts": {
+    "prd": "docs/plans/cmap-yonwork-plan.md",
+    "test_spec": "docs/plans/cmap-yonwork-tests.md"
+  },
+  "ralplan_architect_review": {
+    "review_kind": "technical_architecture",
+    "reviewer": "yonwork_architect_review",
+    "verdict": "APPROVE",
+    "plan_revision": 3,
+    "plan_sha256": "2d7849bfb3f1d850c7dc2054930367c4f4369ac427d00b2b96e8334a0c964720",
+    "reviewed_at": "2026-09-22T00:29:39Z",
+    "must_fix_items": [],
+    "accepted_findings": [
+      "atomic-intent-and-running-state",
+      "exact-session-effective-policy",
+      "post-prepare-control-owned-guard",
+      "owned-gateway-terminal-proof",
+      "captured-reply-security-metadata"
+    ],
+    "authorizes_actions": false
+  },
+  "ralplan_critic_review": {
+    "reviewer": "yonwork_critic",
+    "review_kind": "technical_plan_critic",
+    "verdict": "APPROVE",
+    "plan_sha256": "2d7849bfb3f1d850c7dc2054930367c4f4369ac427d00b2b96e8334a0c964720",
+    "reviewed_at": "2026-09-22T00:34:46.345945+00:00",
+    "must_fix_items": [],
+    "authorizes_actions": false
+  },
+  "ralplan_consensus_gate": {
+    "complete": true,
+    "completed_order": [
+      "architect",
+      "critic"
+    ]
+  },
+  "execution_handoff": {
+    "lane": "existing-native-goal",
+    "status": "active",
+    "full_goal_unchanged": true,
+    "scope": "Implement and verify approved YonWork core chain; no fabricated live approval or policy proof"
+  },
+  "jev_advice": {
+    "model": "jev-1.13.0",
+    "choice": "cli_owned_run",
+    "confidence": 0.68,
+    "probabilities": {
+      "cli_owned_run": 0.76,
+      "insufficient": 0.24,
+      "direct_http": 0,
+      "diagnostics_only": 0
+    }
+  }
+}

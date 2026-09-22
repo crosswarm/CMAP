@@ -8,7 +8,7 @@
  * 启动前先确认 Temporal 真的可用：node scripts/verify-temporal.mjs。
  * 容器 Up、端口 LISTEN 都不作数。
  *
- * 这里注入真实 Adapter：默认 Codex，CMAP_AGENTS 可显式注册 Kimi。
+ * 默认 Codex；CMAP_AGENTS 可注册 Kimi，YonWork 另需显式 CMAP_YONWORK_AGENT_ID。
  * 想只验证编排而不真跑 Agent，用 tests/workflow 里的假 Adapter。
  */
 
@@ -26,6 +26,7 @@ import { Worker, NativeConnection } from '@temporalio/worker'
 import { PgStore } from '#domain-model'
 import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
+import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
 import { parseAdapterNames } from './adapter-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
 import { createDagActivities } from '../../../workflows/dag-activities.ts'
@@ -48,6 +49,8 @@ const adapterNames = parseAdapterNames(process.env['CMAP_AGENTS'])
 const adapters = adapterNames.map((name) =>
   name === 'kimi'
     ? new KimiAdapter()
+    : name === 'yonwork'
+      ? new YonWorkAdapter({profileId:process.env['CMAP_YONWORK_AGENT_ID'] ?? '',runnerId})
     : new CodexAdapter({
         outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
       }),

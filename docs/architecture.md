@@ -209,7 +209,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | kimi-adapter | ✅ 本机 macOS P3；真实单跳与 Temporal → Kimi 完成，见 [运行说明](kimi-adapter.md) 与 [验证](verification-kimi-2026-09-21.md) |
 | DAG 执行 | ✅ 本机显式 dag/v1；API → Temporal → Codex/Kimi 分叉汇合、依赖产物与节点验收已验证，见 [验证](verification-dag-2026-09-21.md)；不包含自动 Planner |
 | 自然语言 Planner 桥接 | 🟡 外部 CLI 与契约校验已实现；Claude 真实调用返回 403，端到端验证未完成，见 [Planner](planner.md) |
-| yonwork-adapter | ⬜ P3；[Host 传输探测](verification-yonwork-2026-09-21.md) 已通，Agent 派发/终态/证据闭环未实现 |
+| yonwork-adapter | 🟡 P3；受控派发、预写意图、相关终态与报告捕获已通过本地合成集成回归；真实专用 profile 闭环尚未验收，见 [运行说明](yonwork-adapter.md) 与 [验证](verification-yonwork-core-2026-09-22.md) |
 | 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 
 P2 后端出口验证记录在 `scripts/e2e-mission.mjs`（不代表 WebUI 或整个 P2 完成）：建 Mission → Workflow 派发 →
@@ -274,7 +274,7 @@ P4 迁移时**调度器与 Adapter 代码不应改动**。若需大改，说明�
 前几条来自 aiticket JobMaster 的静默失败实战：
 
 1. **无证据即失败** — 不得凭 rc=0 判成功；声明的产物缺失即 failed。
-2. **握手 ≠ 完成** — YonWork `chat send` 的 SSE 连接建立不能证明消息完成，必须观测到 `complete_observed` 终态。最容易误判成功的一处。
+2. **握手 ≠ 完成** — YonWork `chat send` 必须观测到匹配预定 runId 和 sessionKey 的 Gateway `final/error/aborted`；Host `chat.complete`、EOF、退出码与 abort ACK 都不能证明远端终态。
 3. **写入即校验** — 状态写入后立即回读，不信返回值。
 4. **自检端点** — 进程存活 ≠ 在调度。
 5. **时钟显式化** — 一律 UTC；排序用 `lamport` 不用 wall clock。

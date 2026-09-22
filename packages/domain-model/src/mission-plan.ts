@@ -9,6 +9,9 @@ const RISKS: readonly RiskLevel[] = ['read-meta', 'read-sensitive', 'controlled'
 
 type MissionPlanNode = MissionPlanV1['nodes'][number]
 
+export const yonWorkProfileFromRoute = (route: string | undefined): string | null =>
+  route && /^yonwork:cmap-[a-z0-9][a-z0-9_-]{0,58}$/.test(route) ? route.slice('yonwork:'.length) : null
+
 const readSchema = (name: string) =>
   JSON.parse(readFileSync(new URL(`../../../schemas/${name}.v1.schema.json`, import.meta.url), 'utf8'))
 const ajv = new Ajv2020({ strict: true })
@@ -40,6 +43,16 @@ const normalizeNode = (value: unknown, ceilingIndex: number): MissionPlanNode =>
 
   const required_resource_locks = node.required_resource_locks ?? []
   unique(required_resource_locks.map((lock) => lock.resource), `${node.node_id}.required_resource_locks.resource`)
+
+  if (node.capability === 'yonwork.validate') {
+    if (node.risk_level !== 'controlled' || !node.yonwork?.chat_send ||
+      !yonWorkProfileFromRoute(node.preferred_agent) || node.fallback_agents?.length ||
+      !required_resource_locks.some(lock => lock.resource === 'yonwork:host')) {
+      fail('YonWork 节点必须固定专用 profile、controlled scope、chat_send、policy hash 和 host lock，不允许替补')
+    }
+  } else if (node.yonwork || node.preferred_agent?.startsWith('yonwork:')) {
+    fail('YonWork 权限与路由只适用于 yonwork.validate')
+  }
 
   return {
     ...node,

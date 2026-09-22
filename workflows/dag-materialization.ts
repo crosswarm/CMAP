@@ -96,6 +96,9 @@ const assertEnvelopeMatchesNode = (mission: Mission, node: DagNode, task: TaskRe
   if (task.envelope.classification.requested_capability !== node.capability) return false
   if (task.envelope.classification.risk_level !== node.risk_level) return false
   if (task.envelope.goal.statement !== node.goal) return false
+  if (node.yonwork && (task.envelope.permissions.yonwork?.chat_send !== true ||
+    task.envelope.execution_policy.preferred_agent !== node.preferred_agent ||
+    task.envelope.inputs?.parameters?.['yonwork_policy_sha256'] !== node.yonwork.policy_sha256)) return false
   return isDeepStrictEqual(
     task.envelope.goal.success_definition,
     node.criterion_ids.map((id) => envelopeCriterion(criterionFor(mission, id))),
@@ -391,7 +394,7 @@ const buildEnvelope = (
   },
   inputs: {
     ...(artifactRefs && artifactRefs.length > 0 ? { artifact_refs: artifactRefs } : {}),
-    parameters: { dependency_task_ids: deps },
+    parameters: { dependency_task_ids: deps, ...(node.yonwork ? { yonwork_policy_sha256: node.yonwork.policy_sha256 } : {}) },
   },
   environment: { tenant: mission.tenant },
   execution_policy: {
@@ -401,7 +404,7 @@ const buildEnvelope = (
     max_attempts: 1,
     ...(node.required_resource_locks ? { required_resource_locks: node.required_resource_locks } : {}),
   },
-  permissions: { forbidden: [] },
+  permissions: { forbidden: [], ...(node.yonwork ? { yonwork: {chat_send: true} } : {}) },
   evidence_requirements: { required_artifact_roles: ['report'] },
   output_contract: { schema_uri: 'https://cmap.local/schemas/task-result/v1' },
 })
