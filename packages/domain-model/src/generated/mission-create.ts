@@ -20,6 +20,17 @@ export interface MissionCreateV1 {
   risk_level: 'read-meta' | 'read-sensitive' | 'controlled' | 'mutating'
   max_additional_cycles?: number
   plan?: MissionPlanV1
+  /**
+   * 可选：派发前从 Memross 共享记忆检索并冻结上下文快照，作为首个任务的 memory_context 输入证据交付（仅 inspect/v1，不能与 plan 同时出现）。检索主体与授权由控制面配置的 Memross 凭据在服务端判定，调用方只能缩小范围。Memross 不可用时该 Mission 失败关闭，不静默降级。
+   */
+  memory?: {
+    project_id: string
+    /**
+     * 省略时用 goal 的前 500 字。
+     */
+    query?: string
+    limit?: number
+  }
 }
 export interface Items {
   criterion_id: string

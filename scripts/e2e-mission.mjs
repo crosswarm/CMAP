@@ -8,6 +8,9 @@
  * 两种场景：
  *   node scripts/e2e-mission.mjs            一次过（accept 路径）
  *   node scripts/e2e-mission.mjs --rework   验收标准故意够不着，验证返工与升级
+ *   node scripts/e2e-mission.mjs --memory <project_id> [--memory-query <q>]
+ *                                          派发前从 Memross 冻结记忆快照，验证它真的进了 Agent 上下文
+ *                                          （Worker 需配置 MEMROSS_URL / MEMROSS_TOKEN）
  *
  * 前置：
  *   docker compose -f infra/docker-compose/docker-compose.yml up -d
@@ -44,6 +47,10 @@ const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
 // 要求 5 个会被补建文件满足，要求 -1 仍可能被 Agent 虚报满足；磁盘数量另行核验。
 // 这样才能在真实链路上验证「返工 → 预算耗尽 → 升级给人」，而不是只验证顺利路径。
 const reworkMode = process.argv.includes('--rework')
+const argAfter = (flag) => { const i = process.argv.indexOf(flag); return i > 0 ? process.argv[i + 1] : undefined }
+const memoryProject = argAfter('--memory')
+const memoryQuery = argAfter('--memory-query')
+if (reworkMode && memoryProject) throw new Error('--memory 与 --rework 不同时使用')
 
 const step = (n, msg) => console.log(`\n[${n}] ${msg}`)
 const ok = (msg) => console.log(`  ✓ ${msg}`)
@@ -70,8 +77,13 @@ await store.createMission({
     type: 'inspect',
     goal:
       '在当前工作目录下新建 sample/ 子目录，并在其中写入 3 个文本文件；' +
-      '随后统计 sample/ 下的文件数量，把统计结果写入 evidence/report.json。',
-    constraints: reworkMode ? { max_additional_cycles: 1 } : {},
+      '随后统计 sample/ 下的文件数量，把统计结果写入 evidence/report.json。' +
+      (memoryProject
+        ? '另外：输入证据里有 role=memory_context 的 Memross 记忆快照（Markdown，顶部有 JSON 清单）。' +
+          '读取它，把清单 items 中第一条的 block_id 原样写入 evidence/report.json 的 memory_block_id 字段；没有条目则写 null。'
+        : ''),
+    constraints: reworkMode ? { max_additional_cycles: 1 }
+      : memoryProject ? { memory: { project_id: memoryProject, ...(memoryQuery ? { query: memoryQuery } : {}), limit: 2 } } : {},
     // 机读验收标准：由确定性程序比对，不看 Agent 的措辞
     acceptance: [
       {
@@ -228,6 +240,24 @@ for (const a of artifacts) {
     fail(`证据 ${a.role} 哈希不符：账本 ${a.sha256}，实际 ${actual}`)
   }
   ok(`${a.role}: ${a.uri} 存在，sha256 一致（${bytes.byteLength} 字节）`)
+}
+
+if (memoryProject) {
+  step('5b', '记忆快照：信封引用、工作区字节、账本记录与 Agent 实际读取一致')
+  const ref = task.envelope.inputs?.artifact_refs?.find((r) => r.role === 'memory_context')
+  if (!ref) fail('信封里没有 memory_context 引用')
+  const record = artifacts.find((a) => a.artifact_id === ref.artifact_id)
+  if (!record || record.sha256 !== ref.sha256) fail('账本里没有与信封一致的 memory_context 记录')
+  const snapshot = (await readFile(join(workRoot, taskId, ref.uri))).toString('utf8')
+  if (createHash('sha256').update(snapshot).digest('hex') !== ref.sha256) fail('工作区快照与信封散列不一致')
+  const manifest = JSON.parse(snapshot.match(/```json\n([\s\S]*?)\n```/)?.[1] ?? 'null')
+  const expected = manifest?.items?.[0]?.block_id ?? null
+  ok(`快照 ${ref.artifact_id}：${manifest?.items?.length ?? 0} 个块，索引 ${manifest?.index_version}，search ${manifest?.search_request_id}`)
+  const report = artifacts.find((a) => a.role === 'report')
+  if (!report) fail('缺少 report 证据，无法核对 Agent 是否读取了快照')
+  const reported = JSON.parse(await readFile(isAbsolute(report.uri) ? report.uri : join(workRoot, taskId, report.uri), 'utf8'))
+  if (reported.memory_block_id !== expected) fail(`Agent 写出的 memory_block_id=${reported.memory_block_id}，快照第一条是 ${expected}`)
+  ok(`Agent 读取了快照：report.memory_block_id = ${expected}`)
 }
 
 // --------------------------------------------------------- 6. 事件流

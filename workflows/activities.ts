@@ -35,7 +35,10 @@ import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescri
 import { AdapterError, type AgentAdapter, type DispatchContext, type DispatchPermitSigner } from '#adapter-sdk'
 import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
 
-import {createLedgerTask, MISSION_ACTOR as ACTOR, type CreateTaskInput, type CreateTaskOutput} from './task-creation.ts'
+import {createLedgerTask, taskCreationId, MISSION_ACTOR as ACTOR, type CreateTaskInput, type CreateTaskOutput} from './task-creation.ts'
+import { MEMORY_ROLE, fetchMemorySnapshot, type MemoryDeps } from './memory-context.ts'
+import { INPUT_PAYLOAD, publishInput, safeChildDir, safeMkdir } from './artifact-files.ts'
+import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import { applyReviewApplication } from './review-application.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
 import { prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
@@ -147,6 +150,8 @@ export interface ActivityDeps {
   readonly approvalPollIntervalMs?: number
   /** 审批等待上限。默认 24 小时，超时按拒绝处理。 */
   readonly approvalWaitTimeoutMs?: number
+  /** Memross 记忆检索。Mission 要求记忆而未配置时失败关闭，不静默降级。 */
+  readonly memory?: MemoryDeps
 }
 
 export interface ApprovalGateOutput {
@@ -313,7 +318,47 @@ export const createActivities = (deps: ActivityDeps) => {
 
     /** 创建任务并返回其 id。id 在此生成，Workflow 只负责传递。 */
     async createTask(input: CreateTaskInput): Promise<CreateTaskOutput> {
-      return createLedgerTask(store,input)
+      // 记忆快照只附在 Mission 的首个任务上（无 creationKey、调用方未给输入证据）。
+      if (input.creationKey !== undefined || input.artifactRefs !== undefined) return createLedgerTask(store,input)
+      const mission = await store.getMission(input.missionId)
+      const memory = mission?.constraints['memory'] as { project_id: string; query?: string; limit?: number } | undefined
+      if (!mission || !memory) return createLedgerTask(store,input)
+      if (!workRoot) throw new Error('MEMORY_REQUIRES_WORKROOT')
+      const taskId = taskCreationId(input.missionId)
+      const { child } = await safeChildDir(workRoot, taskId)
+      // 重试幂等：任务已入账就沿用信封里冻结的快照引用，只复核字节，绝不重新检索——
+      // 重新检索可能拿到不同内容，导致同一任务的信封前后不一致。
+      const existing = await store.getTask(taskId)
+      let ref = existing?.envelope.inputs?.artifact_refs?.find((r) => r.role === MEMORY_ROLE)
+      if (existing && !ref) return createLedgerTask(store,input)
+      if (!ref) {
+        if (!deps.memory) throw new Error('MEMORY_NOT_CONFIGURED')
+        const { bytes } = await fetchMemorySnapshot(deps.memory, {
+          projectId: memory.project_id, query: (memory.query ?? mission.goal).slice(0, 500), limit: memory.limit ?? 3,
+        })
+        const digest = createHash('sha256').update(bytes).digest('hex')
+        const artifactId = `art_mem_${digest.slice(0, 32)}`
+        const bucket = createHash('sha256').update(artifactId).digest('hex')
+        await publishInput(await safeMkdir(child, ['inputs', 'memory', bucket]), bytes)
+        ref = { artifact_id: artifactId, uri: join('inputs', 'memory', bucket, INPUT_PAYLOAD), role: MEMORY_ROLE, sha256: digest }
+      }
+      // 与 Agent 侧同一道复核：路径不越界、散列一致、不含已知凭据模式。
+      const verified = await readVerifiedArtifact(child, { uri: ref.uri!, role: ref.role, sha256: ref.sha256! })
+      const out = await createLedgerTask(store, { ...input, artifactRefs: [ref] })
+      if (!(await store.listArtifacts(out.taskId)).some((a) => a.artifact_id === ref.artifact_id)) {
+        const now = new Date()
+        await store.putArtifact({
+          artifact_id: ref.artifact_id, mission_id: mission.id, task_id: out.taskId, role: MEMORY_ROLE, uri: ref.uri!,
+          media_type: 'text/markdown; charset=utf-8', size_bytes: verified.bytes.length, sha256: verified.sha256, version: 1,
+          state: 'AVAILABLE',
+          producer: { agent_id: 'memross', adapter_version: 'memory-context/v1', execution_session_id: ref.artifact_id },
+          provenance: { source: 'memross', project_id: memory.project_id },
+          retention: { retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(), immutable: true },
+          security: { classification: 'internal', contains_secrets: false, contains_pii: false, allowed_roles: [] },
+          created_at: now.toISOString(),
+        })
+      }
+      return out
     },
 
     async markReady(taskId: string): Promise<void> {

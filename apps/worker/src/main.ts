@@ -47,6 +47,10 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '../../..')
 // 每个任务一个子目录，避免并发任务互相污染工作区。
 const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
+// 只读 actor 令牌只在 Worker 进程内用于调用 Memross；Agent 子进程的环境白名单不含它。
+const memoryUrl = process.env['MEMROSS_URL'] ?? ''
+const memoryToken = process.env['MEMROSS_TOKEN'] ?? ''
+const memory = memoryUrl && memoryToken ? { url: memoryUrl, token: memoryToken } : undefined
 
 // Local ephemeral trust exercises the managed boundary; it is not remote host identity.
 const {privateKey,publicKey}=generateKeyPairSync('ed25519')
@@ -106,6 +110,7 @@ const worker = await Worker.create({
       runner,
       signDispatchPermit,
       workRoot,
+      ...(memory ? { memory } : {}),
     }),
     ...createDagActivities({
       store,
@@ -130,7 +135,7 @@ process.on('SIGTERM', stop)
 
 console.log(
   `Worker 就绪：temporal=${address} ns=${namespace} queue=${taskQueue} ` +
-    `db.schema=${schema} runner=${runnerId} adapters=${adapterNames.join(',')} 工作区=${workRoot}`,
+    `db.schema=${schema} runner=${runnerId} adapters=${adapterNames.join(',')} 工作区=${workRoot} memross=${memory ? memoryUrl : '未配置'}`,
 )
 
 await worker.run()
