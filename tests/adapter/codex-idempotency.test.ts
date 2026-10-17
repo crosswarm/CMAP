@@ -145,8 +145,12 @@ test('Codex beforeSend rejection removes only adapter-owned temporary workdir', 
   await writeFile(bin, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(launches)}, String(process.pid) + '\\n')\n`)
   await chmod(bin, 0o755)
   const adapter = new CodexAdapter({ authorization: { mode: 'standalone' }, bin, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json') })
-  const tmpRoot = tmpdir()
-  const before = new Set((await readdir(tmpRoot)).filter(name => name.startsWith('cmap-codex-')))
+  // 独立 TMPDIR：全量测试并行时其他文件也会在系统临时目录建 cmap-codex-* 目录，
+  // 对系统临时目录做前后快照会把别人的目录误判为泄漏。Adapter 调用时才读 tmpdir()，这里改环境变量即生效。
+  const privateTmp = join(root, 'tmp')
+  await mkdir(privateTmp)
+  const previousTmp = process.env['TMPDIR']
+  process.env['TMPDIR'] = privateTmp
   try {
     await assert.rejects(
       adapter.startTask(envelope, {
@@ -160,9 +164,12 @@ test('Codex beforeSend rejection removes only adapter-owned temporary workdir', 
       /blocked/,
     )
     await assert.rejects(readFile(launches, 'utf8'), { code: 'ENOENT' })
-    const after = (await readdir(tmpRoot)).filter(name => name.startsWith('cmap-codex-') && !before.has(name))
-    assert.deepEqual(after, [])
-  } finally { await rm(root, { recursive: true, force: true }) }
+    assert.deepEqual(await readdir(privateTmp), [], 'Adapter 自建的临时工作目录必须被清理')
+  } finally {
+    if (previousTmp === undefined) delete process.env['TMPDIR']
+    else process.env['TMPDIR'] = previousTmp
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('Codex startTask passes only provider env allowlist plus task metadata', async () => {

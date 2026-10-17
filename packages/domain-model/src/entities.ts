@@ -115,6 +115,8 @@ export const EVENT_TYPES = [
   'TASK_CREATED',
   'TASK_READY',
   'TASK_DISPATCH_INTENT',
+  /** 派发前的执行者选择：各候选判定与原因、选中者、是否回落、耗时；用于路由效率评测。 */
+  'ROUTING_DECIDED',
   'TASK_ASSIGNED',
   'TASK_STARTED',
   'TASK_HEARTBEAT',

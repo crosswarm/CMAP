@@ -168,7 +168,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 | 无进展检测（四项组合判定，不靠自然语言） | ✅ Schema 已实现，逻辑待 P1 |
 | `stop_conditions.max_additional_cycles` | ✅ Schema 已实现 |
 | 资源锁带 TTL 且可抢占 | ✅ Schema 已实现，执行待 P1 |
-| 每 Mission 成本计量与告警 | ⬜ P2 |
+| 每 Mission 成本计量与告警 | 🟡 Codex 结果已记录 tokens 与耗时（`task-result.cost`，`scripts/mission-report.mjs` 汇总）；Kimi/YonWork 未计量，告警与 `max_cost_units` 执行 ⬜ |
 
 ### T9 — 重放与重复副作用
 

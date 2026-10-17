@@ -265,29 +265,82 @@ export const createActivities = (deps: ActivityDeps) => {
     return selected
   }
 
-  const selectAdapter = async (envelope: TaskEnvelopeV1): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean}> => {
+  /** 一次选择的完整记录：各候选按评估顺序的判定与原因，供 ROUTING_DECIDED 事件与路由效率评测。 */
+  interface RoutingDecision {
+    readonly preferred_agent: string | null
+    readonly chosen_agent: string | null
+    readonly chosen_adapter: string | null
+    readonly fallback: boolean
+    readonly candidates: readonly {agent_id: string; adapter_id: string | null; verdict: 'selected' | 'skipped'; reason: string | null}[]
+    readonly decision_ms: number
+    readonly runner_id: string
+  }
+
+  const selectAdapter = async (envelope: TaskEnvelopeV1): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
     if (!adapters.length) throw new Error('未注入 Adapter：控制面没有可派发的目标')
+    const started = Date.now()
     const policy = envelope.execution_policy
     const ids = [...(policy.preferred_agent ? [policy.preferred_agent] : []), ...(policy.fallback_agents ?? [])]
-    const candidates = ids.length
-      ? [...new Set(ids)].flatMap((id) => adapters.filter((a) => a.agentId === id && runner.agents.includes(a.agentId)))
-      : adapters.filter((a) => runner.agents.includes(a.agentId))
+    // 按评估顺序展开：显式指定时按首选、替补顺序；未指定时按注册顺序。未注册的 ID 也记下来。
+    const order = ids.length
+      ? [...new Set(ids)].map((id) => ({id, matched: adapters.filter((a) => a.agentId === id)}))
+      : adapters.map((a) => ({id: a.agentId, matched: [a]}))
+    const candidates: {agent_id: string; adapter_id: string | null; verdict: 'selected' | 'skipped'; reason: string | null}[] = []
+    const decision = (chosen: AgentAdapter | null): RoutingDecision => ({
+      preferred_agent: policy.preferred_agent ?? null,
+      chosen_agent: chosen?.agentId ?? null,
+      chosen_adapter: chosen?.adapterId ?? null,
+      fallback: Boolean(chosen && policy.preferred_agent && chosen.agentId !== policy.preferred_agent),
+      candidates,
+      decision_ms: Date.now() - started,
+      runner_id: runnerId,
+    })
     const risks = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
-    for (const candidate of candidates) {
+    const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean}> => {
       try {
         const descriptor = await candidate.discover()
-        if (descriptor.adapter_id !== candidate.adapterId || descriptor.agent_id !== candidate.agentId) continue
-        if (!descriptor.capabilities.includes(envelope.classification.requested_capability)) continue
+        if (descriptor.adapter_id !== candidate.adapterId || descriptor.agent_id !== candidate.agentId) return {reason: 'descriptor_mismatch'}
+        if (!descriptor.capabilities.includes(envelope.classification.requested_capability)) return {reason: 'capability'}
         const required = risks.indexOf(envelope.classification.risk_level)
         const ceiling = risks.indexOf(descriptor.risk_ceiling)
-        if (required < 0 || ceiling < required) continue
-        if ((await candidate.health()).state !== 'healthy') continue
-        return {adapter: candidate, supportsWorktreeIsolation: descriptor.supports_worktree_isolation}
+        if (required < 0 || ceiling < required) return {reason: 'risk'}
+        if ((await candidate.health()).state !== 'healthy') return {reason: 'unhealthy'}
+        return {supportsWorktreeIsolation: descriptor.supports_worktree_isolation}
       } catch {
         // 仅启动前探测允许转向下一候选；startTask 的不确定结果不得触发替补。
+        return {reason: 'probe_error'}
       }
     }
-    throw new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`)
+    for (const {id, matched} of order) {
+      if (!matched.length) {
+        candidates.push({agent_id: id, adapter_id: null, verdict: 'skipped', reason: 'not_registered'})
+        continue
+      }
+      for (const candidate of matched) {
+        if (!runner.agents.includes(candidate.agentId)) {
+          candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'skipped', reason: 'not_on_runner'})
+          continue
+        }
+        const verdict = await probe(candidate)
+        if ('reason' in verdict) {
+          candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'skipped', reason: verdict.reason})
+          continue
+        }
+        candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'selected', reason: null})
+        return {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, routing: decision(candidate)}
+      }
+    }
+    throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
+  }
+
+  /** 每次真实选择各记一条（键唯一）：重试时的决策可能不同，固定键会与首次内容冲突而阻断派发。 */
+  const recordRouting = async (task: TaskRecord, routing: RoutingDecision): Promise<void> => {
+    await store.appendEvent({event:{
+      event_type:'ROUTING_DECIDED',event_version:1,occurred_at:new Date().toISOString(),
+      mission_id:task.mission_id,task_id:task.id,attempt:task.attempt,actor:ACTOR,
+      causation_id:null,correlation_id:task.mission_id,trace_id:task.id,
+      idempotency_key:nextId('route'),payload:{...routing},
+    }})
   }
 
   let seq = 0
@@ -493,7 +546,16 @@ export const createActivities = (deps: ActivityDeps) => {
       }
 
       const envelope = existing.envelope as TaskEnvelopeV1
-      const {adapter: selectedAdapter, supportsWorktreeIsolation} = await selectAdapter(envelope)
+      let selection: Awaited<ReturnType<typeof selectAdapter>>
+      try {
+        selection = await selectAdapter(envelope)
+      } catch (error) {
+        const routing = (error as {routing?: RoutingDecision}).routing
+        if (routing) await recordRouting(existing, routing)
+        throw error
+      }
+      await recordRouting(existing, selection.routing)
+      const {adapter: selectedAdapter, supportsWorktreeIsolation} = selection
 
       const assertPreparedAuthority = async (expectedBinding?: RemoteTaskBinding, observedPolicy?: string): Promise<void> => {
         const task = await store.getTask(taskId)

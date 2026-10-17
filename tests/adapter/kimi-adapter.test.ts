@@ -12,7 +12,8 @@ import {
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
+import { mkdtempSync, rmSync } from 'node:fs'
 import assert from 'node:assert/strict'
 
 import type { RemoteTaskBinding, TaskEnvelopeV1 } from '#domain-model'
@@ -20,6 +21,13 @@ import { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit } from '
 import type { DispatchContext } from '#adapter-sdk'
 import { AdapterError } from '#adapter-sdk'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
+
+// 本文件断言临时目录里 cmap-kimi-* 运行目录的增减。全量测试并行时其他文件也会建同前缀目录，
+// 对系统临时目录做快照会误判，所以整个文件改用独立 TMPDIR（Adapter 调用时才读 tmpdir()）。
+// 目录前缀刻意不以 cmap-kimi- 开头，免得它自己被快照计入。
+const fileTmp = mkdtempSync(join(tmpdir(), 'cmap-test-tmp-kimi-adapter-'))
+process.env['TMPDIR'] = fileTmp
+after(() => rmSync(fileTmp, { recursive: true, force: true }))
 
 const envelope = (taskId: string, timeoutSeconds = 30): TaskEnvelopeV1 => ({
   schema: 'cmap/task-envelope/v1',

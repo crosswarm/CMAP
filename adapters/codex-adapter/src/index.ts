@@ -156,6 +156,10 @@ interface RunState {
   readonly events: NormalizedAgentEvent[]
   readonly listeners: Set<(e: NormalizedAgentEvent) => Promise<void>>
   sessionId: string | null
+  /** turn.completed 的 usage 累加（input + output）；reasoning 与缓存细分不另计，避免重复计数。 */
+  tokens: number | null
+  readonly startedAt: number
+  settledAt: number | null
   exitCode: number | null
   stderr: string
   settled: boolean
@@ -313,6 +317,9 @@ export class CodexAdapter implements AgentAdapter {
       events: [],
       listeners: new Set(),
       sessionId: null,
+      tokens: null,
+      startedAt: Date.now(),
+      settledAt: null,
       exitCode: null,
       stderr: '',
       settled: false,
@@ -365,6 +372,7 @@ export class CodexAdapter implements AgentAdapter {
       state.termination ??= terminateOwnedProcessGroup(state.child)
       state.exitCode = code
       state.settled = true
+      state.settledAt = Date.now()
       const at = new Date().toISOString()
       emit(
         code === 0
@@ -376,6 +384,7 @@ export class CodexAdapter implements AgentAdapter {
     state.child.on('error', (err) => {
       state.exitCode = -1
       state.settled = true
+      state.settledAt = Date.now()
       state.stderr += String(err)
       emit({ kind: 'failed', at: new Date().toISOString(), message: String(err) })
     })
@@ -498,7 +507,15 @@ export class CodexAdapter implements AgentAdapter {
       )
     }
 
-    return normalizeAgentOutput(out, state.envelope, state.workDir, state.sessionId ?? undefined)
+    const result = await normalizeAgentOutput(out, state.envelope, state.workDir, state.sessionId ?? undefined)
+    // 成本计量（威胁模型 T8）：用量来自 codex 事件流，耗时为进程从启动到退出。
+    return {
+      ...result,
+      cost: {
+        ...(state.tokens !== null ? { tokens: state.tokens } : {}),
+        duration_seconds: Math.round(((state.settledAt ?? Date.now()) - state.startedAt) / 100) / 10,
+      },
+    }
   }
 
   async health(): Promise<AdapterHealth> {
@@ -564,6 +581,12 @@ const normalizeCodexEvent = (raw: unknown, state: RunState): NormalizedAgentEven
   const type = typeof obj['type'] === 'string' ? obj['type'] : ''
 
   if (typeof obj['session_id'] === 'string') state.sessionId = obj['session_id']
+  const usage = obj['usage']
+  if (type === 'turn.completed' && typeof usage === 'object' && usage !== null) {
+    const u = usage as Record<string, unknown>
+    const count = (key: string): number => (Number.isSafeInteger(u[key]) && (u[key] as number) >= 0 ? (u[key] as number) : 0)
+    state.tokens = (state.tokens ?? 0) + count('input_tokens') + count('output_tokens')
+  }
 
   if (type.includes('tool') || type.includes('command')) {
     return { kind: 'tool_call', at, payload: obj }

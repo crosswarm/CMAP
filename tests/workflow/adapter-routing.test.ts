@@ -127,3 +127,35 @@ test('Adapter 返回错误绑定身份时拒绝入账', async () => {
   assert.equal((await store.listEvents(task.mission_id)).filter((e) => e.event_type === 'TASK_STARTED').length, 0)
   assert.equal(other.startCalls.length, 0)
 })
+
+// 路由效率评测（实施计划 S0.0 C 层）：每次派发前的选择过程落 ROUTING_DECIDED 事件，供首选命中率、回落原因与决策耗时统计。
+test('路由决策落事件：逐个候选记录判定与原因、选中者、是否回落与耗时', async () => {
+  const primary = candidate('primary', ['code.analyze'], 'unavailable')
+  const wrong = candidate('wrong', ['other'])
+  const backup = candidate('backup')
+  const { acts, store, taskId } = await fixture([primary, wrong, backup], { preferred_agent: 'primary', fallback_agents: ['ghost', 'wrong', 'backup'] })
+  await acts.dispatchTask(taskId)
+  const events = (await store.listEvents('routing-mission')).filter(e => e.event_type === 'ROUTING_DECIDED')
+  assert.equal(events.length, 1)
+  const payload = events[0]!.payload as any
+  assert.equal(payload.chosen_agent, 'backup')
+  assert.equal(payload.preferred_agent, 'primary')
+  assert.equal(payload.fallback, true)
+  assert.deepEqual(payload.candidates.map((c: any) => [c.agent_id, c.verdict, c.reason]), [
+    ['primary', 'skipped', 'unhealthy'],
+    ['ghost', 'skipped', 'not_registered'],
+    ['wrong', 'skipped', 'capability'],
+    ['backup', 'selected', null],
+  ])
+  assert.equal(typeof payload.decision_ms, 'number')
+  assert.equal(events[0]!.task_id, taskId)
+})
+
+test('没有可用执行者时也先记录决策与原因再报错', async () => {
+  const a = candidate('primary', ['code.analyze'], 'unavailable')
+  const { acts, store, taskId } = await fixture([a], { preferred_agent: 'primary' })
+  await assert.rejects(acts.dispatchTask(taskId), /没有可用 Adapter/)
+  const [event] = (await store.listEvents('routing-mission')).filter(e => e.event_type === 'ROUTING_DECIDED')
+  assert.equal((event!.payload as any).chosen_agent, null)
+  assert.deepEqual((event!.payload as any).candidates.map((c: any) => c.reason), ['unhealthy'])
+})

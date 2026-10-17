@@ -131,6 +131,8 @@ node scripts/verify-temporal.mjs
 
 ## 新环境初始化
 
+一条命令（可重复执行，已就绪的步骤自动跳过）：`node scripts/bootstrap-local-stack.mjs`。下面是它固化的手工步骤，供排障对照。
+
 compose 中 `command: ["start"]` 跳过了镜像默认的 `autosetup`，因此**首次部署到全新数据库时**需要先建 schema 与 default namespace：
 
 ```bash
