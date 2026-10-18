@@ -294,7 +294,7 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     try {
       const body = this.#expect(await this.#call('GET', '/v1/health', undefined, this.#healthTimeoutMs), 'health')
       if (body.runner_id !== this.runnerId) return { state: 'unavailable', checked_at, detail: 'RUNNER_ID_MISMATCH' }
-      return { state: body.state, checked_at }
+      return { state: body.state, checked_at, admission: body.admission }
     } catch (error) {
       return { state: 'unavailable', checked_at, detail: error instanceof AdapterError ? error.code : 'REMOTE_HEALTH_FAILED' }
     }

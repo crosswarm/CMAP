@@ -271,7 +271,8 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
 
   const health = async (res: ServerResponse): Promise<void> => {
     const observed = await adapter.health()
-    send(res, 200, { schema: SCHEMA, kind: 'health', runner_id: runnerId, state: observed.state, checked_at: observed.checked_at })
+    // 公布本机准入白名单，CrossMini 派发前据此回落；派发时 assertRunnerAdmission 仍是最后一道闸。
+    send(res, 200, { schema: SCHEMA, kind: 'health', runner_id: runnerId, state: observed.state, checked_at: observed.checked_at, admission: runner.admission })
   }
 
   const server = createServer(async (req, res) => {

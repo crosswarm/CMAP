@@ -146,16 +146,31 @@
     },
     "health": {
       "title": "RemoteRunnerHealthV1",
-      "description": "Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates.",
+      "description": "Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates. admission publishes the runner's own allowlist (the same RUNNER_ALLOWED_* / RUNNER_MAX_RISK it enforces at dispatch) so the control plane can skip the runner before dispatch when tenant, owner, capability or risk would be denied, and fall back to local candidates instead of collecting an admission denial. It is advisory for routing only: the runner still enforces admission on every dispatch (defence in depth). It is signed with the rest of the response; a health reply without it is invalid and the runner is treated as unavailable.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "kind", "runner_id", "state", "checked_at"],
+      "required": ["schema", "kind", "runner_id", "state", "checked_at", "admission"],
       "properties": {
         "schema": { "$ref": "#/$defs/schemaTag" },
         "kind": { "type": "string", "const": "health" },
         "runner_id": { "$ref": "#/$defs/identifier" },
         "state": { "enum": ["healthy", "degraded", "unavailable"] },
-        "checked_at": { "type": "string", "minLength": 1, "maxLength": 64 }
+        "checked_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "admission": { "$ref": "#/$defs/admission" }
+      }
+    },
+    "allowlist": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+    "admission": {
+      "title": "RemoteRunnerAdmissionV1",
+      "description": "The runner's dispatch allowlist, same semantics as runner-admission.v1: explicit empty lists deny all.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_tenants", "allowed_owners", "allowed_capabilities", "max_risk"],
+      "properties": {
+        "allowed_tenants": { "$ref": "#/$defs/allowlist" },
+        "allowed_owners": { "$ref": "#/$defs/allowlist" },
+        "allowed_capabilities": { "$ref": "#/$defs/allowlist" },
+        "max_risk": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] }
       }
     },
     "error": {

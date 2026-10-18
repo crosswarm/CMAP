@@ -20,6 +20,10 @@ export type Identifier = string
 export type Sha256 = string
 export type Base64 = string
 export type RemoteTaskId = string
+/**
+ * @maxItems 128
+ */
+export type Allowlist = Identifier[]
 
 /**
  * POST /v1/tasks. envelope is the exact control-plane TaskEnvelopeV1; its integrity comes from permit.envelope_sha256, not from this schema.
@@ -90,7 +94,7 @@ export interface RemoteRunnerCancelV1 {
   reason: string
 }
 /**
- * Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates.
+ * Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates. admission publishes the runner's own allowlist (the same RUNNER_ALLOWED_* / RUNNER_MAX_RISK it enforces at dispatch) so the control plane can skip the runner before dispatch when tenant, owner, capability or risk would be denied, and fall back to local candidates instead of collecting an admission denial. It is advisory for routing only: the runner still enforces admission on every dispatch (defence in depth). It is signed with the rest of the response; a health reply without it is invalid and the runner is treated as unavailable.
  */
 export interface RemoteRunnerHealthV1 {
   schema: SchemaTag
@@ -98,6 +102,16 @@ export interface RemoteRunnerHealthV1 {
   runner_id: Identifier
   state: 'healthy' | 'degraded' | 'unavailable'
   checked_at: string
+  admission: RemoteRunnerAdmissionV1
+}
+/**
+ * The runner's dispatch allowlist, same semantics as runner-admission.v1: explicit empty lists deny all.
+ */
+export interface RemoteRunnerAdmissionV1 {
+  allowed_tenants: Allowlist
+  allowed_owners: Allowlist
+  allowed_capabilities: Allowlist
+  max_risk: 'read-meta' | 'read-sensitive' | 'controlled' | 'mutating'
 }
 /**
  * permit: DispatchPermitErrorCode, no execution happened. admission: RunnerAdmissionErrorCode from the runner's own allowlist, no execution happened. adapter: AdapterError code from the wrapped adapter. protocol: malformed request, unknown task or oversized body, or UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure).

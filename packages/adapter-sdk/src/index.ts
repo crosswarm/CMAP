@@ -18,6 +18,7 @@ import type {
   RemoteTaskBinding,
   RiskLevel,
   HealthState,
+  RunnerDescriptor,
 } from '#domain-model'
 
 // ------------------------------------------------------------ 描述与发现
@@ -44,6 +45,11 @@ export interface AdapterHealth {
   readonly state: HealthState
   readonly checked_at: string
   readonly detail?: string
+  /**
+   * 远程 runner 在已验签的 health 应答里公布的准入白名单（remote-runner.v1）。
+   * 路由据此在派发前跳过、按 fallback 回落；runner 派发时仍自行复核，这里只是提前判断。
+   */
+  readonly admission?: RunnerDescriptor['admission']
 }
 
 // ------------------------------------------------------------ 派发上下文

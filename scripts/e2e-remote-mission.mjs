@@ -7,7 +7,7 @@
  *   dag             跨主机 DAG（C1）：CrossMini→lap 与 lap→CrossMini 两条父子链，输入哈希两边核验（lap 需 ≥ 9edbd69）
  *   dag-reverse     只跑 lap→CrossMini 一条链
  *   offline         lap 守护进程 bootout 后派发（C5）：回落本地，ROUTING_DECIDED 记 unhealthy，lap 0 次
- *   capability      lap 准入不放行的能力（code.implement）：看任务是否在 lap 上执行
+ *   capability      lap 准入不放行的能力（code.implement）：lap 在 health 里公布白名单，路由记 capability_mismatch 回落本地完成，lap 0 次
  *   lap-restart     lap 执行中 kickstart -k 守护进程：COMPLETED 且 lap 执行 1 次
  *   worker-restart  dag/v1，lap 执行中 SIGKILL CrossMini Worker 再拉起：runDagAttempt 不重试，只核不改派、不重跑、lap 执行 1 次
  *   worker-restart-inspect  同上但 inspect/v1（测试专用 CODEX_BIN 让本机 codex 不健康，路由落到 codex@lap）：COMPLETED 且 lap 执行 1 次
@@ -326,7 +326,10 @@ const scenarios = {
     ok(`ROUTING_DECIDED ${routes.length} 条：${JSON.stringify(routes.map((r) => r.candidates.map((c) => [c.agent_id, c.verdict, c.reason])))}`)
     ok(`任务事件：${kinds.join(' → ')}；${result.nodeOutcomes.map((o) => `${o.nodeId}:${o.status}:${o.reason ?? ''}`).join(',')}`)
     check(lapRuns === 0, `lap 上有 ${lapRuns} 条运行记录：能力不匹配的任务在 lap 上执行了`)
-    check(t.state !== 'COMPLETED', '能力不被 lap 准入的任务不应以 lap 完成')
+    check(routes.length === 1 && routes[0].fallback === true && JSON.stringify(routes[0].candidates.map((c) => [c.agent_id, c.verdict, c.reason])) ===
+      JSON.stringify([[LAP_AGENT, 'skipped', 'capability_mismatch'], ['codex', 'selected', null]]), '路由未按 capability_mismatch 回落本地')
+    await verifyCompletedMission(missionId, result)
+    await verifyNode(missionId, t, 'local')
     ok(`lap 运行记录 0、本地运行记录 ${localRun ? 1 : 0}`)
   },
 

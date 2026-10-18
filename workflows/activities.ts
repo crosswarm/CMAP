@@ -307,7 +307,16 @@ export const createActivities = (deps: ActivityDeps) => {
         const required = risks.indexOf(envelope.classification.risk_level)
         const ceiling = risks.indexOf(descriptor.risk_ceiling)
         if (required < 0 || ceiling < required) return {reason: 'risk'}
-        if ((await candidate.health()).state !== 'healthy') return {reason: 'unhealthy'}
+        const health = await candidate.health()
+        if (health.state !== 'healthy') return {reason: 'unhealthy'}
+        // 远程 runner 公布的准入白名单：不放行就跳过并回落，而不是派过去再收准入拒绝。runner 仍会复核。
+        const allow = health.admission
+        if (allow) {
+          if (!allow.allowed_tenants.includes(envelope.identity.tenant ?? '')) return {reason: 'tenant_mismatch'}
+          if (!allow.allowed_owners.includes(envelope.identity.owner ?? '')) return {reason: 'owner_mismatch'}
+          if (!allow.allowed_capabilities.includes(envelope.classification.requested_capability)) return {reason: 'capability_mismatch'}
+          if (risks.indexOf(allow.max_risk) < required) return {reason: 'risk_exceeded'}
+        }
         return {supportsWorktreeIsolation: descriptor.supports_worktree_isolation}
       } catch {
         // 仅启动前探测允许转向下一候选；startTask 的不确定结果不得触发替补。

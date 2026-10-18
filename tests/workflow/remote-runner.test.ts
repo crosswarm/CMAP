@@ -41,7 +41,7 @@ const localCodex = (): FakeAdapter => {
   return adapter
 }
 
-const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<string> | string = (u) => u, lapOverrides: Record<string, string> = {}, opts: { clockOffsetMs?: number; offlineGraceMs?: number } = {}) => {
+const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<string> | string = (u) => u, lapOverrides: Record<string, string> = {}, opts: { clockOffsetMs?: number; offlineGraceMs?: number; risk?: TaskEnvelopeV1['classification']['risk_level'] } = {}) => {
   const root = await mkdtemp(join(tmpdir(), 'cmap-remote-wf-'))
   const codex = await makeFakeCodex(root)
   const cm = join(root, 'crossmini')
@@ -56,8 +56,10 @@ const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<st
   const now = new Date().toISOString()
   const mission: Mission = { id: 'mis-remote', tenant: 'team-ycc', owner: 'crosswarm', type: 'inspect', goal: 'remote', constraints: {}, acceptance: [{ criterion_id: 'C1', metric: 'done', operator: 'eq', expected: true, hard_gate: true }], workflow_template: 'inspect/v1', state: 'RUNNING', revision: 1, created_at: now, updated_at: now }
   await store.createMission({ mission, actor: ACTOR })
-  const e = envelope(taskId, { preferred_agent: 'codex@lap', fallback_agents: ['codex'] })
-  await store.createTask({ actor: ACTOR, task: { id: taskId, mission_id: mission.id, parent_task_id: null, supersedes_task_id: null, capability: 'code.analyze', risk: 'read-meta', state: 'DRAFT', attempt: 1, max_attempts: 1, lamport: 0, envelope: e, result: null, binding: null, deps: [], created_at: now, updated_at: now } })
+  const base = envelope(taskId, { preferred_agent: 'codex@lap', fallback_agents: ['codex'] })
+  const risk = opts.risk ?? 'read-meta'
+  const e: TaskEnvelopeV1 = { ...base, classification: { ...base.classification, risk_level: risk } }
+  await store.createTask({ actor: ACTOR, task: { id: taskId, mission_id: mission.id, parent_task_id: null, supersedes_task_id: null, capability: 'code.analyze', risk, state: 'DRAFT', attempt: 1, max_attempts: 1, lamport: 0, envelope: e, result: null, binding: null, deps: [], created_at: now, updated_at: now } })
   const acts = createActivities({
     store, adapters: [remote, local], signDispatchPermit: signer, workRoot: cm, pollIntervalMs: 10,
     runner: syntheticRunner({ runner_id: 'crossmini', agents: ['codex@lap', 'codex'] }),
@@ -173,8 +175,34 @@ test('lap 回传的产物字节被篡改 → EVIDENCE_HASH_MISMATCH，任务失�
   }
 })
 
-test('lap 准入不放行该 owner → RUNNER_ADMISSION_REVOKED:OWNER_DENIED，执行 0 次', async () => {
+const candidates = async (store: MemoryStore) => (await routing(store)).map((d) => d.candidates.map((c: any) => [c.agent_id, c.verdict, c.reason]))
+
+for (const [name, lapOverrides, risk, reason] of [
+  ['能力', { RUNNER_ALLOWED_CAPABILITIES: '' }, undefined, 'capability_mismatch'],
+  ['风险上限', {}, 'read-sensitive', 'risk_exceeded'],
+  ['owner', { RUNNER_ALLOWED_OWNERS: 'someone-else' }, undefined, 'owner_mismatch'],
+  ['租户', { RUNNER_ALLOWED_TENANTS: 'other-tenant' }, undefined, 'tenant_mismatch'],
+] as const) test(`lap 公布的准入白名单不放行${name} → 路由跳过 codex@lap（${reason}）并回落本地，lap 0 次执行`, async () => {
+  const f = await fixture(`tsk-remote-route-${reason}`, undefined, lapOverrides, risk ? { risk } : {})
+  try {
+    assert.equal((await f.acts.dispatchTask(`tsk-remote-route-${reason}`)).dispatched, true)
+    const task = (await f.store.getTask(`tsk-remote-route-${reason}`))!
+    assert.equal(task.binding!.adapter, 'local-codex-adapter')
+    assert.deepEqual(await candidates(f.store), [[['codex@lap', 'skipped', reason], ['codex', 'selected', null]]])
+    assert.equal((await routing(f.store))[0]!.fallback, true)
+    assert.deepEqual(f.remote.errors, [])
+    assert.equal(f.local.startCalls.length, 1)
+    assert.equal((await lines(f.codex.launches)).length, 0)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('纵深防御：health 公布的白名单过时（探测后 lap 收紧 owner）→ lap 派发时仍拒绝 RUNNER_ADMISSION_REVOKED:OWNER_DENIED，执行 0 次', async () => {
   const f = await fixture('tsk-remote-owner', undefined, { RUNNER_ALLOWED_OWNERS: 'someone-else' })
+  // 模拟探测时拿到的是收紧前的白名单
+  f.remote.health = async () => ({ state: 'healthy', checked_at: new Date().toISOString(),
+    admission: { allowed_tenants: ['team-ycc'], allowed_owners: ['crosswarm'], allowed_capabilities: ['code.analyze'], max_risk: 'read-meta' } })
   try {
     assert.deepEqual(await f.acts.dispatchTask('tsk-remote-owner'), { dispatched: false, admissionDenied: { phase: 'post-intent', code: 'OWNER_DENIED' } })
     const collected = await f.acts.collectTaskResult('tsk-remote-owner')

@@ -22,7 +22,10 @@ const valid = {
     artifacts: [{ uri: 'evidence/report.txt', content_base64: 'b2s=' }, { uri: '.cmap/a b.md', content_base64: '' }],
   },
   cancel: { schema: S, kind: 'cancel', remote_task_id: 'codex:tsk-1:1', reason: 'TIMEOUT' },
-  health: { schema: S, kind: 'health', runner_id: 'lap', state: 'healthy', checked_at: '2026-10-18T00:00:00.000Z' },
+  health: {
+    schema: S, kind: 'health', runner_id: 'lap', state: 'healthy', checked_at: '2026-10-18T00:00:00.000Z',
+    admission: { allowed_tenants: ['team-ycc'], allowed_owners: ['crosswarm'], allowed_capabilities: ['code.analyze'], max_risk: 'read-meta' },
+  },
   error: { schema: S, kind: 'error', category: 'permit', code: 'CLAIM_MISMATCH', retryable: false },
 }
 
@@ -60,6 +63,13 @@ describe('remote-runner schema', () => {
       patch('result', (v) => { v.artifacts[0].sha256 = H }),
       patch('cancel', (v) => { v.reason = '' }),
       patch('health', (v) => { v.state = 'up' }),
+      // 旧版 lap 不公布白名单：应答无效，按不可用回落本地，而不是退回静态能力声明
+      patch('health', (v) => { delete v.admission }),
+      patch('health', (v) => { v.admission.allowed_capabilities = ['*'] }),
+      patch('health', (v) => { v.admission.allowed_owners = ['a', 'a'] }),
+      patch('health', (v) => { v.admission.max_risk = 'root' }),
+      patch('health', (v) => { delete v.admission.allowed_tenants }),
+      patch('health', (v) => { v.admission.host = 'cross-m1mx' }),
       patch('error', (v) => { v.category = 'internal' }),
       patch('error', (v) => { v.code = 'lowercase' }),
       patch('error', (v) => { v.message = 'provider stderr' }),

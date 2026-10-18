@@ -14,7 +14,7 @@ import { AdapterError, type DispatchContext } from '#adapter-sdk'
 import { RemoteRunnerAdapter } from '../../adapters/remote-runner/src/index.ts'
 import { readRunnerDaemonConfig } from '../../apps/runner/src/server.ts'
 import {
-  ISSUER, REMOTE_ADAPTER_ID, close, deadUrl, envelope, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signedFetch, signer, startLap, trust,
+  ISSUER, REMOTE_ADAPTER_ID, close, deadUrl, envelope, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signedFetch, signer, startLap, startTamperProxy, trust,
 } from './remote-runner-fixture.ts'
 
 const setup = async () => {
@@ -58,7 +58,10 @@ test('lap 验签后执行一次，显式 -m；CrossMini 拉回产物并独立复
   const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap') })
   try {
     const adapter = adapterFor(lap.url, cm)
-    assert.equal((await adapter.health()).state, 'healthy')
+    const health = await adapter.health()
+    assert.equal(health.state, 'healthy')
+    // lap 在已签名的 health 应答里公布自己的准入白名单，供派发前路由判断
+    assert.deepEqual(health.admission, { allowed_tenants: ['team-ycc'], allowed_owners: ['crosswarm'], allowed_capabilities: ['code.analyze'], max_risk: 'read-meta' })
     const e = envelope('tsk-unit-ok')
     const token = signer(e, { runnerId: 'lap', adapterId: REMOTE_ADAPTER_ID })
     const binding = await adapter.startTask(e, await ctxFor(cm, 'tsk-unit-ok', token))
@@ -169,6 +172,26 @@ test('lap 自有准入白名单拒绝 owner → OWNER_DENIED，执行 0 次', as
     await rejectsWith(adapterFor(lap.url, cm).startTask(e, await ctxFor(cm, 'tsk-unit-owner', token)), RunnerAdmissionError, 'OWNER_DENIED')
     assert.equal((await lines(codex.launches)).length, 0)
   } finally {
+    await close(lap.server)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('health 应答缺准入白名单（旧版 lap）即使 lap 自己签名也判 unavailable，不退回静态能力声明', async () => {
+  const { root, codex, cm } = await setup()
+  const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap') })
+  const stripAdmission = (path: string, text: string): string => {
+    if (path !== '/v1/health') return text
+    const { admission: _drop, ...rest } = JSON.parse(text)
+    return JSON.stringify(rest)
+  }
+  const proxy = await startTamperProxy(lap.url, { mutate: stripAdmission, resign: true })
+  try {
+    const health = await adapterFor(proxy.url, cm).health()
+    assert.equal(health.state, 'unavailable')
+    assert.equal(health.admission, undefined)
+  } finally {
+    await close(proxy.server)
     await close(lap.server)
     await rm(root, { recursive: true, force: true })
   }
