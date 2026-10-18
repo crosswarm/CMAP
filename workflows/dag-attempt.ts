@@ -472,7 +472,7 @@ export const createDagAttemptRunner = (
       heartbeat()
       let status: NormalizedAgentStatus
       try {
-        status = await beforeDeadline(adapter.getStatus(binding), Math.min(deadline, Date.now() + CANCEL_GRACE_MS))
+        status = await beforeDeadline(adapter.getStatus(binding, { deadline_at: new Date(deadline).toISOString() }), Math.min(deadline, Date.now() + CANCEL_GRACE_MS))
       } catch (error) {
         if (isCliBindingNotFound(error, binding)) {
           try {

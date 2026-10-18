@@ -12,6 +12,7 @@ import { MemoryStore, verifyDispatchPermit, type Mission, type TaskEnvelopeV1 } 
 import type { DispatchContext } from '#adapter-sdk'
 import { RemoteRunnerAdapter } from '../../adapters/remote-runner/src/index.ts'
 import { createActivities } from '../../workflows/activities.ts'
+import { createDagAttemptRunner } from '../../workflows/dag-attempt.ts'
 import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 import {
   ISSUER, close, deadUrl, envelope, trust, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signer, startLap, startTamperProxy,
@@ -41,7 +42,7 @@ const localCodex = (): FakeAdapter => {
   return adapter
 }
 
-const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<string> | string = (u) => u, lapOverrides: Record<string, string> = {}, opts: { clockOffsetMs?: number; offlineGraceMs?: number; risk?: TaskEnvelopeV1['classification']['risk_level'] } = {}) => {
+const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<string> | string = (u) => u, lapOverrides: Record<string, string> = {}, opts: { clockOffsetMs?: number; offlineGraceMs?: number; risk?: TaskEnvelopeV1['classification']['risk_level']; timeoutSeconds?: number } = {}) => {
   const root = await mkdtemp(join(tmpdir(), 'cmap-remote-wf-'))
   const codex = await makeFakeCodex(root)
   const cm = join(root, 'crossmini')
@@ -56,7 +57,7 @@ const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<st
   const now = new Date().toISOString()
   const mission: Mission = { id: 'mis-remote', tenant: 'team-ycc', owner: 'crosswarm', type: 'inspect', goal: 'remote', constraints: {}, acceptance: [{ criterion_id: 'C1', metric: 'done', operator: 'eq', expected: true, hard_gate: true }], workflow_template: 'inspect/v1', state: 'RUNNING', revision: 1, created_at: now, updated_at: now }
   await store.createMission({ mission, actor: ACTOR })
-  const base = envelope(taskId, { preferred_agent: 'codex@lap', fallback_agents: ['codex'] })
+  const base = envelope(taskId, { preferred_agent: 'codex@lap', fallback_agents: ['codex'], ...(opts.timeoutSeconds ? { timeout_seconds: opts.timeoutSeconds } : {}) })
   const risk = opts.risk ?? 'read-meta'
   const e: TaskEnvelopeV1 = { ...base, classification: { ...base.classification, risk_level: risk } }
   await store.createTask({ actor: ACTOR, task: { id: taskId, mission_id: mission.id, parent_task_id: null, supersedes_task_id: null, capability: 'code.analyze', risk, state: 'DRAFT', attempt: 1, max_attempts: 1, lamport: 0, envelope: e, result: null, binding: null, deps: [], created_at: now, updated_at: now } })
@@ -69,7 +70,11 @@ const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<st
     await close(lap.server)
     await rm(root, { recursive: true, force: true })
   }
-  return { root, codex, cm, lap, remote, local, store, acts, cleanup }
+  const runAttempt = createDagAttemptRunner({
+    store, adapters: [remote, local], signDispatchPermit: signer, workRoot: cm, pollIntervalMs: 10,
+    runner: syntheticRunner({ runner_id: 'crossmini', agents: ['codex@lap', 'codex'] }),
+  })
+  return { root, codex, cm, lap, remote, local, store, acts, runAttempt, cleanup }
 }
 
 const routing = async (store: MemoryStore) =>
@@ -237,5 +242,61 @@ test('执行中 lap 失联超过宽限 → 执行不确定，保留绑定，不�
     await f.lap.adapter.cancel(f.lap.adapter.prepareBinding(envelope('tsk-remote-lost'), { runner_id: 'lap' } as DispatchContext), 'test cleanup').catch(() => {})
     await rm(f.codex.hold, { force: true })
     await f.cleanup()
+  }
+})
+
+/** 派发到 lap、等假 codex 真正启动后让 lap 下线（codex 仍在 lap 上跑）。 */
+const goOfflineMidRun = async (f: Awaited<ReturnType<typeof fixture>>, dispatch: () => Promise<unknown>) => {
+  const { writeFile } = await import('node:fs/promises')
+  await writeFile(f.codex.hold, '')
+  const pending = dispatch()
+  for (let i = 0; i < 300 && (await lines(f.codex.launches)).length === 0; i += 1) await new Promise((r) => setTimeout(r, 10))
+  assert.equal((await lines(f.codex.launches)).length, 1)
+  await close(f.lap.server)
+  return pending
+}
+
+const cleanupOffline = async (f: Awaited<ReturnType<typeof fixture>>, taskId: string) => {
+  await f.lap.adapter.cancel(f.lap.adapter.prepareBinding(envelope(taskId), { runner_id: 'lap' } as DispatchContext), 'test cleanup').catch(() => {})
+  await rm(f.codex.hold, { force: true })
+  await f.cleanup()
+}
+
+test('宽限先于超时：配置宽限 600 秒、任务超时 2 秒，执行中失联 → 收结果判执行不确定而不是超时，不改派、不二次执行', async () => {
+  const f = await fixture('tsk-remote-grace-timeout', undefined, {}, { timeoutSeconds: 2 })
+  try {
+    await f.acts.dispatchTask('tsk-remote-grace-timeout')
+    const started = Date.now()
+    const collected = await goOfflineMidRun(f, () => f.acts.collectTaskResult('tsk-remote-grace-timeout'))
+    assert.deepEqual(collected, { executionUncertain: { code: 'BINDING_NOT_FOUND', terminalObserved: false } })
+    assert.ok(Date.now() - started < 2_000, '应在 2 秒任务超时之前判定')
+    const task = (await f.store.getTask('tsk-remote-grace-timeout'))!
+    assert.equal(task.state, 'INPUT_REQUIRED')
+    assert.equal(task.binding!.runner_id, 'lap')
+    assert.equal(f.remote.errors.length, 0)
+    assert.equal(f.local.startCalls.length, 0)
+    assert.equal((await lines(f.codex.launches)).length, 1)
+  } finally {
+    await cleanupOffline(f, 'tsk-remote-grace-timeout')
+  }
+})
+
+test('宽限先于超时（dag/v1 attempt）：执行中失联 → EXECUTION_UNCERTAIN:BINDING_NOT_FOUND，而不是 TIMEOUT / CANCELLATION_UNCONFIRMED', async () => {
+  const f = await fixture('tsk-remote-grace-dag', undefined, {}, { timeoutSeconds: 2 })
+  try {
+    const started = Date.now()
+    const out = await goOfflineMidRun(f, () => f.runAttempt({ taskId: 'tsk-remote-grace-dag' }))
+    assert.deepEqual(out, { outcome: 'escalated', taskId: 'tsk-remote-grace-dag', reason: 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND' })
+    assert.ok(Date.now() - started < 2_500)
+    const task = (await f.store.getTask('tsk-remote-grace-dag'))!
+    assert.equal(task.state, 'INPUT_REQUIRED')
+    assert.equal(task.binding!.runner_id, 'lap')
+    const evs = await f.store.listEvents('mis-remote')
+    assert.equal(evs.filter((e) => e.event_type === 'ROUTING_DECIDED').length, 1)
+    assert.equal(evs.filter((e) => e.event_type === 'TASK_STARTED').length, 1)
+    assert.equal(f.local.startCalls.length, 0)
+    assert.equal((await lines(f.codex.launches)).length, 1)
+  } finally {
+    await cleanupOffline(f, 'tsk-remote-grace-dag')
   }
 })

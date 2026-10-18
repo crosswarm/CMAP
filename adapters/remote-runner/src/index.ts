@@ -5,8 +5,9 @@
  *
  * 五条不放松的规则：
  *  1. 派发许可受众绑定目标 runner_id；lap 用固定公钥验签，拒绝即不执行（PERMIT_INVALID / 准入拒绝）。
- *  2. 失联不改派：状态查询失败在离线宽限（默认 600 秒）内视为仍在执行，超过则报 BINDING_NOT_FOUND，
- *     由控制面走执行不确定，绝不重跑、不换 runner。
+ *  2. 失联不改派：状态查询失败在离线宽限内视为仍在执行，超过则报 BINDING_NOT_FOUND，
+ *     由控制面走执行不确定，绝不重跑、不换 runner。有效宽限 = min(配置宽限（默认 600 秒），
+ *     首次失联时距调用方等待截止剩余时间的一半)，保证先判不确定、不先撞任务超时。
  *  3. 证据由控制面拉取并独立复算 sha256（readVerifiedArtifact），不采信 lap 自报；对不上即失败。
  *  4. 每个请求（含 health）由控制面的许可私钥签名，lap 的每个应答由 lap 自己的密钥签名并绑定所答请求；
  *     应答验签失败一律不采信：结果端点按 EVIDENCE_HASH_MISMATCH 处理（不落盘、不写 artifact 记录），其余端点按协议失败。
@@ -30,6 +31,7 @@ import type {
   DispatchContext,
   NormalizedAgentEvent,
   NormalizedAgentStatus,
+  StatusObservation,
   SubscriptionHandle,
 } from '#adapter-sdk'
 import { AdapterError, assertAdapterAuthorization, snapshotAdapterAuthorization, snapshotDispatchContext } from '#adapter-sdk'
@@ -95,8 +97,10 @@ export interface RemoteRunnerAdapterOptions {
   /** 静态描述（启动与路由不依赖 lap 在线）；应与 lap 上被包装的 Adapter 一致。 */
   readonly capabilities: readonly string[]
   readonly riskCeiling?: RiskLevel
+  /** 健康探测与状态查询的超时（默认 3 秒）。状态查询挂起即计为失联，不能拖过调用方的观察窗口。 */
   readonly healthTimeoutMs?: number
   readonly requestTimeoutMs?: number
+  /** 配置的离线宽限上限（默认 600 秒）；实际宽限还受调用方等待截止约束，见 getStatus。 */
   readonly offlineGraceMs?: number
   readonly now?: () => number
 }
@@ -119,10 +123,10 @@ export class RemoteRunnerAdapter implements AgentAdapter {
   readonly #offlineGraceMs: number
   readonly #now: () => number
   /**
-   * 首次连续失联时刻。
+   * 连续失联的任务何时判执行不确定（首次失联时算定，之后不再推迟）。
    * ponytail: 只在进程内；Worker 重启会让宽限重新计时（只会更晚判不确定，不会重跑）。需要精确宽限再落账本。
    */
-  readonly #offlineSince = new Map<string, number>()
+  readonly #uncertainAt = new Map<string, number>()
 
   constructor(opts: RemoteRunnerAdapterOptions) {
     this.#authorization = snapshotAdapterAuthorization(opts.authorization)
@@ -205,22 +209,27 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     throw new AdapterError('INPUT_NOT_SUPPORTED', `远程 codex exec 为非交互模式（kind=${input.kind}）`, false, 'remote-no-stdin')
   }
 
-  async getStatus(binding: RemoteTaskBinding): Promise<NormalizedAgentStatus> {
+  async getStatus(binding: RemoteTaskBinding, observation?: StatusObservation): Promise<NormalizedAgentStatus> {
     const id = this.#own(binding)
     let reply: Reply
     try {
-      reply = await this.#call('GET', `/v1/tasks/${encodeURIComponent(id)}`)
+      reply = await this.#call('GET', `/v1/tasks/${encodeURIComponent(id)}`, undefined, this.#healthTimeoutMs)
     } catch (error) {
       if (!(error instanceof AdapterError) || (error.code !== 'REMOTE_UNREACHABLE' && error.code !== 'REMOTE_UNAUTHORIZED')) throw error
       const now = this.#now()
-      const since = this.#offlineSince.get(id) ?? now
-      this.#offlineSince.set(id, since)
-      if (now - since >= this.#offlineGraceMs) {
+      let at = this.#uncertainAt.get(id)
+      if (at === undefined) {
+        // 剩余时间的一半：首次失联后至少还有半个剩余窗口让调用方再轮询到不确定，而不是先到截止去取消一个联系不上的任务。
+        const deadline = observation ? Date.parse(observation.deadline_at) : Number.NaN
+        at = now + (Number.isFinite(deadline) ? Math.min(this.#offlineGraceMs, Math.max(0, (deadline - now) / 2)) : this.#offlineGraceMs)
+        this.#uncertainAt.set(id, at)
+      }
+      if (now >= at) {
         throw new AdapterError('BINDING_NOT_FOUND', `远程 runner 失联超过宽限，执行不确定，不重跑：${id}`, false, 'remote-offline-grace-exceeded')
       }
       return { status: 'running', at: new Date(now).toISOString(), terminal_observed: false, detail: 'REMOTE_UNREACHABLE' }
     }
-    this.#offlineSince.delete(id)
+    this.#uncertainAt.delete(id)
     const body = this.#expect(reply, 'status')
     if (body.remote_task_id !== id) throw protocolInvalid()
     return { status: body.status, at: new Date().toISOString(), terminal_observed: body.terminal_observed }

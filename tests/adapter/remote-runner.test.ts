@@ -230,6 +230,51 @@ test('失联在宽限内仍视为执行中，超过宽限报 BINDING_NOT_FOUND�
   }
 })
 
+test('有效宽限 = min(配置宽限, 首次失联时距等待截止剩余时间的一半)：先于任务超时判执行不确定，判定后保持', async () => {
+  const cm = await mkdtemp(join(tmpdir(), 'cmap-remote-grace-deadline-'))
+  try {
+    let now = 1_000_000
+    const adapter = adapterFor(await deadUrl(), cm, { offlineGraceMs: 600_000, now: () => now })
+    const binding: RemoteTaskBinding = { adapter: REMOTE_ADAPTER_ID, remote_task_id: 'codex:tsk-grace-deadline:1', protocol: 'cmap-remote-runner', protocol_version: '1', runner_id: 'lap' }
+    // dag/v1 固定 300 秒任务超时：配置的 600 秒宽限到不了，有效宽限取剩余 300 秒的一半
+    const observation = { deadline_at: new Date(now + 300_000).toISOString() }
+    assert.equal((await adapter.getStatus(binding, observation)).status, 'running')
+    now += 149_999
+    assert.equal((await adapter.getStatus(binding, observation)).status, 'running')
+    now += 1
+    await rejectsWith(adapter.getStatus(binding, observation), AdapterError, 'BINDING_NOT_FOUND')
+    // 判定后保持：之后换了更晚截止的观察者（例如收结果 Activity）也不会退回“执行中”
+    await rejectsWith(adapter.getStatus(binding, { deadline_at: new Date(now + 3_600_000).toISOString() }), AdapterError, 'BINDING_NOT_FOUND')
+    await rejectsWith(adapter.getStatus(binding), AdapterError, 'BINDING_NOT_FOUND')
+
+    // 配置宽限更短时仍以配置为准
+    const short = adapterFor(await deadUrl(), cm, { offlineGraceMs: 30_000, now: () => now })
+    const other = { ...binding, remote_task_id: 'codex:tsk-grace-short:1' }
+    assert.equal((await short.getStatus(other, { deadline_at: new Date(now + 300_000).toISOString() })).status, 'running')
+    now += 30_000
+    await rejectsWith(short.getStatus(other, { deadline_at: new Date(now + 270_000).toISOString() }), AdapterError, 'BINDING_NOT_FOUND')
+  } finally {
+    await rm(cm, { recursive: true, force: true })
+  }
+})
+
+test('状态查询挂起（网络分区、lap 休眠）按探测超时计为失联，不等 30 秒请求超时', async () => {
+  const cm = await mkdtemp(join(tmpdir(), 'cmap-remote-status-hang-'))
+  const hang = createServer(() => { /* 永不响应 */ })
+  await new Promise<void>((r) => hang.listen(0, '127.0.0.1', r))
+  try {
+    const adapter = adapterFor(`http://127.0.0.1:${(hang.address() as AddressInfo).port}`, cm, { healthTimeoutMs: 100 })
+    const binding: RemoteTaskBinding = { adapter: REMOTE_ADAPTER_ID, remote_task_id: 'codex:tsk-status-hang:1', protocol: 'cmap-remote-runner', protocol_version: '1', runner_id: 'lap' }
+    const started = Date.now()
+    const status = await adapter.getStatus(binding)
+    assert.deepEqual([status.status, status.detail], ['running', 'REMOTE_UNREACHABLE'])
+    assert.ok(Date.now() - started < 2_000)
+  } finally {
+    await close(hang)
+    await rm(cm, { recursive: true, force: true })
+  }
+})
+
 test('守护进程配置：必须显式非通配监听地址、显式模型、固定公钥；拒绝持有控制面秘密', () => {
   const base = { CMAP_RUNNER_LISTEN_HOST: '100.64.0.2', CMAP_PERMIT_PUBLIC_KEY_FILE: '/k.pub', CMAP_RUNNER_KEY_FILE: '/runner.key', CMAP_CODEX_MODEL: 'gpt-x' }
   const config = readRunnerDaemonConfig(base)

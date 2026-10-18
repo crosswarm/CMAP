@@ -762,7 +762,7 @@ export const createActivities = (deps: ActivityDeps) => {
           return judge(envelope,completed.result)
         }
         let status
-        try { status = await a.getStatus(t.binding) }
+        try { status = await a.getStatus(t.binding, {deadline_at: new Date(deadline).toISOString()}) }
         catch (error) {
           if (!(error instanceof AdapterError) || error.code !== 'BINDING_NOT_FOUND' ||
             !['codex-adapter','kimi-adapter','remote-runner-adapter'].includes(t.binding.adapter)) throw error

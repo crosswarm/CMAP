@@ -85,6 +85,9 @@ if (remoteRunnerUrl) {
   const remoteRunnerId = process.env['CMAP_REMOTE_RUNNER_ID']?.trim() ?? ''
   if (!permitKeyFile) throw new Error('CMAP_REMOTE_RUNNER_URL 需要 CMAP_PERMIT_KEY_FILE：远程 runner 只认固定公钥')
   if (!remoteRunnerId || remoteRunnerId === runnerId) throw new Error('CMAP_REMOTE_RUNNER_ID 必填且不能与本机 RUNNER_ID 相同')
+  // 离线宽限上限；实际宽限另受任务等待截止约束（取剩余时间的一半），保证失联先判执行不确定、不先撞任务超时。
+  const graceSeconds = Number(process.env['CMAP_REMOTE_OFFLINE_GRACE_SECONDS'] ?? 600)
+  if (!Number.isInteger(graceSeconds) || graceSeconds < 1) throw new Error('CMAP_REMOTE_OFFLINE_GRACE_SECONDS 须为正整数秒')
   adapters.push(new RemoteRunnerAdapter({
     authorization:{mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{
       if(contextRunner!==remoteRunnerId)throw new DispatchPermitError('CLAIM_MISMATCH')
@@ -95,6 +98,7 @@ if (remoteRunnerUrl) {
     agentId: `codex@${remoteRunnerId}`,
     workRoot,
     capabilities: CODEX_CAPABILITIES,
+    offlineGraceMs: graceSeconds * 1000,
   }))
 }
 

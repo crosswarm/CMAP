@@ -9,10 +9,10 @@
  *   offline         lap 守护进程 bootout 后派发（C5）：回落本地，ROUTING_DECIDED 记 unhealthy，lap 0 次
  *   capability      lap 准入不放行的能力（code.implement）：lap 在 health 里公布白名单，路由记 capability_mismatch 回落本地完成，lap 0 次
  *   lap-restart     lap 执行中 kickstart -k 守护进程：COMPLETED 且 lap 执行 1 次
- *   worker-restart  dag/v1，lap 执行中 SIGKILL CrossMini Worker 再拉起：runDagAttempt 不重试，只核不改派、不重跑、lap 执行 1 次
+ *   worker-restart  dag/v1，lap 执行中 SIGKILL CrossMini Worker 再拉起：runDagAttempt 心跳超时后按既有 binding 重试一次恢复观察，COMPLETED、不改派、lap 执行 1 次
  *   worker-restart-inspect  同上但 inspect/v1（测试专用 CODEX_BIN 让本机 codex 不健康，路由落到 codex@lap）：COMPLETED 且 lap 执行 1 次
- *   lap-offline     lap 执行中 bootout，生产默认配置（真实 Worker，宽限 600 秒、任务超时 300 秒）
- *   grace           同上，但用测试专用的进程内 Worker 把离线宽限缩到 30 秒：执行不确定、保留 binding、不二次执行
+ *   lap-offline     lap 执行中 bootout，生产默认配置（宽限上限 600 秒、任务超时 300 秒，有效宽限取剩余时间一半）：执行不确定、保留 binding、不二次执行
+ *   grace           同上，但 CMAP_REMOTE_OFFLINE_GRACE_SECONDS=30：30 秒后执行不确定
  *
  * 判据只认账本状态、事件回执、执行次数（lap 运行记录 + 进程组采样）与 sha256，不认退出码、端口 LISTEN。
  * 隔离：独立 schema（cmap_e2e_remote）、队列（cmap-e2e-remote）与工作区；Worker 不配置 Memross（不回写候选/交接）。
@@ -122,38 +122,6 @@ const stopWorkers = () => Promise.all(workers.splice(0).map((w) => new Promise((
   w.once('exit', resolve)
   w.kill('SIGTERM')
 })))
-
-/** 测试专用：进程内 Worker，接线同 apps/worker/src/main.ts，只把远程离线宽限缩短。生产默认不变。 */
-const startGraceWorker = async (offlineGraceMs) => {
-  const env = workerEnv()
-  const { Worker, NativeConnection } = await import('@temporalio/worker')
-  const dm = await import('#domain-model')
-  const { CodexAdapter } = await import('../adapters/codex-adapter/src/index.ts')
-  const { RemoteRunnerAdapter } = await import('../adapters/remote-runner/src/index.ts')
-  const { CODEX_CAPABILITIES } = await import('../adapters/codex-adapter/src/index.ts')
-  const { buildRunnerDescriptor } = await import('../apps/worker/src/runner-config.ts')
-  const { createActivities } = await import('../workflows/activities.ts')
-  const { createDagActivities } = await import('../workflows/dag-activities.ts')
-  const { privateKey, publicKey } = dm.loadOrCreatePermitKey(env['CMAP_PERMIT_KEY_FILE'])
-  const issuer = 'cmap:local-control-plane'
-  const verifierFor = (rid) => ({ mode: 'managed', verifier: (token, envelope, adapterId, ctxRunner) => {
-    if (ctxRunner !== rid) throw new dm.DispatchPermitError('CLAIM_MISMATCH')
-    return dm.verifyDispatchPermit(token, { publicKey, issuer, runnerId: rid, adapterId, envelope })
-  } })
-  const adapters = [
-    new CodexAdapter({ authorization: verifierFor(LOCAL_RUNNER), outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'), runsDir: join(workRoot, '.runs') }),
-    new RemoteRunnerAdapter({ authorization: verifierFor(remoteId), baseUrl: env['CMAP_REMOTE_RUNNER_URL'], runnerId: remoteId, agentId: LAP_AGENT, workRoot, capabilities: CODEX_CAPABILITIES, offlineGraceMs }),
-  ]
-  const runner = buildRunnerDescriptor(env, await Promise.all(adapters.map((a) => a.discover())))
-  const signDispatchPermit = (envelope, { runnerId, adapterId }) => dm.issueDispatchPermit({ privateKey, issuer, runnerId, adapterId, envelope })
-  const store = new dm.PgStore({ connectionString, schema: SCHEMA })
-  const connection = await NativeConnection.connect({ address: process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233' })
-  const deps = { store, adapters, runner, signDispatchPermit, workRoot }
-  const worker = await Worker.create({ connection, namespace: 'default', taskQueue: QUEUE, workflowsPath: join(repoRoot, 'workflows/index.ts'),
-    activities: { ...createActivities(deps), ...createDagActivities(deps) } })
-  const running = worker.run()
-  return async () => { worker.shutdown(); await running; await connection.close(); await store.close() }
-}
 
 // ------------------------------------------------------------------ Mission
 
@@ -378,7 +346,7 @@ const scenarios = {
   },
 
   async 'lap-offline'() { await offlineDuringRun('lap-offline') },
-  async grace() { await offlineDuringRun('grace', 30_000) },
+  async grace() { await offlineDuringRun('grace', 30) },
 }
 
 /** 每条链：父节点在 a、子节点在 b，子节点读取父产物。 */
@@ -424,43 +392,39 @@ const killWorkerDuringLapRun = async (scenario, nodes, workerExtra) => {
   return { missionId, result, s }
 }
 
-/** 执行中 lap 离线：只认账本——不完成、不改派、不回落本地、binding 保留、只启动 1 次；lap 恢复后运行记录仍 1 条。 */
-const offlineDuringRun = async (scenario, graceMs) => {
-  const stopGrace = graceMs ? await startGraceWorker(graceMs) : (await startWorker(), null)
+/** 执行中 lap 离线：只认账本——执行不确定、不改派、不回落本地、binding 保留、只启动 1 次；lap 恢复后运行记录仍 1 条。 */
+const offlineDuringRun = async (scenario, graceSeconds) => {
+  await startWorker(graceSeconds ? { CMAP_REMOTE_OFFLINE_GRACE_SECONDS: String(graceSeconds) } : {})
+  const { missionId, handle } = await startMission(scenario, [producer('solo', 7, 'lap', { slow: true })], [crit('solo', 7)])
+  const t0 = await waitTask(missionId, 'solo', (t) => t.binding)
+  await waitLapRunning(t0.id)
+  const offAt = Date.now()
+  stopLap()
+  ok(`lap 守护进程已 bootout（执行中）${graceSeconds ? `，宽限上限 ${graceSeconds}s` : '，生产默认配置'}`)
+  let result
   try {
-    const { missionId, handle } = await startMission(scenario, [producer('solo', 7, 'lap', { slow: true })], [crit('solo', 7)])
-    const t0 = await waitTask(missionId, 'solo', (t) => t.binding)
-    await waitLapRunning(t0.id)
-    const offAt = Date.now()
-    stopLap()
-    ok(`lap 守护进程已 bootout（执行中）${graceMs ? `，测试宽限 ${graceMs / 1000}s` : '，生产默认配置'}`)
-    let result
-    try {
-      result = await handle.result()
-    } finally {
-      restoreLap()
-    }
-    const waited = Math.round((Date.now() - offAt) / 1000)
-    const t = (await tasksOf(missionId)).solo
-    const evs = await events(missionId)
-    const outcome = result.nodeOutcomes.find((o) => o.nodeId === 'solo')
-    ok(`离线 ${waited}s 后 Workflow 返回：Mission ${result.state}，节点 ${outcome.status}:${outcome.reason}，任务 ${t.state}`)
-    check(result.state !== 'COMPLETED', '离线后不应完成')
-    check(t.binding?.runner_id === remoteId && t.binding.adapter === 'remote-runner-adapter', 'binding 未保留在 lap')
-    check(routingOf(evs, t.id).length === 1, '出现第二次路由（改派）')
-    check(countOf(evs, 'TASK_STARTED', t.id) === 1, 'TASK_STARTED 不是 1 条')
-    check((await store.queryTasks({ missionId })).length === 1, '派生了新任务（重跑）')
-    check(!(await localRunRecord(t.id)), '本地出现运行记录（回落本地重跑）')
-    if (graceMs) check(outcome.reason?.startsWith('EXECUTION_UNCERTAIN') && t.state === 'INPUT_REQUIRED', `应为执行不确定：${outcome.reason} / ${t.state}`)
-    ok(`binding ${t.binding.adapter}@${t.binding.runner_id} 保留，ROUTING_DECIDED=1，TASK_STARTED=1，任务数 1，本地运行记录 0`)
-    ok(`任务事件：${evs.filter((e) => e.task_id === t.id).map((e) => e.event_type).join(' → ')}`)
-    for (let i = 0; i < 30 && typeof daemonPid() !== 'number'; i += 1) await sleep(1_000)
-    const runs = lapRunRecords(t.id)
-    check(runs === 1, `lap 运行记录 ${runs} 条`)
-    ok(`lap 恢复（pid ${daemonPid()}），该任务运行记录 ${runs} 条`)
+    result = await handle.result()
   } finally {
-    if (stopGrace) await stopGrace()
+    restoreLap()
   }
+  const waited = Math.round((Date.now() - offAt) / 1000)
+  const t = (await tasksOf(missionId)).solo
+  const evs = await events(missionId)
+  const outcome = result.nodeOutcomes.find((o) => o.nodeId === 'solo')
+  ok(`离线 ${waited}s 后 Workflow 返回：Mission ${result.state}，节点 ${outcome.status}:${outcome.reason}，任务 ${t.state}`)
+  check(result.state !== 'COMPLETED', '离线后不应完成')
+  check(t.binding?.runner_id === remoteId && t.binding.adapter === 'remote-runner-adapter', 'binding 未保留在 lap')
+  check(routingOf(evs, t.id).length === 1, '出现第二次路由（改派）')
+  check(countOf(evs, 'TASK_STARTED', t.id) === 1, 'TASK_STARTED 不是 1 条')
+  check((await store.queryTasks({ missionId })).length === 1, '派生了新任务（重跑）')
+  check(!(await localRunRecord(t.id)), '本地出现运行记录（回落本地重跑）')
+  check(outcome.reason?.startsWith('EXECUTION_UNCERTAIN') && t.state === 'INPUT_REQUIRED', `应为执行不确定（宽限先于 300 秒任务超时）：${outcome.reason} / ${t.state}`)
+  ok(`binding ${t.binding.adapter}@${t.binding.runner_id} 保留，ROUTING_DECIDED=1，TASK_STARTED=1，任务数 1，本地运行记录 0`)
+  ok(`任务事件：${evs.filter((e) => e.task_id === t.id).map((e) => e.event_type).join(' → ')}`)
+  for (let i = 0; i < 30 && typeof daemonPid() !== 'number'; i += 1) await sleep(1_000)
+  const runs = lapRunRecords(t.id)
+  check(runs === 1, `lap 运行记录 ${runs} 条`)
+  ok(`lap 恢复（pid ${daemonPid()}），该任务运行记录 ${runs} 条`)
 }
 
 // ------------------------------------------------------------------ 入口

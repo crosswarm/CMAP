@@ -41,6 +41,10 @@ export interface AdapterDescriptor {
   readonly execution_level: 'A' | 'B' | 'C' | 'D'
 }
 
+export interface StatusObservation {
+  readonly deadline_at: string
+}
+
 export interface AdapterHealth {
   readonly state: HealthState
   readonly checked_at: string
@@ -189,7 +193,11 @@ export interface AgentAdapter {
 
   sendInput(binding: RemoteTaskBinding, input: AgentInput): Promise<void>
 
-  getStatus(binding: RemoteTaskBinding): Promise<NormalizedAgentStatus>
+  /**
+   * observation.deadline_at 是调用方这一轮等待的截止时刻（任务超时）。只有带离线宽限的 Adapter（远程 runner）使用：
+   * 失联的有效宽限据此收窄，保证先判执行不确定、而不是先撞上超时。其他 Adapter 可忽略。
+   */
+  getStatus(binding: RemoteTaskBinding, observation?: StatusObservation): Promise<NormalizedAgentStatus>
 
   subscribe(
     binding: RemoteTaskBinding,
