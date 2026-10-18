@@ -475,6 +475,14 @@ const routes: readonly Route[] = [
         if (error instanceof RangeError) return fail(ctx.res, 400, error.message)
         throw error
       }
+      // 续作来源：同租户、同 owner、已终结。不区分「不存在」与「无权」，避免泄漏他人 Mission。
+      const sourceId = mission.constraints['continues_mission_id']
+      if (typeof sourceId === 'string') {
+        const source = await missionInTenant(ctx, sourceId)
+        if (!source || source.owner !== owner || !['COMPLETED', 'FAILED', 'ESCALATED', 'CANCELED'].includes(source.state)) {
+          return fail(ctx.res, 400, 'continues_mission_id 必须指向本 owner 的已终结 Mission')
+        }
+      }
       let saved
       try {
         saved = await ctx.store.createMission({ mission, actor: { type: 'system', id: 'control-plane-api' } })

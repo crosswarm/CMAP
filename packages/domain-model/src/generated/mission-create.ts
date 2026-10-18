@@ -21,6 +21,10 @@ export interface MissionCreateV1 {
   max_additional_cycles?: number
   plan?: MissionPlanV1
   /**
+   * 可选：续作上一个 Mission（仅 inspect/v1，不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结（COMPLETED/FAILED/ESCALATED/CANCELED），否则 400。新 Mission 首个任务收到来源已验收通过的产物（continuation_input）、来源的记忆快照（continuation_memory）与从账本推出的交接内容（handoff），作为冻结输入证据；不恢复 Agent 会话。
+   */
+  continues_mission_id?: string
+  /**
    * 可选：派发前从 Memross 共享记忆检索并冻结上下文快照，作为首个任务的 memory_context 输入证据交付；与 plan 同时出现时作为各节点的缺省记忆（以节点 goal 作查询，节点可用自己的 memory 覆盖）。返工轮复用首轮快照，不重新检索。检索主体与授权由控制面配置的 Memross 凭据在服务端判定，调用方只能缩小范围。Memross 不可用时该 Mission 失败关闭，不静默降级。
    */
   memory?: {

@@ -243,3 +243,24 @@ test('DNS rebinding Host 和超大 JSON/chunked 请求不能触发执行', async
   assert.equal(await send(new URL(base).host, ['x'.repeat(40_000), 'x'.repeat(40_000)]), 413)
   assert.equal(starts.length, 0)
 })
+
+test('续作：continues_mission_id 必须指向本租户、本 owner 的已终结 Mission，否则 400 且不入账', async (t) => {
+  const store = new MemoryStore()
+  const base = { tenant: 'local', type: 'inspect', goal: 'prior', constraints: { risk_level: 'read-meta' },
+    acceptance: [{ criterion_id: 'files', metric: 'count', operator: 'eq' as const, expected: 3, hard_gate: true }],
+    workflow_template: 'inspect/v1', revision: 1, created_at: '2026-10-18T00:00:00.000Z', updated_at: '2026-10-18T00:00:00.000Z' }
+  const actor = { type: 'system', id: 'test' } as const
+  await store.createMission({ mission: { ...base, id: 'm-done', owner: 'configured-owner', state: 'ESCALATED' } as Mission, actor })
+  await store.createMission({ mission: { ...base, id: 'm-live', owner: 'configured-owner', state: 'RUNNING' } as Mission, actor })
+  await store.createMission({ mission: { ...base, id: 'm-foreign', owner: 'someone-else', state: 'COMPLETED' } as Mission, actor })
+  await store.createMission({ mission: { ...base, id: 'm-tenant', tenant: 'other', owner: 'configured-owner', state: 'COMPLETED' } as Mission, actor })
+  const { starts, post } = await setup(t, undefined, store)
+  for (const [i, source] of ['m-live', 'm-foreign', 'm-tenant', 'm-missing'].entries()) {
+    assert.equal((await post({ ...input, request_id: `synthetic-continue-${i}`, continues_mission_id: source })).status, 400, source)
+  }
+  assert.equal(starts.length, 0)
+  const ok = await post({ ...input, request_id: 'synthetic-continue-ok', continues_mission_id: 'm-done' })
+  assert.equal(ok.status, 202)
+  assert.equal((await store.getMission(ok.body['mission_id'] as string))!.constraints['continues_mission_id'], 'm-done')
+  assert.equal((await post({ ...input, request_id: 'synthetic-continue-plan', continues_mission_id: 'm-done', plan })).status, 400)
+})

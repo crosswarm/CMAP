@@ -17,6 +17,11 @@
     "risk_level": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] },
     "max_additional_cycles": { "type": "integer", "minimum": 0, "maximum": 10, "default": 2 },
     "plan": { "$ref": "mission-plan.v1.schema.json" },
+    "continues_mission_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "description": "可选：续作上一个 Mission（仅 inspect/v1，不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结（COMPLETED/FAILED/ESCALATED/CANCELED），否则 400。新 Mission 首个任务收到来源已验收通过的产物（continuation_input）、来源的记忆快照（continuation_memory）与从账本推出的交接内容（handoff），作为冻结输入证据；不恢复 Agent 会话。"
+    },
     "memory": {
       "type": "object",
       "additionalProperties": false,

@@ -56,7 +56,8 @@ const assertTaskScope = (mission: NonNullable<Awaited<ReturnType<Store['getMissi
   }
 }
 
-const artifactAllowed = (artifact: Artifact): boolean =>
+/** 可作为输入交给其他任务的产物：可用、非受限、无凭据/PII、未限角色、内容已评估。 */
+export const artifactShareable = (artifact: Artifact): boolean =>
   artifact.state === 'AVAILABLE' &&
   artifact.security &&
   (artifact.security.classification === 'public' || artifact.security.classification === 'internal') &&
@@ -94,7 +95,7 @@ const frozenInputMatches = (task: TaskRecord, artifact: Artifact): boolean =>
     typeof ref.sha256 === 'string' && lowerSha(ref.sha256) === lowerSha(artifact.sha256)
   ).length === 1
 
-const FROZEN_INPUT_ROLES = ['memory_context', 'continuation_input', 'handoff']
+const FROZEN_INPUT_ROLES = ['memory_context', 'continuation_input', 'continuation_memory', 'handoff']
 
 /** 本任务收到的冻结输入（自己的或经 review input 继承的），返工后继原样继承，保证前后看到同一份记忆。 */
 export const frozenInputArtifactIds = (task: TaskRecord): string[] => [...new Set(
@@ -128,7 +129,7 @@ const resolveArtifact = async (
   const matches = await matchingArtifacts(store, mission.id, artifactId)
   if (matches.length !== 1) throw inputInvalid('review input artifact not uniquely available')
   const artifact = matches[0]!
-  if (!artifactAllowed(artifact)) throw inputInvalid('review input artifact is not shareable')
+  if (!artifactShareable(artifact)) throw inputInvalid('review input artifact is not shareable')
   const task = await store.getTask(artifact.task_id)
   if (!task) throw inputInvalid('review input source task missing')
   assertTaskScope(mission, task)

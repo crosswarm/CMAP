@@ -28,3 +28,17 @@ dag/v1 节点等审批（`checkDagApproval` 返回 pending）或等资源锁（`
 - 由 `patched('dag-continue-as-new-v1')` 守卫；`tests/workflow/dag-continue-as-new.test.ts` 用小阈值在真实 Temporal 上跑出多段历史，并逐段 `runReplayHistory` 验证确定性。
 
 inspect/v1 的审批等待在单个 7 天 Activity 内轮询，历史不随等待增长，未引入 continueAsNew。
+
+## 续作 Mission（continues_mission_id）
+
+`POST /v1/missions` 可选 `continues_mission_id`（仅 inspect/v1，不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结，否则 400（不区分不存在与无权）。字段进入 `constraints`，参与幂等比较。
+
+新 Mission 首个任务在入账前冻结三类输入，写进工作区 `inputs/continues/<sha256(artifact_id)>/payload` 并登记在本任务名下（producer `cmap-continuation`，provenance 记来源 mission/task/artifact）：
+
+| role | 内容 |
+|---|---|
+| `continuation_input` | 来源中 `REVIEW_ACCEPTED` 任务的可共享结果产物（字节经来源 registry 与散列复核） |
+| `continuation_memory` | 来源各任务冻结过的 Memross 记忆快照（按散列去重） |
+| `handoff` | 从来源账本推出的交接内容（JSON，与升级时写给 Memross 的同一构造） |
+
+信封另带 `parameters.continues_mission_id`。不恢复 Agent 会话。账本 artifacts 以 `(task_id, role, version)` 唯一，同角色多份以 `version` 序号区分。重试沿用信封里的引用，只复核字节、补登记。返工后继经 review input 继承这些冻结输入。来源不合法时任务不创建、Mission 失败关闭（`CONTINUATION_INVALID`）。

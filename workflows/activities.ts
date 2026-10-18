@@ -42,6 +42,7 @@ import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-out
 import { applyReviewApplication } from './review-application.ts'
 import { proposeTaskKnowledge, recordEscalationHandoff } from './memross-writeback.ts'
 import { cancelMissionTasks, type CancelMissionTasksInput } from './mission-cancel.ts'
+import { continuationSource, freezeContinuationInputs, registerContinuationInputs } from './mission-continuation.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
 import { frozenInputArtifactIds, prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
@@ -373,27 +374,38 @@ export const createActivities = (deps: ActivityDeps) => {
 
     /** 创建任务并返回其 id。id 在此生成，Workflow 只负责传递。 */
     async createTask(input: CreateTaskInput): Promise<CreateTaskOutput> {
-      // 记忆快照只附在 Mission 的首个任务上（无 creationKey、调用方未给输入证据）。
+      // 冻结输入（记忆快照、续作证据）只附在 Mission 的首个任务上（无 creationKey、调用方未给输入证据）。
       if (input.creationKey !== undefined || input.artifactRefs !== undefined) return createLedgerTask(store,input)
       const mission = await store.getMission(input.missionId)
       const memory = mission?.constraints['memory'] as { project_id: string; query?: string; limit?: number } | undefined
-      if (!mission || !memory) return createLedgerTask(store,input)
+      const source = mission ? await continuationSource(store, mission) : null
+      if (!mission || (!memory && !source)) return createLedgerTask(store,input)
       if (!workRoot) throw new Error('MEMORY_REQUIRES_WORKROOT')
       const taskId = taskCreationId(input.missionId)
       const { child } = await safeChildDir(workRoot, taskId)
-      // 重试幂等：任务已入账就沿用信封里冻结的快照引用，只复核字节，绝不重新检索——
+      const withParameters = source ? { ...input, parameters: { continues_mission_id: source.id } } : input
+      // 重试幂等：任务已入账就沿用信封里冻结的引用，只复核字节，绝不重新检索或重新复制——
       // 重新检索可能拿到不同内容，导致同一任务的信封前后不一致。
       const existing = await store.getTask(taskId)
-      let ref = existing?.envelope.inputs?.artifact_refs?.find((r) => r.role === MEMORY_ROLE) as FrozenInputRef | undefined
-      if (existing && !ref) return createLedgerTask(store,input)
-      // artifact_id 是账本全局主键：同目标的两个 Mission 会冻结出同一份字节，必须带上任务 ID。
-      ref ??= await freezeMemoryInput(deps.memory, child, {
-        projectId: memory.project_id, query: (memory.query ?? mission.goal).slice(0, 500), limit: memory.limit ?? 3,
-      }, (digest) => `art_mem_${createHash('sha256').update(JSON.stringify([taskId, digest])).digest('hex').slice(0, 32)}`)
+      const frozen = existing?.envelope.inputs?.artifact_refs
+      if (existing && !frozen?.length) return createLedgerTask(store,withParameters)
+      let refs: FrozenInputRef[]
+      if (frozen?.length) refs = frozen as FrozenInputRef[]
+      else {
+        refs = source ? await freezeContinuationInputs(store, workRoot, source, taskId) as FrozenInputRef[] : []
+        // artifact_id 是账本全局主键：同目标的两个 Mission 会冻结出同一份字节，必须带上任务 ID。
+        if (memory) refs.push(await freezeMemoryInput(deps.memory, child, {
+          projectId: memory.project_id, query: (memory.query ?? mission.goal).slice(0, 500), limit: memory.limit ?? 3,
+        }, (digest) => `art_mem_${createHash('sha256').update(JSON.stringify([taskId, digest])).digest('hex').slice(0, 32)}`))
+      }
       // 与 Agent 侧同一道复核：路径不越界、散列一致、不含已知凭据模式。
-      const verified = await readVerifiedArtifact(child, { uri: ref.uri, role: ref.role, sha256: ref.sha256 })
-      const out = await createLedgerTask(store, { ...input, artifactRefs: [ref] })
-      await registerMemoryArtifact(store, { missionId: mission.id, taskId: out.taskId, ref, projectId: memory.project_id, sizeBytes: verified.bytes.length })
+      const memoryRef = refs.find((r) => r.role === MEMORY_ROLE)
+      const verified = memoryRef ? await readVerifiedArtifact(child, { uri: memoryRef.uri, role: memoryRef.role, sha256: memoryRef.sha256 }) : undefined
+      const out = await createLedgerTask(store, { ...withParameters, artifactRefs: refs })
+      if (memory && memoryRef && verified) {
+        await registerMemoryArtifact(store, { missionId: mission.id, taskId: out.taskId, ref: memoryRef, projectId: memory.project_id, sizeBytes: verified.bytes.length })
+      }
+      if (source) await registerContinuationInputs(store, workRoot, mission, source, out.taskId, refs)
       return out
     },
 

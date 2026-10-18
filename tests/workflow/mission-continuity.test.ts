@@ -158,3 +158,20 @@ test('取消：DAG 运行中节点收到 Adapter cancel，Mission 落 CANCELED',
     assert.equal((await store.getMission(id))!.state,'CANCELED')
   } finally { adapter.hold=false }
 })
+
+test('续作：continues_mission_id 的首任务带上一 Mission 已接受产物、交接与记忆快照完成', async()=>{
+  await store.createMission({mission:mission('mis-cont-source'),actor:{type:'system',id:'test'}})
+  const source=await execute('mis-cont-source')
+  assert.equal(source.state,'COMPLETED')
+  const sourceReport=(await store.listArtifacts(source.taskIds[0]!)).find(a=>a.role==='report')!
+  await store.createMission({mission:mission('mis-cont-next',{continues_mission_id:'mis-cont-source',memory:undefined}),actor:{type:'system',id:'test'}})
+  const result=await execute('mis-cont-next')
+  assert.equal(result.state,'COMPLETED')
+  const first=(await store.getTask(result.taskIds[0]!))!
+  const refs=first.envelope.inputs!.artifact_refs!
+  assert.deepEqual(refs.filter(r=>r.role==='continuation_input').map(r=>r.sha256),[sourceReport.sha256])
+  assert.equal(refs.filter(r=>r.role==='continuation_memory').length,1)
+  assert.equal(refs.filter(r=>r.role==='handoff').length,1)
+  const sent=adapter.startCalls.find(e=>e.identity.task_id===first.id)!
+  assert.deepEqual(sent.inputs?.artifact_refs,refs,'派发给 Agent 的信封带着同一组冻结输入')
+})

@@ -19,12 +19,14 @@ export const missionFromRequest = (input: unknown, tenant: string, owner: string
     throw new RangeError('请求不符合 mission-create v1，验收标准 ID 必须唯一')
   }
   const id = 'mis_' + createHash('sha256').update(JSON.stringify([tenant, owner, input.request_id])).digest('hex')
+  // 续作只接在 inspect/v1 首个任务上；DAG 没有单一首任务，继承归属不清。
+  if (input.plan !== undefined && input.continues_mission_id !== undefined) throw new RangeError('continues_mission_id 不能与 plan 同时出现（仅 inspect/v1 支持）')
   const plan = input.plan === undefined ? undefined : normalizeMissionPlan(input.plan, input.acceptance, input.risk_level)
   const memory = input.memory === undefined ? undefined : { ...input.memory, limit: input.memory.limit ?? 3 }
   const now = new Date().toISOString()
   return {
     id, tenant, owner, type: 'inspect', goal: input.goal,
-    constraints: { risk_level: input.risk_level, max_additional_cycles: input.max_additional_cycles ?? 2, ...(plan ? {plan} : {}), ...(memory ? {memory} : {}) },
+    constraints: { risk_level: input.risk_level, max_additional_cycles: input.max_additional_cycles ?? 2, ...(plan ? {plan} : {}), ...(memory ? {memory} : {}), ...(input.continues_mission_id ? {continues_mission_id: input.continues_mission_id} : {}) },
     acceptance: input.acceptance.map((c) => ({ ...c, hard_gate: c.hard_gate ?? true })),
     workflow_template: plan ? 'dag/v1' : 'inspect/v1', state: 'DRAFT', revision: 1,
     created_at: now, updated_at: now,

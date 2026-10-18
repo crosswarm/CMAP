@@ -72,7 +72,8 @@ export const usedMemoryBlocks = async (workRoot: string | undefined, task: TaskR
   if (!workRoot) return []
   const blocks: { document_id: string; revision_id: string; block_id: string; body_sha256: string }[] = []
   for (const ref of task.envelope.inputs?.artifact_refs ?? []) {
-    if (ref.role !== MEMORY_ROLE || !ref.uri || !ref.sha256) continue
+    // 自己冻结的快照，或续作继承的来源快照。经 review input 继承的副本在 inputs/review 下同样可读。
+    if ((ref.role !== MEMORY_ROLE && ref.role !== 'continuation_memory') || !ref.uri || !ref.sha256) continue
     try {
       const { bytes } = await readVerifiedArtifact(join(workRoot, task.id), { uri: ref.uri, role: ref.role, sha256: ref.sha256 })
       const manifest = memoryManifest(bytes)
