@@ -1,6 +1,6 @@
 # 远程 runner（单用户双主机，ADR-0006）
 
-状态：Stage 2–3（含应用层请求/响应认证）已实现；Stage 4 部分完成（2026-10-18）——lap 守护进程以 launchd `com.cmap.runner` 运行（代码 `a4fb971`，只监听 lap 的 Tailscale IPv4），`scripts/e2e-remote-runner.mjs` 真实两机实跑通过：健康探测、派发与同 runner 重放、请求受众不符/未签名/过期/重放 401、跨 runner 许可 CLAIM_MISMATCH、32 秒完成、产物在 CrossMini 复算哈希一致、lap 上运行记录 1 条。按 [ADR-0006 修订 1](adr/0006-single-user-dual-host-exception.md) 不配置 ACL。2026-10-19 经 Temporal 全链路实测（`scripts/e2e-remote-mission.mjs`，见下「Stage 4 实测」）：派发到 `codex@lap` 完成、lap 离线回落（C5）、执行中守护进程重启与 Worker 重启（inspect/v1）完成且只执行 1 次、跨主机 DAG 的 lap→CrossMini 方向通过；发现并修复（`9edbd69`，lap 尚未部署）DAG 输入下发到 lap 的契约缺口。尚未实测：CrossMini→lap 的 DAG 子节点、执行中 lap 离线（生产默认与缩短宽限两种）。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
+状态：Stage 2–3（含应用层请求/响应认证）已实现；Stage 4 部分完成（2026-10-18）——lap 守护进程以 launchd `com.cmap.runner` 运行（代码 `a4fb971`，只监听 lap 的 Tailscale IPv4），`scripts/e2e-remote-runner.mjs` 真实两机实跑通过：健康探测、派发与同 runner 重放、请求受众不符/未签名/过期/重放 401、跨 runner 许可 CLAIM_MISMATCH、32 秒完成、产物在 CrossMini 复算哈希一致、lap 上运行记录 1 条。按 [ADR-0006 修订 1](adr/0006-single-user-dual-host-exception.md) 不配置 ACL。2026-10-19 经 Temporal 全链路实测（`scripts/e2e-remote-mission.mjs`，见下「Stage 4 实测」）：派发到 `codex@lap` 完成、lap 离线回落（C5）、执行中守护进程重启与 Worker 重启（inspect/v1）完成且只执行 1 次、跨主机 DAG 的 lap→CrossMini 方向通过；发现并修复（`9edbd69`，lap 尚未部署）DAG 输入下发到 lap 的契约缺口。尚未实测：CrossMini→lap 的 DAG 子节点、执行中 lap 离线（生产默认与缩短宽限两种）。同日按实测发现做了三处修正（见下「2026-10-19 修正」），lap 需部署后复测。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
 
 ## 形态
 
@@ -8,7 +8,7 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 
 | 请求 | 用途 |
 |---|---|
-| `GET /v1/health` | 派发前 3 秒健康探测；不健康或 `runner_id` 不符即按 `fallback_agents` 回落本地，`ROUTING_DECIDED` 记 `unhealthy` |
+| `GET /v1/health` | 派发前 3 秒健康探测；应答同时公布 lap 的准入白名单（`admission`：租户、owner、能力、风险上限）。不健康、`runner_id` 不符或缺 `admission` 即按 `fallback_agents` 回落本地，`ROUTING_DECIDED` 记 `unhealthy`；白名单不放行则记 `tenant_mismatch` / `owner_mismatch` / `capability_mismatch` / `risk_exceeded` 并同样回落 |
 | `POST /v1/tasks` | 派发：信封 + 许可 + 已冻结输入（Memross 快照、评审输入） |
 | `GET /v1/tasks/{id}` | 状态轮询 |
 | `GET /v1/tasks/{id}/result` | 拉取结果与产物字节；CrossMini 落盘后用 `readVerifiedArtifact` 独立复算 sha256 |
@@ -21,15 +21,16 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 行为要点：
 
 - 许可受众绑定 lap 的 `runner_id` 与 `remote-runner-adapter`；lap 用固定公钥验签，允许 2 秒时钟偏差。拿到别的 runner 重放 → `CLAIM_MISMATCH`，过期 → `EXPIRED`，两者都在执行前拒绝，账本落 `RUNNER_ADMISSION_REVOKED:PERMIT_INVALID`，保留 binding、不重发。
-- lap 用自己的准入白名单（`RUNNER_ALLOWED_*`）复核信封身份；不放行时账本落 `RUNNER_ADMISSION_REVOKED:<CODE>`，例如 `OWNER_DENIED`。
-- 执行中失联：状态查询失败在 600 秒宽限内视为仍在执行；超过宽限进入既有「执行不确定」路径（任务 `INPUT_REQUIRED`、保留 binding），**不自动改派、不重跑**。宽限计时在 Worker 进程内存中，Worker 重启会重新计时——只会更晚判不确定，不会多执行。
+- 能力感知路由：CrossMini 派发前用 health 公布的白名单判断，不放行就跳过 lap、按 fallback 回落本地，不再派过去收准入拒绝。lap 派发时仍用自己的准入白名单（`RUNNER_ALLOWED_*`）复核信封身份（纵深防御，覆盖探测后白名单变化）；不放行时账本落 `RUNNER_ADMISSION_REVOKED:<CODE>`，例如 `OWNER_DENIED`。
+- 执行中失联：状态查询失败（含 3 秒内无应答）在离线宽限内视为仍在执行；超过宽限进入既有「执行不确定」路径（任务 `INPUT_REQUIRED`、保留 binding），**不自动改派、不重跑**。有效宽限 = min(`CMAP_REMOTE_OFFLINE_GRACE_SECONDS`（默认 600 秒）, 首次失联时距该轮等待截止剩余时间的一半)，首次失联时算定、判定后保持（[ADR-0006 修订 2](adr/0006-single-user-dual-host-exception.md)）。取剩余时间而不是任务超时的一半，是因为失联可能发生在执行后半段；留出半个剩余窗口让轮询（2 秒间隔 + 3 秒状态超时）至少再观察到一次。失联发生在截止前不足约 10 秒时，仍可能先撞超时（同样不改派不重跑）。宽限计时在 Worker 进程内存中，Worker 重启会重新计时——只会更晚判不确定，不会多执行。
+- Worker 重启（dag/v1）：`runDagAttempt` 在 Worker 失联（心跳超时 2 分钟）后重试一次，只对重启安全的 Adapter（Codex 运行记录模式、`remote-runner-adapter`）的既有 binding 恢复观察，绝不新启动 Agent；Kimi / YonWork 照旧升级 `NODE_EXECUTION_ERROR`。Activity 自身抛错不重试。新旧 Workflow 历史由 `patched('dag-attempt-restart-resume-v1')` 区分。恢复后该轮等待截止重新计时。
 - lap 上的 Codex 一律以 `-m $CMAP_CODEX_MODEL` 显式指定模型（信封带 `model_policy` 时以信封为准），不依赖 lap 的 `~/.codex` 默认模型。
 
 ## 应用层认证
 
 - **请求（CrossMini → lap）**：用 CrossMini 的派发许可私钥（`CMAP_PERMIT_KEY_FILE`，Ed25519）签 `方法 + 路径(含查询) + 请求体 sha256 + 毫秒时间戳 + nonce + 受众 runner_id`，放在 `x-cmap-timestamp` / `x-cmap-nonce` / `x-cmap-audience` / `x-cmap-content-sha256` / `x-cmap-signature` 头里（契约 `requestAuthHeaders`）。lap 在路由与读请求体**之前**验证：固定公钥验签、受众等于本机 `RUNNER_ID`、时间戳偏差 ≤ 2 秒、nonce 窗口内未用过；随后核对收到的体 sha256。任何一项不过都是同一个固定的 `401`（体为 `UNAUTHORIZED`，不签名，不区分原因），不执行任何动作。签名串带 `cmap-runner-req1` 域前缀，与派发许可的 `cmap1.` 不能互相冒用。
 - **应答（lap → CrossMini）**：lap 用自己的 Ed25519 私钥签 `受众 + 所答请求的 nonce + 状态码 + 应答体 sha256`（`x-cmap-signature`，契约 `responseAuthHeaders`）。绑定请求 nonce，旧应答不能冒充新请求的答复。CrossMini 用固定的 lap 公钥验签：结果端点验签失败按 `EVIDENCE_HASH_MISMATCH` 同等处理（不落盘、不写 artifact 记录）；其他端点是 `REMOTE_RESPONSE_SIGNATURE_INVALID`，健康探测判 `unavailable`。验签通过后产物仍由 CrossMini 独立复算 sha256。
-- **CrossMini 对 401 的处理**：派发被 401 拒绝时 lap 未执行，按 `PERMIT_INVALID`（`BAD_SIGNATURE`）落账、保留 binding、不重发；状态查询被 401 拒绝（密钥不符、时钟漂移）按失联处理，计入 600 秒离线宽限，不重跑。
+- **CrossMini 对 401 的处理**：派发被 401 拒绝时 lap 未执行，按 `PERMIT_INVALID`（`BAD_SIGNATURE`）落账、保留 binding、不重发；状态查询被 401 拒绝（密钥不符、时钟漂移）按失联处理，计入离线宽限，不重跑。
 - **nonce 缓存**在 lap 进程内存（容量 4096，保留约 5 秒）。守护进程重启后，窗口内（时间戳 ±2 秒，理论上至多约 4 秒）一个已被用过的请求理论上可被重放；时间戳窗口限定了这个缺口，未落盘。
 - 这一层**不替代** Tailscale ACL（ACL 仍未配置），也不加密：信封、冻结输入、结果产物的机密性依赖 tailnet 的 WireGuard；应用层只保证来源、完整性、受众与防重放。
 
@@ -41,8 +42,9 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 | `CMAP_REMOTE_RUNNER_PUBKEY_FILE` | 固定的 lap 响应验签公钥（SPKI PEM，来自下面 lap 的导出命令）。配置远程 runner 时必填，没有或含私钥材料即拒绝构造适配器、Worker 启动失败；轮换 lap 密钥后必须同步更新 |
 | `CMAP_REMOTE_RUNNER_URL` | 例如 `http://cross-m1mx:8790`。不设置则不注册远程 runner |
 | `CMAP_REMOTE_RUNNER_ID` | lap 守护进程的 `RUNNER_ID`，例如 `lap`；不得与本机 `RUNNER_ID` 相同。注册的 Agent ID 为 `codex@<id>` |
+| `CMAP_REMOTE_OFFLINE_GRACE_SECONDS` | 离线宽限上限，正整数秒，默认 `600`；有效宽限另受等待截止约束（见上「执行中失联」） |
 
-`RUNNER_ALLOWED_CAPABILITIES` 等本机准入照旧；远程 runner 的能力清单与本机 Codex 相同。路由用信封的 `execution_policy`：
+`RUNNER_ALLOWED_CAPABILITIES` 等本机准入照旧；远程 runner 的静态能力清单与本机 Codex 相同，实际是否派给 lap 另看 lap 在 health 里公布的白名单。路由用信封的 `execution_policy`：
 
 ```json
 { "preferred_agent": "codex@lap", "fallback_agents": ["codex"] }
@@ -152,9 +154,10 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
 | 层 | 命令 | 覆盖 |
 |---|---|---|
 | 契约 | `npm test`（`tests/contract/remote-runner.test.mjs`） | 各消息正反样例：通配 runner、路径穿越、多余字段、stderr 字段均拒绝 |
-| 单测 | `npm test`（`tests/adapter/remote-runner.test.ts`、`tests/domain/dispatch-permit.test.ts`） | 真实 HTTP + 假 codex：执行 1 次且显式 `-m`、同 runner 重放不二次执行、许可受众不符 `CLAIM_MISMATCH`、过期 `EXPIRED`、请求受众不符/时钟超窗被 401 拒绝、owner 拒绝、输入下发与篡改拒绝、健康探测超时、宽限边界、配置拒绝、密钥 0600 与公钥固定 |
+| 单测 | `npm test`（`tests/adapter/remote-runner.test.ts`、`tests/domain/dispatch-permit.test.ts`） | 真实 HTTP + 假 codex：执行 1 次且显式 `-m`、同 runner 重放不二次执行、许可受众不符 `CLAIM_MISMATCH`、过期 `EXPIRED`、请求受众不符/时钟超窗被 401 拒绝、owner 拒绝、输入下发与篡改拒绝、健康探测超时、health 公布白名单与缺白名单判不可用、宽限边界与「剩余时间一半」规则、状态查询挂起按 3 秒计失联、配置拒绝、密钥 0600 与公钥固定 |
 | 认证 | `npm test`（`tests/adapter/remote-runner-auth.test.ts`、`tests/contract/remote-runner.test.mjs`） | health/dispatch/status/result/cancel 五个端点：未签名、错签、签名后改路径/方法/体、过期、未来、受众不符、缺头、重放均 401 且体逐字节一致、不执行（取消与派发无副作用）；应答被改/剥签/用错 lap 公钥 CrossMini 拒收，结果端点 `EVIDENCE_HASH_MISMATCH` 且不落盘；lap 自签错误字节仍被复算哈希拒绝；适配器缺密钥 fail closed；认证头契约正反样例 |
-| 控制面 | `npm run test:workflow`（`tests/workflow/remote-runner.test.ts`） | 路由到 lap 并完成、lap 不在线回落并记原因、受众不符的重放 `PERMIT_INVALID`、时钟超窗的 lap 健康探测 401 并回落本地且 lap 0 次执行、篡改产物 `EVIDENCE_HASH_MISMATCH` 且无 artifact 记录、`RUNNER_ADMISSION_REVOKED:OWNER_DENIED`、失联超宽限不确定且只执行 1 次 |
+| 控制面 | `npm run test:workflow`（`tests/workflow/remote-runner.test.ts`） | 路由到 lap 并完成、lap 不在线回落并记原因、受众不符的重放 `PERMIT_INVALID`、时钟超窗的 lap 健康探测 401 并回落本地且 lap 0 次执行、篡改产物 `EVIDENCE_HASH_MISMATCH` 且无 artifact 记录、`RUNNER_ADMISSION_REVOKED:OWNER_DENIED`、失联超宽限不确定且只执行 1 次；白名单不放行租户/owner/能力/风险 → 路由记对应原因回落本地、lap 0 次；白名单过时时 lap 准入仍拒绝；配置宽限 600 秒、任务超时 2 秒的执行中失联 → 收结果与 DAG attempt 都判执行不确定；新 Worker 实例在重试 attempt 上按既有 binding 恢复、lap 只执行 1 次 |
+| Worker 重启 | `npm run test:workflow`（`tests/workflow/dag-attempt-restart.test.ts`） | 真实 Temporal：首个 attempt 派发后失联，重启安全 Adapter 重试恢复并 COMPLETED、只启动 1 次，非重启安全 Adapter 仍 `NODE_EXECUTION_ERROR`；Activity 自身错误不可重试；补丁前合成历史（`tests/fixtures/dag-attempt-legacy.json`）重放 |
 | 本机双端口模拟 | `TMPDIR=/private/tmp CMAP_CODEX_MODEL=<model> node scripts/e2e-remote-runner.mjs --simulate`（加 `--fake-codex` 不调用模型） | 两个真实守护进程进程：健康、派发、重放、受众不符 401、许可受众不符 `CLAIM_MISMATCH`、未签名/过期/重放 401、应答带签名、终态、CrossMini 复算哈希、exec 计数 |
 | Stage 4 两机（不经 Temporal） | `node scripts/e2e-remote-runner.mjs`（读 `CMAP_REMOTE_RUNNER_URL`/`CMAP_REMOTE_RUNNER_ID`/`CMAP_PERMIT_KEY_FILE`/`CMAP_REMOTE_RUNNER_PUBKEY_FILE`） | 跨主机验签与时钟、派发与重放、401、CLAIM_MISMATCH、产物复算（2026-10-18 通过） |
 | Stage 4 Temporal 全链路 | `TMPDIR=/private/tmp node scripts/e2e-remote-mission.mjs <场景>...`（同上四个变量；ssh 别名 `lap`；独立 schema `cmap_e2e_remote`、队列 `cmap-e2e-remote`，Worker 不配置 Memross） | 见下「Stage 4 实测」；ACL 按修订 1 不配置 |
@@ -178,11 +181,23 @@ CrossMini 起真实 Worker（`apps/worker/src/main.ts`），lap 守护进程为 
 
 测试数据只在 `cmap_e2e_remote` schema 与 `.cmap-work/e2e-remote/`；未写 Memross。
 
+### 2026-10-19 修正（Cross 决定，lap 部署后复测）
+
+上表 🟡/⬜ 三行对应的修正，本机单测、工作流测试与双端口模拟已覆盖，真实两机待 lap 部署后按下表复测：
+
+| 修正 | 提交 | 复测场景与预期 |
+|---|---|---|
+| 能力感知路由：lap 在已签名 health 应答公布准入白名单，路由不放行即回落 | `3d9d922` | `capability`：ROUTING_DECIDED `codex@lap` skipped(`capability_mismatch`) → `codex` selected、fallback=true；本地完成、lap 0 次 |
+| dag/v1 Worker 重启：重启安全 Adapter 的 attempt 重试一次，按既有 binding 恢复 | `6de79e8` | `worker-restart`：COMPLETED，ROUTING_DECIDED=1、TASK_STARTED=1、lap 运行记录 1、本地 0（Worker 拉起后约 2 分钟心跳超时才重试） |
+| 离线宽限可配置且受等待截止约束 | `082c1ac` | `lap-offline`（生产默认）与 `grace`（`CMAP_REMOTE_OFFLINE_GRACE_SECONDS=30`，脚本改用真实 Worker）：执行不确定（`INPUT_REQUIRED`、`EXECUTION_UNCERTAIN:BINDING_NOT_FOUND`）、binding 保留、不改派、lap 运行记录 1 |
+
+旧版 lap（`a4fb971`）的 health 应答没有 `admission`，新 CrossMini 会判其不可用、全部回落本地；lap 与 CrossMini 需同时更新。
+
 ## 已知边界
 
 - 所有端点已有应用层请求认证与应答签名，但 **Tailscale ACL 仍未配置**，仍是网络层缺口：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求会被读头后 401，但仍占连接）。ACL 落地并实测前，不得在 tailnet 上启动守护进程接收真实任务。
 - 应用层不加密。私钥泄露即失效：CrossMini 的 `CMAP_PERMIT_KEY_FILE` 一旦泄露，攻击者既能伪造请求也能签派发许可；轮换须同时更新 lap 上的 `CMAP_PERMIT_PUBLIC_KEY_FILE`。lap 的 `CMAP_RUNNER_KEY_FILE` 泄露则可伪造应答，须同步更新 CrossMini 的 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`。
 - nonce 防重放缓存在内存，守护进程重启后窗口内（≤ 约 4 秒）理论上可重放；时钟偏差超过 2 秒的请求一律被拒，两机需要 NTP 同步。
 - 产物随结果以 base64 内联拉取，单个约 16 MiB 上限，适合报告类证据，不适合大文件。
-- `RemoteRunnerAdapter` 的风险上限默认 `mutating`（与被包装的 Codex 一致），真正的上限由 lap 的 `RUNNER_MAX_RISK` 执行；超出时落准入拒绝而不是回落本地。
+- `RemoteRunnerAdapter` 的静态风险上限默认 `mutating`（与被包装的 Codex 一致），真正的上限由 lap 的 `RUNNER_MAX_RISK` 执行：派发前按 health 公布的白名单回落本地（`risk_exceeded`），探测后白名单才收紧的情形仍由 lap 准入拒绝兜底。白名单不含 `affinity.host`，指定主机不符仍由 lap 准入拒绝（`HOST_MISMATCH`）。
 - 只有一个远程 runner（固定 Adapter ID `remote-runner-adapter`）；第三台机器不在 ADR-0006 范围内。
