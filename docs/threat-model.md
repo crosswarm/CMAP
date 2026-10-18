@@ -177,6 +177,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 | 缓解 | 状态 |
 |---|---|
 | `idempotency_key` 去重，重复派发复用 binding 而非重跑 | ✅ 已实现 + e2e 验证 |
+| Worker 重启 / Activity 重试后不重跑 Codex：运行记录 `wx` 独占创建，记录已存在绝不再启动；据记录等待、收集或判执行不确定 | 🟡 Codex 已实现 + 真实 e2e 验证（`e2e-mission.mjs --restart-worker`）；Kimi / YonWork 仍只在进程内存，重启后走执行不确定 |
 | 事件流 `idempotency_key` 去重 | ✅ 类型已定义 |
 | 所有 Activity 幂等 | 🟡 原则已确立，逐个落实待 P1 |
 | 短期令牌 + Nonce | 🟡 本机签名与到期检查已实现；nonce 不代表一次性消费，跨主机持久防重放仍待 P4 |
@@ -229,6 +230,22 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 **为什么不用 fencing token**：它的前提是被保护资源能校验并拒绝低 token 的操作。但真机（computer-use 点屏幕）、YonWork（`yonworkctl` 无 token 参数）、git worktree（文件系统）全是**哑资源**，无一能拒绝过期持有者。加该字段只会留下一个从未被检验的字段，并制造"已经防住了"的错觉——比不加更危险。
 
+## 单用户双主机闸口
+
+[ADR-0006](adr/0006-single-user-dual-host-exception.md) 允许的唯一例外：Cross 单用户、Tailscale 私网、lap（`cross-m1mx`）作第二执行节点。以下闸口**全部**落地并验证前，lap 不得接收真实任务。本表只对该例外生效；第二个人、第三台机器或公网暴露仍须 T1–T12 全部就位。
+
+| 闸口 | 规则 | 状态 |
+|---|---|---|
+| 控制面唯一 | CrossMini 是唯一控制面、账本写入者与 Artifact 存储；lap 不接入 Temporal / PostgreSQL，只运行 runner 守护进程 | ⬜ 规则已定（Stage 0），runner 守护进程待 Stage 2 |
+| 许可签名与受众 | 派发许可为 Ed25519，受众绑定 `runner_id`（及 Adapter、任务、信封摘要）；lap 只持验签公钥，不持签名私钥 | 🟡 本机受管派发已验证（见 [dispatch-permit](dispatch-permit.md)）；跨主机验签待 Stage 2 |
+| 时钟偏差 | 两机验签允许的时钟偏差 ≤ 2 秒，超出拒绝，不以放宽偏差规避 | ⬜ 本机实现当前不放宽偏差；跨主机的 2 秒上限待 Stage 2 |
+| 离线宽限 | 失联超过 600 秒，lap 上进行中的任务进入 `EXECUTION_UNCERTAIN`，**不自动改派、不重跑**，由人决定 | ⬜ 待 Stage 2；其前提「执行不确定则升级、绝不重跑」见下一行 |
+| 重启不重跑 | Codex 启动前独占写运行记录；重启后按记录判断：进程仍在则等待收集，已退出且结果完整则收集，否则走执行不确定，绝不重跑 | 🟡 Codex 已实现并真实验证：`<workRoot>/.runs/<taskId>.json` 以 `wx` 创建、输出落文件，单测覆盖进程在/已退/不确定/记录已存在四种情形；`node scripts/e2e-mission.mjs --restart-worker` 在 Codex 执行期间 SIGKILL Worker 后 Mission COMPLETED 且 Codex 只执行 1 次（2026-10-18）。Kimi 与 YonWork 尚未覆盖 |
+| 暴露面 | runner 仅监听 `lap:8790`，不绑公网；Tailscale ACL 只允许 CrossMini → lap:8790，无其他入站、无 lap → CrossMini 入站 | ⬜ 待 Stage 2（ACL 与监听配置须实测放行与拒绝两面） |
+| 秘密隔离 | lap 不持有 Memross 令牌与数据库地址；Memross 快照由 CrossMini 冻结后随任务输入下发；提供方子进程环境沿用白名单 | 🟡 子进程环境白名单已实现；lap 部署核查待 Stage 2 |
+| 账本与证据 | 结果只经 CrossMini 采集后写账本；Artifact 由 CrossMini 拉取并独立复算 sha256，不采信 lap 自报 | 🟡 本机独立复算已实现；跨主机拉取待 Stage 2 |
+| 例外前提 | 只有 Cross 一个用户；前提变化（引入协作者）即例外失效，需重新评审 | ✅ 规则已写入 ADR-0006 |
+
 ## 残余风险
 
 即便上述控制全部落地，以下风险仍然存在，需要以运营手段而非技术手段应对：
@@ -274,5 +291,6 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 ## 相关文档
 
 - [architecture.md](architecture.md) — 架构与契约体系
-- [adr/0002-control-plane-host.md](adr/0002-control-plane-host.md) — 控制面部署与网络方向
+- [adr/0002-control-plane-host.md](adr/0002-control-plane-host.md) — 控制面部署与网络方向（已搁置）
+- [adr/0006-single-user-dual-host-exception.md](adr/0006-single-user-dual-host-exception.md) — 单用户 + Tailscale 双主机例外
 - [adr/0003-agent-output-contract-layering.md](adr/0003-agent-output-contract-layering.md) — 为何不采信 Agent 自报哈希

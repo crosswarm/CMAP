@@ -26,6 +26,7 @@
 ## 安全边界
 
 1. **多人多机 + 跨公网 = 远程代码执行平台。** 接入第二个人或第二台机器前，`docs/threat-model.md` 的 T1–T12 缓解必须先就位。
+   - **唯一例外**（[ADR-0006](docs/adr/0006-single-user-dual-host-exception.md)，Cross 于 2026-10-18 批准）：单用户 + Tailscale 私网下，lap（`cross-m1mx`）可作为第二执行节点，只运行 runner 守护进程，不接入 Temporal/Postgres；CrossMini 仍是唯一控制面、账本写入者与 Artifact 存储。必须满足威胁模型「单用户双主机」闸口表；第二个人、第三台机器或任何公网暴露仍适用上面的原规则。
 2. Adapter **一律显式传沙箱档**（`-s`），绝不继承本机 codex 的 `danger-full-access` 默认值。
 3. **身份字段由控制面填充**，不取 Agent 自述；**证据哈希由控制面独立复算**，不采信 Agent 自报。
 4. `controlled` 与 `mutating` 的授权**互不蕴含**，不得合并为单一批准。Agent 不得自批，也不得把自身判断伪装成人工授权。
