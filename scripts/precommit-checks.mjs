@@ -123,6 +123,7 @@ const GENERATED_MAP = [
   { schema: 'mission-plan.v1.schema.json', generated: 'mission-plan.ts' },
   { schema: 'mission-create.v1.schema.json', generated: 'mission-create.ts' },
   { schema: 'mission-submission.v1.schema.json', generated: 'mission-submission.ts' },
+  { schema: 'mission-cancel.v1.schema.json', generated: 'mission-cancel.ts' },
   { schema: 'approval-decision-input.v1.schema.json', generated: 'approval-decision-input.ts' },
   { schema: 'approval-context.v1.schema.json', generated: 'approval-context.ts' },
   { schema: 'approval-advice.v1.schema.json', generated: 'approval-advice.ts' },

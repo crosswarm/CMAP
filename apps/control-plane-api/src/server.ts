@@ -18,10 +18,10 @@ import { createHash } from 'node:crypto'
 import { lstat, open, readFile, realpath, stat } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError } from '#domain-model'
+import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError, EventConflictError } from '#domain-model'
 import type { Store, Approval, ApprovalAdviceV1, ApprovalScope, Artifact, MissionEventV1, TaskEvent } from '#domain-model'
 import type { Mission } from '#domain-model'
-import { missionFromRequest } from './mission-submission.ts'
+import { missionFromRequest, validateMissionCancel } from './mission-submission.ts'
 import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/generated/mission-submission.ts'
 import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/generated/control-plane-context.ts'
 
@@ -39,6 +39,8 @@ export interface ControlPlaneOptions {
   readonly getApprovalAdvice?: (id: string) => Promise<ApprovalAdviceV1>
   /** 必须按 workflowId 幂等启动，运行中与已关闭的 Workflow 均不得重复。 */
   readonly startMission?: (missionId: string, workflowId: string) => Promise<void>
+  /** 向运行中的 Mission Workflow 发送 cancelMission 信号；重复发送由 Workflow 去重。 */
+  readonly cancelMission?: (missionId: string, workflowId: string, reason: string) => Promise<void>
 }
 
 interface Ctx {
@@ -493,6 +495,43 @@ const routes: readonly Route[] = [
       if (!ctx.config.owner?.trim()) return fail(ctx.res, 503, '本机 owner 未配置')
       if (mission.owner !== ctx.config.owner) return fail(ctx.res, 403, '只能启动本机 owner 创建的 Mission')
       await respondMissionStart(ctx, mission)
+    },
+  },
+  {
+    method: 'POST', pattern: '/v1/missions/:id/cancel',
+    handler: async (ctx) => {
+      const body = await readBody(ctx.req)
+      if (!validateMissionCancel(body)) return fail(ctx.res, 400, '请求不符合 mission-cancel v1：reason 必填（1–500 字）')
+      const id = ctx.params['id']!
+      const mission = await missionInTenant(ctx, id)
+      if (!mission) return fail(ctx.res, 404, `Mission 不存在：${id}`)
+      const owner = ctx.config.owner?.trim()
+      if (!owner || !ctx.config.cancelMission) return fail(ctx.res, 503, 'Mission 取消入口未配置')
+      if (mission.owner !== owner) return fail(ctx.res, 403, '只能取消本机 owner 创建的 Mission')
+      if (['COMPLETED', 'FAILED', 'ESCALATED', 'CANCELED'].includes(mission.state)) {
+        return fail(ctx.res, 409, `Mission 已处于终态 ${mission.state}，不能取消`)
+      }
+      const result = missionSubmission(mission.id)
+      const actor = { type: 'human', id: owner } as const
+      // 原因先落账本：信号发不出去时，取消意图仍可追溯，客户端可用同一请求重试。
+      try {
+        await ctx.store.appendEvent({ event: {
+          event_type: 'MISSION_CANCEL_REQUESTED', event_version: 1, occurred_at: new Date().toISOString(),
+          mission_id: mission.id, task_id: null, attempt: null, actor, causation_id: null,
+          correlation_id: mission.id, trace_id: null, idempotency_key: `mission-cancel-requested:${mission.id}`,
+          payload: { reason: body.reason },
+        } })
+      } catch (error) {
+        // 已有取消请求（原因不同）：沿用首次记录，仍重发信号。
+        if (!(error instanceof EventConflictError)) throw error
+      }
+      if (mission.state === 'DRAFT') {
+        await ctx.store.setMissionState(mission.id, 'CANCELED', actor, `mission-canceled:${mission.id}`)
+        return json(ctx.res, 202, result)
+      }
+      try { await ctx.config.cancelMission(mission.id, result.workflow_id, body.reason) }
+      catch { return json(ctx.res, 503, { error: '取消信号未确认送达，请重试', mission_id: mission.id }) }
+      json(ctx.res, 202, result)
     },
   },
   { method: 'GET', pattern: '/v1/missions/:id/events', handler: streamMissionEvents },

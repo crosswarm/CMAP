@@ -14,7 +14,7 @@
  * 内部状态上（见 ADR-0005）。
  */
 
-import { ActivityFailure, isCancellation, patched, proxyActivities } from '@temporalio/workflow'
+import { ActivityFailure, defineSignal, isCancellation, patched, proxyActivities, setHandler } from '@temporalio/workflow'
 
 import type { ProgressSnapshot } from '#domain-model'
 import type { Activities } from './activities.ts'
@@ -62,6 +62,9 @@ const FOLLOWUP_QUEUE_PATCH = 'mission-followup-queue-v1'
 /** S5 协作/交接：旧历史重放时 patched() 为 false，不插入新 Activity。 */
 const KNOWLEDGE_PATCH = 'mission-knowledge-propose-v1'
 const HANDOFF_PATCH = 'mission-escalation-handoff-v1'
+/** S5 续接：取消信号。旧历史里即使出现同名信号（当时无处理器），重放时 patched() 为 false，照旧忽略。 */
+const CANCEL_PATCH = 'mission-cancel-v1'
+export const cancelMissionSignal = defineSignal<[{ readonly reason: string }]>('cancelMission')
 
 type StopReason = Parameters<Activities['cancelPendingMissionTasks']>[0]['reason']
 
@@ -78,7 +81,7 @@ export interface MissionWorkflowInput {
 export interface MissionWorkflowResult {
   readonly missionId: string
   /** ESCALATED 表示自动返工已停止，等人介入——与「失败」是两回事。 */
-  readonly state: 'COMPLETED' | 'ESCALATED' | 'FAILED'
+  readonly state: 'COMPLETED' | 'ESCALATED' | 'FAILED' | 'CANCELED'
   /** 按轮次顺序排列，含每一轮返工派生的后继任务。 */
   readonly taskIds: readonly string[]
   /** Agent 交回的结论摘要，便于调用方不查账本也能看到发生了什么。 */
@@ -95,6 +98,17 @@ export async function missionWorkflow(
   input: MissionWorkflowInput,
 ): Promise<MissionWorkflowResult> {
   const { missionId } = input
+
+  // 取消：收到信号立即并行清扫（未绑定任务取消、已绑定的调 Adapter cancel），
+  // 主循环在下一个检查点收尾。等待中的审批会被置为 expired，正在等结果的 Agent 被 cancel 后终止，
+  // 所以主循环不会长期卡在等待上。
+  let cancelReason: string | undefined
+  let cancelSweep: Promise<unknown> = Promise.resolve()
+  setHandler(cancelMissionSignal, (signal) => {
+    if (cancelReason !== undefined || !patched(CANCEL_PATCH)) return
+    cancelReason = typeof signal?.reason === 'string' && signal.reason.trim() ? signal.reason.slice(0, 500) : 'MISSION_CANCELED'
+    cancelSweep = acts.cancelMissionTasks({ missionId, reason: cancelReason }).catch(() => undefined)
+  })
 
   await acts.setMissionState({ missionId, state: 'RUNNING' })
 
@@ -137,6 +151,13 @@ export async function missionWorkflow(
     return result
   }
 
+  const finishCanceled = async (): Promise<MissionWorkflowResult> => {
+    await cancelSweep
+    // 再扫一遍：清扫期间可能有任务刚完成派发或刚派生。
+    await acts.cancelMissionTasks({ missionId, reason: cancelReason!, finalize: true })
+    return { missionId, state: 'CANCELED', taskIds, summary: 'MISSION_CANCELED', failedCriteria: [], rounds: maxRound }
+  }
+
   const pendingIds = (): readonly string[] => queue.map((item) => item.taskId)
   const cancelPending = async (reason: StopReason): Promise<readonly string[]> => {
     const ids = pendingIds()
@@ -150,6 +171,7 @@ export async function missionWorkflow(
     const { taskId, round, previousProgress } = current
     maxRound = Math.max(maxRound, round)
     let recoverActivityFailure = branched
+    if (cancelReason !== undefined) return finishCanceled()
 
     try {
       await acts.markReady(taskId)
@@ -167,6 +189,7 @@ export async function missionWorkflow(
           approvalId: gate.approvalId,
           scope: gate.scope,
         })
+        if (cancelReason !== undefined) return finishCanceled()
 
         if (approval.decision === 'rejected') {
           recoverActivityFailure = false
@@ -192,6 +215,7 @@ export async function missionWorkflow(
       // 派发：写 Ledger 与调 Adapter 在同一 Activity 内完成。
       // 重复执行时该 Activity 会发现已有 binding 并跳过，不重复派发。
       const dispatch = await acts.dispatchTask(taskId)
+      if (cancelReason !== undefined) return finishCanceled()
       if ('admissionDenied' in dispatch) {
         const prefix=dispatch.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
         recoverActivityFailure = false
@@ -202,6 +226,7 @@ export async function missionWorkflow(
 
       // 等 Agent 干完并收结果。
       const collected = await longRunning.collectTaskResult(taskId)
+      if (cancelReason !== undefined) return finishCanceled()
       if ('executionUncertain' in collected) {
         const reason = `EXECUTION_UNCERTAIN:${collected.executionUncertain.code}`
         recoverActivityFailure = false
@@ -318,6 +343,8 @@ export async function missionWorkflow(
       current = queue.shift()!
     } catch (error) {
       if (isCancellation(error)) throw error
+      // 取消清扫与正在进行的步骤竞争（如任务已被取消而派发失败）：以取消收尾。
+      if (cancelReason !== undefined) return finishCanceled()
       if (!branched || !recoverActivityFailure || !(error instanceof ActivityFailure)) throw error
       recoverActivityFailure = false
       await cancelPending('WORKFLOW_ACTIVITY_FAILED')

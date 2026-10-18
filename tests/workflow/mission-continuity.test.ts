@@ -14,22 +14,37 @@ import {mkdtemp,rm} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join,resolve} from 'node:path'
 import {MemoryStore,type Mission,type RemoteTaskBinding,type TaskResultV1} from '#domain-model'
+import {AdapterError,type NormalizedAgentStatus} from '#adapter-sdk'
 import {createActivities} from '../../workflows/activities.ts'
+import {createDagActivities} from '../../workflows/dag-activities.ts'
 import {FileFakeAdapter,syntheticActivityDeps,syntheticRunner} from './fake-adapter.ts'
 import {fakeMemrossServer} from './fake-memross.ts'
 
 const QUEUE=`cmap-continuity-${process.pid}-${Date.now()}`
 const ADDRESS=process.env['TEMPORAL_ADDRESS']??'localhost:7233'
 
-/** 结果附带可复用结论，驱动 propose。 */
+/** 结果附带可复用结论，驱动 propose；hold 时一直运行，直到被 cancel。 */
 class FindingAdapter extends FileFakeAdapter {
+  hold=false
+  readonly canceled=new Set<string>()
+  override async getStatus(binding?:RemoteTaskBinding):Promise<NormalizedAgentStatus> {
+    const at=new Date().toISOString()
+    if(binding&&this.canceled.has(binding.remote_task_id))return {status:'canceled',at,terminal_observed:true}
+    if(this.hold)return {status:'running',at,terminal_observed:false}
+    return super.getStatus()
+  }
+  override async cancel(binding:RemoteTaskBinding):Promise<void> {
+    await super.cancel(binding)
+    this.canceled.add(binding.remote_task_id)
+  }
   override async collectResult(binding:RemoteTaskBinding):Promise<TaskResultV1> {
+    if(this.canceled.has(binding.remote_task_id))throw new AdapterError('TASK_CANCELED','已取消',false,'task-canceled')
     const result=await super.collectResult(binding)
     return {...result,findings:[{severity:'medium',code:'READBACK',description:'写回后必须回读持久化结果'}]}
   }
 }
 
-let conn:Connection,native:NativeConnection,worker:Worker,running:Promise<void>,client:Client
+let conn:Connection,native:NativeConnection,worker:Worker,running:Promise<void>,client:Client,dagWorker:Worker,dagRunning:Promise<void>
 const store=new MemoryStore()
 const adapter=new FindingAdapter()
 const memross=fakeMemrossServer()
@@ -46,10 +61,14 @@ before(async()=>{
   native=await NativeConnection.connect({address:ADDRESS})
   client=new Client({connection:conn})
   worker=await Worker.create({connection:native,taskQueue:QUEUE,workflowsPath:resolve('workflows/mission.workflow.ts'),
-    activities:createActivities(syntheticActivityDeps({store,adapter,workRoot,runner:syntheticRunner({runner_id:'test-runner'}),pollIntervalMs:1,memory:memross.memory}))})
+    activities:createActivities(syntheticActivityDeps({store,adapter,workRoot,runner:syntheticRunner({runner_id:'test-runner'}),pollIntervalMs:1,approvalPollIntervalMs:5,memory:memross.memory}))})
   running=worker.run()
+  const dagDeps=syntheticActivityDeps({store,adapter,workRoot,runner:syntheticRunner({runner_id:'test-runner'}),pollIntervalMs:1})
+  dagWorker=await Worker.create({connection:native,taskQueue:`${QUEUE}-dag`,workflowsPath:resolve('workflows/dag.workflow.ts'),
+    activities:{...createActivities(dagDeps),...createDagActivities(dagDeps)}})
+  dagRunning=dagWorker.run()
 })
-after(async()=>{worker?.shutdown();await running?.catch(()=>{});await conn?.close();await native?.close();if(workRoot)await rm(workRoot,{recursive:true,force:true})})
+after(async()=>{worker?.shutdown();dagWorker?.shutdown();await running?.catch(()=>{});await dagRunning?.catch(()=>{});await conn?.close();await native?.close();if(workRoot)await rm(workRoot,{recursive:true,force:true})})
 
 const execute=(missionId:string)=>client.workflow.execute('missionWorkflow',{taskQueue:QUEUE,workflowId:`${QUEUE}-${missionId}`,args:[{missionId}]})
 
@@ -81,4 +100,61 @@ test('交接：返工预算耗尽升级时自动写 Memross 交接记录，升�
   assert.equal((await store.getMission('mis-cont-handoff'))!.state,'ESCALATED')
   assert.equal((await store.listEvents('mis-cont-handoff')).filter(e=>e.event_type==='HANDOFF_RECORDED').length,1)
   assert.equal(memross.calls.slice(before).filter(c=>c.path==='/api/memory/v1/propose').length,0,'未通过的结论不提交')
+})
+
+const waitFor=async<T>(read:()=>Promise<T|null|undefined|false>,ms=10_000):Promise<T>=>{
+  const deadline=Date.now()+ms
+  for(;;){const v=await read();if(v)return v;if(Date.now()>deadline)throw new Error('等待条件超时');await new Promise(r=>setTimeout(r,20))}
+}
+
+test('取消：等审批的未绑定任务直接取消，审批过期，Adapter 从未启动', async()=>{
+  await store.createMission({mission:mission('mis-cont-cancel-unbound',{risk_level:'controlled'}),actor:{type:'system',id:'test'}})
+  const starts=adapter.startCalls.length
+  const handle=await client.workflow.start('missionWorkflow',{taskQueue:QUEUE,workflowId:`${QUEUE}-cancel-unbound`,args:[{missionId:'mis-cont-cancel-unbound'}]})
+  const approval=await waitFor(async()=>(await store.listPendingApprovals('mis-cont-cancel-unbound'))[0])
+  await handle.signal('cancelMission',{reason:'需求取消'})
+  const result=await handle.result()
+  assert.equal(result.state,'CANCELED')
+  assert.equal((await store.getMission('mis-cont-cancel-unbound'))!.state,'CANCELED')
+  assert.equal((await store.getTask(approval.task_id))!.state,'CANCELED')
+  assert.equal((await store.getApproval(approval.id))!.decision,'expired')
+  assert.equal(adapter.startCalls.length,starts,'未绑定任务不派发')
+  const canceled=(await store.listEvents('mis-cont-cancel-unbound')).filter(e=>e.event_type==='TASK_CANCELED')
+  assert.equal(canceled[0]!.payload['reason'],'MISSION_CANCELED')
+})
+
+test('取消：已绑定任务调用 Adapter cancel，确认后落 CANCELED 并记 TASK_CANCEL_REQUESTED', async()=>{
+  await store.createMission({mission:mission('mis-cont-cancel-bound'),actor:{type:'system',id:'test'}})
+  adapter.hold=true
+  try {
+    const handle=await client.workflow.start('missionWorkflow',{taskQueue:QUEUE,workflowId:`${QUEUE}-cancel-bound`,args:[{missionId:'mis-cont-cancel-bound'}]})
+    const task=await waitFor(async()=>(await store.queryTasks({missionId:'mis-cont-cancel-bound'})).find(t=>t.binding&&t.state==='RUNNING'))
+    await handle.signal('cancelMission',{reason:'需求取消'})
+    const result=await handle.result()
+    assert.equal(result.state,'CANCELED')
+    assert.ok(adapter.cancelCalls.some(b=>b.remote_task_id===task.binding!.remote_task_id))
+    assert.equal((await store.getTask(task.id))!.state,'CANCELED')
+    const requested=(await store.listEvents('mis-cont-cancel-bound')).filter(e=>e.event_type==='TASK_CANCEL_REQUESTED')
+    assert.equal(requested.length,1)
+    assert.equal(requested[0]!.payload['confirmed'],true)
+    assert.equal((await store.getMission('mis-cont-cancel-bound'))!.state,'CANCELED')
+  } finally { adapter.hold=false }
+})
+
+test('取消：DAG 运行中节点收到 Adapter cancel，Mission 落 CANCELED', async()=>{
+  const id='mis-cont-cancel-dag'
+  await store.createMission({mission:{...mission(id,{max_additional_cycles:1,memory:undefined,
+    plan:{schema:'cmap/mission-plan/v1',nodes:[{node_id:'a',goal:'节点 a',capability:'code.analyze',deps:[],criterion_ids:['C1'],risk_level:'read-meta'}]}}),
+    workflow_template:'dag/v1'},actor:{type:'system',id:'test'}})
+  adapter.hold=true
+  try {
+    const handle=await client.workflow.start('dagMissionWorkflow',{taskQueue:`${QUEUE}-dag`,workflowId:`${QUEUE}-cancel-dag`,args:[{missionId:id}]})
+    const task=await waitFor(async()=>(await store.queryTasks({missionId:id})).find(t=>t.binding&&t.state==='RUNNING'))
+    await handle.signal('cancelMission',{reason:'需求取消'})
+    const result=await handle.result()
+    assert.equal(result.state,'CANCELED')
+    assert.ok(adapter.cancelCalls.some(b=>b.remote_task_id===task.binding!.remote_task_id))
+    assert.equal((await store.getTask(task.id))!.state,'CANCELED')
+    assert.equal((await store.getMission(id))!.state,'CANCELED')
+  } finally { adapter.hold=false }
 })

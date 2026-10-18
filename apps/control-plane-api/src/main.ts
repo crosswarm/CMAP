@@ -61,6 +61,11 @@ const server = await createControlPlane({
       if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error
     }
   },
+  cancelMission: async (_missionId, workflowId, reason) => {
+    const connection = await getTemporal()
+    const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
+    await connection.withDeadline(Date.now() + 15_000, () => client.workflow.getHandle(workflowId).signal('cancelMission', { reason }))
+  },
 })
 await server.listen(port)
 

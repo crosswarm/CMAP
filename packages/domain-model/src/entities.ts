@@ -158,6 +158,10 @@ export const EVENT_TYPES = [
   'HANDOFF_RECORDED',
   /** 交接记录写入失败（错误类别）。不影响升级流程。 */
   'HANDOFF_FAILED',
+  /** 人请求取消 Mission（payload 含原因）。状态由 Workflow 收尾。 */
+  'MISSION_CANCEL_REQUESTED',
+  /** 因 Mission 取消向已绑定任务的 Adapter 发出 cancel；confirmed 表示 Adapter 是否确认。 */
+  'TASK_CANCEL_REQUESTED',
 ] as const
 export type EventType = (typeof EVENT_TYPES)[number]
 

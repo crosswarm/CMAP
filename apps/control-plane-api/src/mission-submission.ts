@@ -4,6 +4,7 @@ import { Ajv2020 } from 'ajv/dist/2020.js'
 import addFormats from 'ajv-formats'
 import { normalizeMissionPlan, type Mission } from '#domain-model'
 import type { MissionCreateV1 } from '../../../packages/domain-model/src/generated/mission-create.ts'
+import type { MissionCancelV1 } from '../../../packages/domain-model/src/generated/mission-cancel.ts'
 
 const readSchema = (name: string) => JSON.parse(readFileSync(new URL(`../../../schemas/${name}.v1.schema.json`, import.meta.url), 'utf8'))
 const ajv = new Ajv2020({ strict: true })
@@ -11,6 +12,7 @@ addFormats.default(ajv)
 ajv.addSchema(readSchema('task-envelope'), 'https://cmap.local/schemas/task-envelope.v1.schema.json')
 ajv.addSchema(readSchema('mission-plan'), 'https://cmap.local/schemas/mission-plan.v1.schema.json')
 const validate = ajv.compile<MissionCreateV1>(readSchema('mission-create'))
+export const validateMissionCancel = ajv.compile<MissionCancelV1>(readSchema('mission-cancel'))
 
 export const missionFromRequest = (input: unknown, tenant: string, owner: string): Mission => {
   if (!validate(input) || new Set(input.acceptance.map((c) => c.criterion_id)).size !== input.acceptance.length) {

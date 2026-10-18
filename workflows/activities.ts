@@ -41,6 +41,7 @@ import { safeChildDir } from './artifact-files.ts'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import { applyReviewApplication } from './review-application.ts'
 import { proposeTaskKnowledge, recordEscalationHandoff } from './memross-writeback.ts'
+import { cancelMissionTasks, type CancelMissionTasksInput } from './mission-cancel.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
 import { frozenInputArtifactIds, prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
@@ -1082,6 +1083,11 @@ export const createActivities = (deps: ActivityDeps) => {
      */
     async applyReviewDecision(input: ApplyReviewInput): Promise<ApplyReviewOutput> {
       return applyReviewApplication(store, input)
+    },
+
+    /** 续接：取消 Mission 的未绑定任务，已绑定的调用其 Adapter cancel。可重复执行。 */
+    async cancelMissionTasks(input: CancelMissionTasksInput): Promise<{ canceled: string[]; unconfirmed: string[] }> {
+      return cancelMissionTasks(store, (id) => adapters.find((a) => a.adapterId === id), input)
     },
 
     /** 协作：验收通过的可复用结论提交 Memross 候选。旁路，失败只记事件。 */

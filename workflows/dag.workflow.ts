@@ -1,4 +1,4 @@
-import { isCancellation, patched, proxyActivities, sleep } from '@temporalio/workflow'
+import { defineSignal, isCancellation, patched, proxyActivities, setHandler, sleep } from '@temporalio/workflow'
 import type { ProgressSnapshot } from '#domain-model'
 import type { Activities } from './activities.ts'
 import type { DagActivities, DagNodeOutcome } from './dag-activities.ts'
@@ -9,13 +9,16 @@ const acts = proxyActivities<DagActivities>({
   startToCloseTimeout:'5 minutes',
   retry:{initialInterval:'2 seconds',maximumAttempts:3},
 })
-const writeback = proxyActivities<Pick<Activities,'proposeTaskKnowledge'|'recordEscalationHandoff'>>({
+const writeback = proxyActivities<Pick<Activities,'proposeTaskKnowledge'|'recordEscalationHandoff'|'cancelMissionTasks'>>({
   startToCloseTimeout:'5 minutes',
   retry:{initialInterval:'2 seconds',maximumAttempts:3},
 })
 /** S5 协作/交接：旧历史重放时 patched() 为 false，不插入新 Activity。 */
 const KNOWLEDGE_PATCH='dag-knowledge-propose-v1'
 const HANDOFF_PATCH='dag-escalation-handoff-v1'
+/** S5 续接：与 missionWorkflow 同名的取消信号；旧历史重放时 patched() 为 false，照旧忽略。 */
+const CANCEL_PATCH='dag-cancel-v1'
+export const cancelMissionSignal=defineSignal<[{readonly reason:string}]>('cancelMission')
 // 旁路回写：失败不改变节点或 Mission 结果。
 const sideEffect=async (run:()=>Promise<void>):Promise<void>=>{
   try{await run()}catch(error){if(isCancellation(error))throw error}
@@ -28,6 +31,8 @@ const attempt = proxyActivities<Pick<DagActivities,'runDagAttempt'>>({
 
 export async function dagMissionWorkflow(input: { missionId: string }): Promise<DagWorkflowResult> {
   const {missionId}=input
+  let cancelReason:string|undefined
+  let cancelSweep:Promise<unknown>=Promise.resolve()
   const schedule=await acts.loadDagSchedule(missionId)
   if(['COMPLETED','FAILED','ESCALATED','CANCELED'].includes(schedule.state)) {
     return acts.finalizeDagMission(missionId)
@@ -35,12 +40,18 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
   const outcomes=new Map<string,DagNodeOutcome>()
   const running=new Map<string,Promise<void>>()
   let stopping=false
+  setHandler(cancelMissionSignal,(signal)=>{
+    if(cancelReason!==undefined||!patched(CANCEL_PATCH))return
+    cancelReason=typeof signal?.reason==='string'&&signal.reason.trim()?signal.reason.slice(0,500):'MISSION_CANCELED'
+    stopping=true
+    cancelSweep=writeback.cancelMissionTasks({missionId,reason:cancelReason}).catch(()=>undefined)
+  })
 
   const executeNode=async (node:typeof schedule.nodes[number]):Promise<DagNodeOutcome>=>{
     let taskId:string|undefined
     let attemptNumber=1
     let previousProgress:ProgressSnapshot|undefined
-    const stopped=()=>acts.finishDagNode({missionId,nodeId:node.node_id,...(taskId?{taskId}:{}),status:'failed',reason:'DAG_STOPPED'})
+    const stopped=()=>acts.finishDagNode({missionId,nodeId:node.node_id,...(taskId?{taskId}:{}),status:'failed',reason:cancelReason!==undefined?'MISSION_CANCELED':'DAG_STOPPED'})
     try {
       for(;;) {
         if(stopping) return stopped()
@@ -70,7 +81,8 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
           if(result.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId,status:'escalated',reason:result.reason??'ATTEMPT_FAILED'})
           await sleep('1 second')
         }
-        // 已启动的分支必须完成结果/评审落账，即使别的分支已触发停止。
+        // 取消时不再评审；其余停止原因下，已启动的分支必须完成结果/评审落账。
+        if(cancelReason!==undefined)return stopped()
         const reviewed=await acts.reviewDagAttempt({taskId,...(previousProgress?{previousProgress}:{})})
         if(reviewed.status==='accepted'){
           const accepted=taskId
@@ -110,6 +122,10 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
       break
     }
     await Promise.race(running.values())
+  }
+  if(cancelReason!==undefined) {
+    await cancelSweep
+    await writeback.cancelMissionTasks({missionId,reason:cancelReason,finalize:true})
   }
   const final=await acts.finalizeDagMission(missionId)
   if(final.state==='ESCALATED') {
