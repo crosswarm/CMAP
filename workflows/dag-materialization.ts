@@ -474,7 +474,9 @@ export const materializeDagNode = async (
     taskId,
     input.attempt,
     acceptedTaskIds,
-    [...(artifactRefs ?? []), ...(memory ? [memory.ref] : []), ...(rework?.refs ?? [])],
+    // 依赖产物已按父节点复制过的（含父节点快照），不再经 review input 重复交付。
+    [...(artifactRefs ?? []), ...(memory ? [memory.ref] : []),
+      ...(rework?.refs ?? []).filter((ref) => !(artifactRefs ?? []).some((copied) => copied.artifact_id === ref.artifact_id))],
     input.supersedesTaskId,
     rework?.previousAttempt,
   )

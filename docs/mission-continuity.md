@@ -42,3 +42,19 @@ inspect/v1 的审批等待在单个 7 天 Activity 内轮询，历史不随等�
 | `handoff` | 从来源账本推出的交接内容（JSON，与升级时写给 Memross 的同一构造） |
 
 信封另带 `parameters.continues_mission_id`。不恢复 Agent 会话。账本 artifacts 以 `(task_id, role, version)` 唯一，同角色多份以 `version` 序号区分。重试沿用信封里的引用，只复核字节、补登记。返工后继经 review input 继承这些冻结输入。来源不合法时任务不创建、Mission 失败关闭（`CONTINUATION_INVALID`）。
+
+## 真实链路验证
+
+`TMPDIR=/private/tmp node scripts/e2e-continuity.mjs [--only c2,c7,c4,c8,c9]`：独立 PostgreSQL schema、独占任务队列、本脚本拉起的 Worker（与 `npm run start:worker` 同一入口）、进程内 `createControlPlane`、真实 Codex 与真实 Memross（cmap-worker 令牌从 `~/.config/memross/memory-cmap-worker.token` 读取，不回显）。判据只认账本状态、事件、Codex 执行次数（`TASK_STARTED`/进程组）与哈希。
+
+2026-10-18 实测全部通过：
+
+| 场景 | 判据 |
+|---|---|
+| C2 返工续接 | 2 个任务、`TASK_STARTED`=2；第 2 轮 `previous_attempt` 指向第 1 轮并含 ATTEMPT-KIND；上一轮报告与首轮记忆快照以 review input 交付，副本散列复核一致；Agent 写出的上一轮报告散列与快照首块 block_id 与账本一致；Mission COMPLETED |
+| C7 知识闭环 | `KNOWLEDGE_PROPOSED` 的 proposal_id 在 Memross `proposals/` 为 candidate（actor cmap-worker@cross-mini，证据 cmap-artifact + memross-block），`maintenance/intake/` 已排队 |
+| C4 续作 | 首任务带 continuation_input（散列＝来源已验收报告）、continuation_memory、handoff，副本散列一致；Agent 写出的来源报告散列与 mission id 正确；`TASK_STARTED`=1；COMPLETED |
+| C8 升级交接 | `HANDOFF_RECORDED` 恰 1 条；Memross `handoff latest` 返回同一 handoff_id，含失败标准、证据散列、`binding=codex-adapter@e2e-s5` |
+| C9 取消 | DAG 运行中节点收到 codex-adapter cancel（`TASK_CANCEL_REQUESTED` confirmed）并 CANCELED、Codex 进程组退出；等审批的未绑定节点 CANCELED、无 binding、审批 expired；`MISSION_CANCEL_REQUESTED` 记录原因与人类主体；`TASK_STARTED`=1；Mission CANCELED |
+
+首轮实测发现：返工轮 Agent 照抄了「上一轮未通过」里 `actual` 的描述格式（`attempt_kind = "rework"`），导致本应通过的标准判不过。已在该节提示词中说明 `actual` 只写实测值。

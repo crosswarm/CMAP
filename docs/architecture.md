@@ -214,6 +214,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | runner 主机准入 | ✅ 本机默认拒绝、复制/加锁/派发前检查及拒绝恢复已通过真实允许/拒绝验收；不是远程认证，见 [配置](runner-admission.md) 与 [验证](verification-runner-admission-2026-09-22.md) |
 | kimi-adapter | ✅ 本机 macOS P3；真实单跳与 Temporal → Kimi 完成，见 [运行说明](kimi-adapter.md) 与 [验证](verification-kimi-2026-09-21.md) |
 | DAG 执行 | ✅ 本机显式 dag/v1；API → Temporal → Codex/Kimi 分叉汇合、依赖产物与节点验收已验证，见 [验证](verification-dag-2026-09-21.md)；不包含自动 Planner |
+| S5 多任务衔接/协作/交接/续接 | ✅ 本机：返工带上一轮失败标准、产物与首轮记忆快照；DAG 节点记忆；验收结论回写 Memross 候选；升级写交接；Mission 取消；DAG 长等待 continueAsNew；continues_mission_id 续作。真实链路 C2/C4/C7/C8/C9 见 [续接](mission-continuity.md)；Memross 候选晋升仍走其维护流程 |
 | 自然语言 Planner 桥接 | 🟡 外部 CLI 与契约校验已实现；Claude 真实调用返回 403，端到端验证未完成，见 [Planner](planner.md) |
 | 语义 Reviewer / Judge | ⬜ 尚未接入；当前为确定性硬门槛判定，多分支测试中的 Reviewer 决定为合成夹具；不同于 Planner 的认证阻断 |
 | yonwork-adapter | 🟡 P3；受控派发、预写意图、相关终态与报告捕获已通过本地合成集成回归；真实专用 profile 闭环尚未验收，见 [运行说明](yonwork-adapter.md) 与 [验证](verification-yonwork-core-2026-09-22.md) |
