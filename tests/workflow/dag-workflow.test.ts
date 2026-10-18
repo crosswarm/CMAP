@@ -24,6 +24,10 @@ function harness(id:string, mode:'normal'|'rework'|'failure') {
   const tasks=new Map<string,{nodeId:string,attempt:number}>()
   const outcomes=new Map<string,DagNodeOutcome>()
   let active=0,maxActive=0
+  // 首轮 a、b 在会合点互等：Temporal 投递两个 Activity 的间隔可超过 20ms，固定 sleep 证明不了并发。
+  // 若 Workflow 串行调度，5s 后放行，maxActive 断言照样失败。
+  let releaseFirstWave!:()=>void
+  const firstWave=new Promise<void>(r=>{releaseFirstWave=r})
   const activities:DagActivities={
     async loadDagSchedule(){return {nodes,concurrency:2,maxAdditionalCycles:1,state:'RUNNING'}},
     async materializeDagNode(input){
@@ -38,10 +42,15 @@ function harness(id:string, mode:'normal'|'rework'|'failure') {
     },
     async checkDagApproval(){return {decision:'approved'}},
     async runDagAttempt({taskId}){
+      const {nodeId,attempt}=tasks.get(taskId)!
       active++;maxActive=Math.max(maxActive,active)
-      await new Promise(r=>setTimeout(r,tasks.get(taskId)!.nodeId==='b'?80:20))
+      if(attempt===1&&(nodeId==='a'||nodeId==='b')) {
+        if(active===2)releaseFirstWave()
+        await Promise.race([firstWave,new Promise(r=>setTimeout(r,5000).unref())])
+      }
+      await new Promise(r=>setTimeout(r,nodeId==='b'?80:20))
       active--
-      if(mode==='failure'&&tasks.get(taskId)!.nodeId==='a')return {outcome:'escalated',taskId,reason:'LOCK_LOST'}
+      if(mode==='failure'&&nodeId==='a')return {outcome:'escalated',taskId,reason:'LOCK_LOST'}
       return {outcome:'collected',taskId}
     },
     async reviewDagAttempt({taskId}){

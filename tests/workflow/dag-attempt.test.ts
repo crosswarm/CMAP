@@ -177,6 +177,21 @@ class ControlledAdapter extends FakeAdapter {
 }
 
 
+/**
+ * 等 Agent 真正启动后再让锁失效。派发在 beforeSend 前会校验锁仍有效，
+ * 早于此释放走的是「未发送、派发不确定」分支，而非已启动 Agent 的锁丢失。
+ */
+const releaseLockAfterStart = (adapter: ControlledAdapter, store: Store, resource: string): void => {
+  const start = adapter.startTask.bind(adapter)
+  adapter.startTask = async (envelope, ctx) => {
+    const binding = await start(envelope, ctx)
+    const lock = (await store.listActiveLocks(new Date().toISOString())).find((l) => l.resource === resource)!
+    await store.releaseLock(lock.lock_id, new Date().toISOString())
+    return binding
+  }
+}
+
+
 class BackdatedRenewStore extends MemoryStore {
   readonly renewCalls: readonly [string, string][] = []
 
@@ -621,12 +636,8 @@ describe('DAG attempt runner', () => {
       pollIntervalMs: 5,
     }))
 
-    const pending = run({ taskId: 'tsk-loss' })
-    await waitUntil(async () => (await store.listActiveLocks(new Date().toISOString())).length === 1)
-    const [lock] = await store.listActiveLocks(new Date().toISOString())
-    await store.releaseLock(lock!.lock_id, new Date().toISOString())
-
-    const out = await pending
+    releaseLockAfterStart(adapter, store, 'res:loss')
+    const out = await run({ taskId: 'tsk-loss' })
     assert.equal(out.outcome, 'escalated')
     assert.equal(out.reason, 'LOCK_LOST')
     assert.equal(adapter.cancelCalls.length, 1)
@@ -648,13 +659,8 @@ describe('DAG attempt runner', () => {
       pollIntervalMs: 5,
     }))
 
-    const pending = run({ taskId: 'tsk-unconfirmed' })
-    await waitUntil(async () => (await store.listActiveLocks(new Date().toISOString())).length === 2)
-    const first = (await store.listActiveLocks(new Date().toISOString()))
-      .find((l) => l.resource === 'res:first')!
-    await store.releaseLock(first.lock_id, new Date().toISOString())
-
-    const out = await pending
+    releaseLockAfterStart(adapter, store, 'res:first')
+    const out = await run({ taskId: 'tsk-unconfirmed' })
     assert.equal(out.outcome, 'escalated')
     assert.equal(out.reason, 'CANCELLATION_UNCONFIRMED')
     assert.deepEqual(
@@ -805,18 +811,13 @@ describe('DAG attempt runner', () => {
       { resource: 'res:first', ttl_seconds: 15 },
       { resource: 'res:second', ttl_seconds: 15 },
     ])
-    const pending = createDagAttemptRunner(syntheticActivityDeps({ runner: syntheticRunner(),
+    releaseLockAfterStart(adapter, store, 'res:first')
+    const out = await createDagAttemptRunner(syntheticActivityDeps({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
       pollIntervalMs: 5,
     }))({ taskId: 'tsk-cancel-error' })
-    await waitUntil(async () => (await store.listActiveLocks(new Date().toISOString())).length === 2)
-    const first = (await store.listActiveLocks(new Date().toISOString()))
-      .find((l) => l.resource === 'res:first')!
-    await store.releaseLock(first.lock_id, new Date().toISOString())
-
-    const out = await pending
     assert.equal(out.outcome, 'escalated')
     assert.equal(out.reason, 'CANCELLATION_UNCONFIRMED')
     assert.deepEqual(
@@ -833,18 +834,13 @@ describe('DAG attempt runner', () => {
       { resource: 'res:first', ttl_seconds: 15 },
       { resource: 'res:second', ttl_seconds: 15 },
     ])
-    const pending = createDagAttemptRunner(syntheticActivityDeps({ runner: syntheticRunner(),
+    releaseLockAfterStart(adapter, store, 'res:first')
+    const out = await createDagAttemptRunner(syntheticActivityDeps({ runner: syntheticRunner(),
       store,
       adapter,
       workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')),
       pollIntervalMs: 5,
     }))({ taskId: 'tsk-status-error' })
-    await waitUntil(async () => (await store.listActiveLocks(new Date().toISOString())).length === 2)
-    const first = (await store.listActiveLocks(new Date().toISOString()))
-      .find((l) => l.resource === 'res:first')!
-    await store.releaseLock(first.lock_id, new Date().toISOString())
-
-    const out = await pending
     assert.equal(out.outcome, 'escalated')
     assert.equal(out.reason, 'CANCELLATION_UNCONFIRMED')
     assert.deepEqual(
