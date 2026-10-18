@@ -7,7 +7,7 @@ export interface OwnedProcessGroupTermination {
 }
 
 export const terminateOwnedProcessGroup = (
-  child: ChildProcess,
+  child: Pick<ChildProcess, 'pid' | 'kill'>,
 ): OwnedProcessGroupTermination | null => {
   const pid = child.pid
   if (!pid) return null

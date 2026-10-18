@@ -71,6 +71,8 @@ const adapters = adapterNames.map((name) =>
     : new CodexAdapter({
         authorization,
         outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
+        // 运行记录：Worker 重启后据此恢复对 Codex 子进程的观察，且绝不重跑（S1）。
+        runsDir: join(workRoot, '.runs'),
       }),
 )
 

@@ -176,7 +176,7 @@ fs.writeFileSync(path.join(workDir, 'evidence/report.txt'), 'ok')
 fs.writeFileSync(out, JSON.stringify({
   status: 'completed',
   summary: 'ok',
-  criterion_results: [{ criterion_id: 'C1', actual: true, passed: true, evidence_artifact_ids: ['a1'] }],
+  criterion_results: [{ criterion_id: 'C1', actual: 'true', passed: true, evidence_artifact_ids: ['a1'] }],
   artifacts: [{ artifact_id: 'a1', role: 'report', uri: 'evidence/report.txt', media_type: 'text/plain', size_bytes: 2, sha256: ${JSON.stringify(sha256('ok'))} }],
   findings: [],
   error: null
@@ -420,6 +420,74 @@ test('fresh Codex runtime reports uncertain collection instead of retrying a pre
     assert.equal((await store.getTask('tsk-uncertain'))?.result, null)
   } finally {
     await cleanupStoredBinding(adapter, store, 'tsk-uncertain')
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Worker 重启（全新 Codex 适配器 + 运行记录）：收集已有结果，Codex 只执行 1 次', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-cli-codex-restart-'))
+  let store: MemoryStore | undefined
+  let adapter: ObservedCodexAdapter | undefined
+  try {
+    const launches = join(root, 'launches')
+    store = await makeStoreTask('tsk-restart')
+    const bin = await makeCodex(root, launches)
+    const runsDir = join(root, '.runs')
+    adapter = new ObservedCodexAdapter({
+      bin, runsDir,
+      outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
+    }, store, launches)
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
+    await acts.dispatchTask('tsk-restart')
+    await waitForLaunches(launches, 1)
+
+    const fresh = new CodexAdapter({ bin, runsDir, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'), authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }) })
+    const retry = createActivities(syntheticActivityDeps({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 5 }))
+
+    assert.deepEqual(await retry.dispatchTask('tsk-restart'), { dispatched: false, remoteTaskId: 'codex:tsk-restart:1' })
+    assert.deepEqual(await retry.collectTaskResult('tsk-restart'), { status: 'completed', passed: true, failedCriteria: [], summary: 'ok' })
+    assert.equal((await store.getTask('tsk-restart'))?.result?.task_id, 'tsk-restart')
+    assert.equal(await launchCount(launches), 1)
+    assert.equal(await eventCount(store, 'INPUT_REQUIRED'), 0)
+  } finally {
+    await cleanupStoredBinding(adapter, store, 'tsk-restart')
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Worker 重启后进程已退出但结果文件缺失：走执行不确定升级路径，不重跑', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-cli-codex-restart-lost-'))
+  let store: MemoryStore | undefined
+  let adapter: ObservedCodexAdapter | undefined
+  try {
+    const launches = join(root, 'launches')
+    store = await makeStoreTask('tsk-restart-lost')
+    const bin = await makeCodex(root, launches)
+    const runsDir = join(root, '.runs')
+    adapter = new ObservedCodexAdapter({
+      bin, runsDir,
+      outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'),
+      authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }),
+    }, store, launches)
+    const acts = createActivities(syntheticActivityDeps({ store, adapter, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root }))
+    await acts.dispatchTask('tsk-restart-lost')
+    await waitForLaunches(launches, 1)
+    const record = JSON.parse(await readFile(join(runsDir, 'tsk-restart-lost.json'), 'utf8'))
+    for (let i = 0; i < 200 && !(await fileExists(record.result_file)); i += 1) await new Promise((resolve) => setTimeout(resolve, 10))
+    await rm(record.result_file) // 进程已写完并退出，但结果文件不在了
+
+    const fresh = new CodexAdapter({ bin, runsDir, outputSchemaPath: join(process.cwd(), 'schemas/codex-output.v1.schema.json'), authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' }) })
+    const retry = createActivities(syntheticActivityDeps({ store, adapter: fresh, runner: syntheticRunner({ runner_id: 'runner-test' }), workRoot: root, pollIntervalMs: 5 }))
+
+    assert.deepEqual(await retry.collectTaskResult('tsk-restart-lost'), {
+      executionUncertain: { code: 'BINDING_NOT_FOUND', terminalObserved: false },
+    })
+    assert.equal((await store.getTask('tsk-restart-lost'))?.result, null)
+    assert.equal(await launchCount(launches), 1)
+    assert.equal(await eventCount(store, 'INPUT_REQUIRED'), 1)
+  } finally {
+    await cleanupStoredBinding(adapter, store, 'tsk-restart-lost')
     await rm(root, { recursive: true, force: true })
   }
 })

@@ -11,6 +11,10 @@
  *   node scripts/e2e-mission.mjs --memory <project_id> [--memory-query <q>]
  *                                          派发前从 Memross 冻结记忆快照，验证它真的进了 Agent 上下文
  *                                          （Worker 需配置 MEMROSS_URL / MEMROSS_TOKEN）
+ *   node scripts/e2e-mission.mjs --restart-worker
+ *                                          重启安全（S1）：脚本自己拉起 Worker，Codex 执行期间 SIGKILL 它再拉起新的，
+ *                                          判据只认账本状态与 Codex 执行次数（进程组计数 + 运行记录），不认退出码。
+ *                                          此模式下不要另开 Worker；Codex 需要 TMPDIR=/private/tmp
  *
  * 前置：
  *   docker compose -f infra/docker-compose/docker-compose.yml up -d
@@ -20,6 +24,7 @@
  * 用法：node scripts/e2e-mission.mjs
  */
 import { createHash } from 'node:crypto'
+import { execFileSync, spawn } from 'node:child_process'
 import { readFile, readdir } from 'node:fs/promises'
 import { isAbsolute, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -51,12 +56,55 @@ const argAfter = (flag) => { const i = process.argv.indexOf(flag); return i > 0 
 const memoryProject = argAfter('--memory')
 const memoryQuery = argAfter('--memory-query')
 if (reworkMode && memoryProject) throw new Error('--memory 与 --rework 不同时使用')
+const restartWorker = process.argv.includes('--restart-worker')
+if (restartWorker && (reworkMode || memoryProject)) throw new Error('--restart-worker 不与 --rework / --memory 同用')
 
 const step = (n, msg) => console.log(`\n[${n}] ${msg}`)
 const ok = (msg) => console.log(`  ✓ ${msg}`)
 const fail = (msg) => {
   console.error(`  ✗ ${msg}`)
   process.exit(1)
+}
+
+// ------------------------------------------- --restart-worker 的 Worker 管理
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const workers = []
+process.on('exit', () => { for (const w of workers) { try { process.kill(w.pid, 'SIGKILL') } catch { /* 已退出 */ } } })
+
+const startWorker = async () => {
+  const child = spawn(process.execPath, ['--env-file-if-exists=.env', 'apps/worker/src/main.ts'], {
+    cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      // 本机 runner 准入默认值（与上面建的 Mission 匹配）；外部显式设置的同名变量优先
+      RUNNER_ID: 'e2e-restart', RUNNER_TENANT: 'team-ycc', RUNNER_ALLOWED_TENANTS: 'team-ycc',
+      RUNNER_ALLOWED_OWNERS: 'crosswarm', RUNNER_ALLOWED_CAPABILITIES: 'code.analyze', RUNNER_MAX_RISK: 'read-sensitive',
+      ...process.env, TMPDIR: process.env['TMPDIR'] ?? '/private/tmp',
+    },
+  })
+  workers.push(child)
+  // 不回显 Worker 输出，只等就绪标志
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Worker 60 秒内未就绪')), 60_000)
+    child.stdout.on('data', (c) => { if (c.toString().includes('Worker 就绪')) { clearTimeout(timer); resolve() } })
+    child.stderr.resume()
+    child.on('exit', (code) => { clearTimeout(timer); reject(new Error(`Worker 提前退出 code=${code}`)) })
+  })
+  return child
+}
+
+const groupAlive = (pgid) => { try { process.kill(-pgid, 0); return true } catch { return false } }
+
+/** 当前所有执行该任务的 codex 进程组（按结果文件名识别，同组后代只算一个）。 */
+const codexGroups = (taskId) => {
+  const out = execFileSync('ps', ['-axo', 'pgid=,command='], { maxBuffer: 64 * 1024 * 1024 }).toString()
+  const needle = `.cmap-result-${taskId}.json`
+  const groups = new Set()
+  for (const line of out.split('\n')) {
+    if (!line.includes(needle) || !line.includes(' exec ')) continue
+    groups.add(Number(line.trim().split(/\s+/)[0]))
+  }
+  return groups
 }
 
 // ------------------------------------------------------ 1. 建 Mission
@@ -113,12 +161,47 @@ const client = new Client({ connection: conn, namespace })
 
 const started = Date.now()
 let result
+let chaos = null
 try {
-  result = await client.workflow.execute('missionWorkflow', {
+  if (restartWorker) {
+    const stale = execFileSync('ps', ['-axo', 'command=']).toString().split('\n').filter((l) => l.includes('apps/worker/src/main.ts'))
+    if (stale.length) fail('检测到已在运行的 Worker；--restart-worker 需要独占队列，请先停掉它')
+    workers.length = 0
+    await startWorker()
+  }
+  const handle = await client.workflow.start('missionWorkflow', {
     taskQueue,
     workflowId: `e2e-${missionId}`,
     args: [{ missionId }],
   })
+  const chaosRun = restartWorker ? (async () => {
+    // 等 Codex 真的在跑：运行记录里出现本 Mission 的 pid
+    let record
+    for (let i = 0; i < 600 && !record; i += 1) {
+      await sleep(200)
+      for (const name of await readdir(join(workRoot, '.runs')).catch(() => [])) {
+        if (!name.endsWith('.json')) continue
+        const r = JSON.parse(await readFile(join(workRoot, '.runs', name), 'utf8').catch(() => 'null') ?? 'null')
+        if (r?.envelope?.identity?.mission_id === missionId && r.pid) record = r
+      }
+    }
+    if (!record) fail('2 分钟内没有出现本 Mission 的 Codex 运行记录')
+    const groups = new Set()
+    const sampler = setInterval(() => { for (const g of codexGroups(record.task_id)) groups.add(g) }, 300)
+    await sleep(5000)
+    if (!groupAlive(record.pid)) fail('Codex 在 Worker 被杀之前就结束了，场景无效')
+    const [first] = workers
+    process.kill(first.pid, 'SIGKILL')
+    await new Promise((resolve) => first.on('exit', resolve))
+    const survived = groupAlive(record.pid)
+    ok(`Worker ${first.pid} 已 SIGKILL；Codex 进程组 ${record.pid} 仍在运行：${survived}`)
+    await startWorker()
+    ok('新 Worker 已就绪，等待 Workflow 收尾')
+    return { record, groups, sampler, survived }
+  })() : Promise.resolve(null)
+  result = await handle.result()
+  chaos = await chaosRun
+  if (chaos) clearInterval(chaos.sampler)
 } catch (e) {
   fail(
     `Workflow 未完成：${String(e)}\n` +
@@ -279,7 +362,28 @@ if (kinds.includes('MISSION_ESCALATED')) {
 }
 ok(`共 ${events.length} 条事件：${kinds.join(' → ')}`)
 
+if (restartWorker) {
+  step('6b', '重启安全：只认账本状态与 Codex 执行次数')
+  if (!chaos) fail('没有执行 Worker 重启场景')
+  if (!chaos.survived) fail('Worker 被杀后 Codex 进程组没有存活——输出仍绑在管道上？')
+  const groups = [...chaos.groups]
+  if (groups.length !== 1 || groups[0] !== chaos.record.pid) {
+    fail(`Codex 进程组计数异常：观察到 [${groups.join(', ')}]，运行记录里只应有 ${chaos.record.pid}`)
+  }
+  if (kinds.filter((k) => k === 'TASK_STARTED').length !== 1) fail('TASK_STARTED 不是恰好 1 条')
+  for (const bad of ['INPUT_REQUIRED', 'MISSION_ESCALATED']) {
+    if (kinds.includes(bad)) fail(`重启后出现 ${bad}：被判成了执行不确定`)
+  }
+  ok(`Codex 只执行 1 次（进程组 ${chaos.record.pid}，运行记录 ${chaos.record.task_id}），Mission 与任务均 COMPLETED`)
+}
+
 console.log(`\n✅ P2 出口达成：控制面无人值守跑完一次 Mission，Agent 真实执行并留下可复核的证据。`)
 
+// --restart-worker 自己拉起的 Worker 要优雅收掉，否则子进程会让脚本挂着不退出
+await Promise.all(workers.map((w) => new Promise((resolve) => {
+  if (w.exitCode !== null || w.signalCode !== null) return resolve()
+  w.once('exit', resolve)
+  w.kill('SIGTERM')
+})))
 await conn.close()
 await store.close()

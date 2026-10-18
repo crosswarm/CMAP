@@ -10,9 +10,10 @@
  * 交给别人派发的任务。本 Adapter 一律显式传 -s，绝不继承默认档。
  */
 
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -147,12 +148,51 @@ export const buildCodexArgs = (
   return args
 }
 
+/**
+ * 运行记录：`<runsDir>/<taskId>.json`，启动 codex 前以独占方式（wx）创建。
+ *
+ * 记录先于进程存在——崩溃发生在“记录已写、pid 未落盘”之间时，我们无法知道进程是否已被拉起，
+ * 只能判为执行不确定，而不是补启动。记录只含恢复所需的指针与信封的非正文子集，
+ * 不含提示词正文（goal 等）。
+ */
+interface RunRecord {
+  readonly schema: 'cmap/codex-run/v1'
+  readonly remote_task_id: string
+  readonly task_id: string
+  readonly runner_id: string
+  readonly pid: number | null
+  /** `ps -o lstart=` 的值，用于排除 pid 复用；取不到则为 null。 */
+  readonly process_start: string | null
+  readonly started_at: string
+  /** codex 命令行参数（含提示词）的 sha256，仅用于识别“同一 taskId 的不同启动意图”。 */
+  readonly args_sha256: string
+  readonly work_dir: string
+  readonly owns_work_dir: boolean
+  readonly result_file: string
+  readonly stdout_file: string
+  readonly stderr_file: string
+  readonly envelope: ResultEnvelope
+}
+
+/** normalizeAgentOutput 实际用到的信封子集。 */
+type ResultEnvelope = Pick<TaskEnvelopeV1, 'identity' | 'classification' | 'evidence_requirements'>
+
 interface RunState {
-  readonly child: ChildProcess
+  /** 本进程拉起的子进程；Worker 重启后从运行记录恢复的状态没有它。 */
+  readonly child: ChildProcess | null
+  readonly pid: number | null
+  readonly processStart: string | null
+  /** 从运行记录恢复（无子进程句柄、退出码未知）。 */
+  readonly recovered: boolean
+  /** 恢复态：进程退出后结果文件是否为完整 JSON。 */
+  resultComplete: boolean
+  /** 输出重定向到文件时的路径（运行记录模式）；为 null 则走管道。 */
+  readonly stdoutFile: string | null
+  readonly stderrFile: string | null
   readonly resultFile: string
   readonly workDir: string
   readonly ownsWorkDir: boolean
-  readonly envelope: TaskEnvelopeV1
+  readonly envelope: ResultEnvelope
   readonly events: NormalizedAgentEvent[]
   readonly listeners: Set<(e: NormalizedAgentEvent) => Promise<void>>
   sessionId: string | null
@@ -181,6 +221,12 @@ export interface CodexAdapterOptions {
   readonly outputSchemaPath: string
   /** 同一 idempotency_key 只执行一次，重复派发直接复用已有 binding。 */
   readonly idempotencyStore?: Map<string, RemoteTaskBinding>
+  /**
+   * 运行记录目录（建议 `<workRoot>/.runs`）。设置后：启动前独占创建记录，codex 的 stdout/stderr
+   * 重定向到该目录下的文件（不走管道，Worker 崩溃不会让 codex 因 SIGPIPE 死掉），
+   * Worker 重启后可据记录判断进程是否仍在、结果是否已完整。不设置则保持进程内存模式。
+   */
+  readonly runsDir?: string
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -193,6 +239,7 @@ export class CodexAdapter implements AgentAdapter {
   readonly authorizationMode: AdapterAuthorization['mode']
   readonly #runs = new Map<string, RunState>()
   readonly #idempotency: Map<string, RemoteTaskBinding>
+  readonly #runsDir: string | undefined
   readonly #pending = new Map<string, Promise<RemoteTaskBinding>>()
 
   constructor(opts: CodexAdapterOptions) {
@@ -201,6 +248,7 @@ export class CodexAdapter implements AgentAdapter {
     this.#bin = opts.bin ?? process.env['CODEX_BIN'] ?? 'codex'
     this.#outputSchemaPath = opts.outputSchemaPath
     this.#idempotency = opts.idempotencyStore ?? new Map()
+    this.#runsDir = opts.runsDir
   }
 
   async discover(): Promise<AdapterDescriptor> {
@@ -292,24 +340,82 @@ export class CodexAdapter implements AgentAdapter {
       throw cause
     }
 
-    const child = spawn(this.#bin, args, {
-      env: codexProviderEnv(process.env, {
-        // macOS 上 TMPDIR 可能经 /Volumes/<disk> 符号链接指回 /Users。
-        // Codex workspace-write 拒绝带符号链接的 writable root，传物理路径即可。
-        TMPDIR: physicalTmpDir,
-        // 隔离本机代理：Surge 会拦截 localhost 并返回 HTTP 200 + HTML，
-        // 导致连接看似成功却永远等不到有效响应（静默挂起）。
-        NO_PROXY: 'localhost,127.0.0.1,::1',
-        no_proxy: 'localhost,127.0.0.1,::1',
-        CMAP_TASK_ID: envelope.identity.task_id,
-        CMAP_TRACE_ID: ctx.trace_id,
-      }),
-      detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    // 运行记录先于进程：独占创建成功才允许启动；已存在则绝不再启动第二个进程。
+    const taskId = envelope.identity.task_id
+    let record: RunRecord | null = null
+    if (this.#runsDir) {
+      const runsDir = this.#runsDir
+      record = {
+        schema: 'cmap/codex-run/v1',
+        remote_task_id: binding.remote_task_id,
+        task_id: taskId,
+        runner_id: ctx.runner_id,
+        pid: null,
+        process_start: null,
+        started_at: new Date().toISOString(),
+        args_sha256: createHash('sha256').update(JSON.stringify(args)).digest('hex'),
+        work_dir: workDir,
+        owns_work_dir: ownsWorkDir,
+        result_file: resultFile,
+        stdout_file: join(runsDir, `${taskId}.out`),
+        stderr_file: join(runsDir, `${taskId}.err`),
+        envelope: {
+          identity: envelope.identity,
+          classification: envelope.classification,
+          evidence_requirements: envelope.evidence_requirements,
+        },
+      }
+      let created = false
+      try {
+        created = await createRunRecord(runsDir, record)
+      } catch (cause) {
+        if (ownsWorkDir) await rm(workDir, { recursive: true, force: true })
+        throw cause
+      }
+      if (!created) {
+        if (ownsWorkDir) await rm(workDir, { recursive: true, force: true })
+        const existing = await readRecord(runsDir, taskId)
+        if (existing?.remote_task_id !== binding.remote_task_id || existing.args_sha256 !== record.args_sha256) {
+          throw new AdapterError('RUN_RECORD_CONFLICT', `运行记录已存在且与本次启动不一致：${taskId}`, false, 'run-record-conflict')
+        }
+        this.#idempotency.set(key, binding)
+        return binding
+      }
+    }
+
+    // 记录模式下输出写文件而非管道：管道在 Worker 崩溃时断开，codex 写 stdout 会因 EPIPE 异常退出。
+    const outHandle = record ? await open(record.stdout_file, 'a', 0o600) : null
+    const errHandle = record ? await open(record.stderr_file, 'a', 0o600) : null
+    let child: ChildProcess
+    try {
+      child = spawn(this.#bin, args, {
+        env: codexProviderEnv(process.env, {
+          // macOS 上 TMPDIR 可能经 /Volumes/<disk> 符号链接指回 /Users。
+          // Codex workspace-write 拒绝带符号链接的 writable root，传物理路径即可。
+          TMPDIR: physicalTmpDir,
+          // 隔离本机代理：Surge 会拦截 localhost 并返回 HTTP 200 + HTML，
+          // 导致连接看似成功却永远等不到有效响应（静默挂起）。
+          NO_PROXY: 'localhost,127.0.0.1,::1',
+          no_proxy: 'localhost,127.0.0.1,::1',
+          CMAP_TASK_ID: envelope.identity.task_id,
+          CMAP_TRACE_ID: ctx.trace_id,
+        }),
+        detached: true,
+        stdio: outHandle && errHandle ? ['ignore', outHandle.fd, errHandle.fd] : ['ignore', 'pipe', 'pipe'],
+      })
+    } finally {
+      await outHandle?.close()
+      await errHandle?.close()
+    }
 
     const state: RunState = {
       child,
+      pid: child.pid ?? null,
+      processStart: null,
+      recovered: false,
+      resultComplete: false,
+      stdoutFile: record?.stdout_file ?? null,
+      stderrFile: record?.stderr_file ?? null,
       resultFile,
       workDir,
       ownsWorkDir,
@@ -332,66 +438,90 @@ export class CodexAdapter implements AgentAdapter {
 
     this.#runs.set(binding.remote_task_id, state)
     this.#idempotency.set(key, binding)
+
+    if (record) {
+      // spawn 同步失败（如 bin 不存在）说明进程从未存在，不留阻断重试的记录；
+      // 否则把 pid 落盘。落盘前崩溃 = 记录有、pid 无 = 恢复时判不确定，不会补启动。
+      if (child.pid === undefined) await rm(join(this.#runsDir!, `${taskId}.json`), { force: true })
+      else await persistRecord(this.#runsDir!, { ...record, pid: child.pid, process_start: processStartOf(child.pid) })
+    }
     return binding
+  }
+
+  #emit(state: RunState, e: NormalizedAgentEvent): void {
+    state.events.push(e)
+    for (const fn of state.listeners) void fn(e)
+  }
+
+  /** 把 JSONL 文本逐行归一化为事件。 */
+  #feed(state: RunState, text: string): void {
+    for (const line of text.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(trimmed)
+      } catch {
+        // 非 JSON 行（codex 偶有纯文本输出）不是错误，忽略即可
+        continue
+      }
+      this.#emit(state, normalizeCodexEvent(parsed, state))
+    }
+  }
+
+  /**
+   * 文件模式：进程结束后一次性读入 stdout/stderr。
+   * ponytail: 事件在进程结束时批量产生而非实时；当前无生产订阅者，需要实时流再改为轮询 tail。
+   */
+  async #ingestFiles(state: RunState): Promise<void> {
+    if (state.stdoutFile) this.#feed(state, await readFile(state.stdoutFile, 'utf8').catch(() => ''))
+    if (state.stderrFile) state.stderr += await readFile(state.stderrFile, 'utf8').catch(() => '')
   }
 
   /** 解析 codex 的 JSONL 事件流并归一化。 */
   #wire(state: RunState): void {
-    const emit = (e: NormalizedAgentEvent): void => {
-      state.events.push(e)
-      for (const fn of state.listeners) void fn(e)
-    }
-
-    emit({ kind: 'started', at: new Date().toISOString() })
+    const child = state.child!
+    this.#emit(state, { kind: 'started', at: new Date().toISOString() })
 
     let buffer = ''
-    state.child.stdout?.on('data', (chunk: Buffer) => {
+    child.stdout?.on('data', (chunk: Buffer) => {
       buffer += chunk.toString('utf8')
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        let parsed: unknown
-        try {
-          parsed = JSON.parse(trimmed)
-        } catch {
-          // 非 JSON 行（codex 偶有纯文本输出）不是错误，忽略即可
-          continue
-        }
-        emit(normalizeCodexEvent(parsed, state))
-      }
+      this.#feed(state, lines.join('\n'))
     })
 
-    state.child.stderr?.on('data', (chunk: Buffer) => {
+    child.stderr?.on('data', (chunk: Buffer) => {
       state.stderr += chunk.toString('utf8')
     })
 
-    state.child.on('close', (code) => {
+    child.on('close', async (code) => {
       // Wrapper exit does not prove its ignored-stdio descendants have exited.
-      state.termination ??= terminateOwnedProcessGroup(state.child)
+      state.termination ??= terminateOwnedProcessGroup(child)
+      if (state.stdoutFile) await this.#ingestFiles(state)
       state.exitCode = code
       state.settled = true
       state.settledAt = Date.now()
       const at = new Date().toISOString()
-      emit(
+      this.#emit(
+        state,
         code === 0
           ? { kind: 'completed', at }
           : { kind: 'failed', at, message: `codex 退出码 ${code}` },
       )
     })
 
-    state.child.on('error', (err) => {
+    child.on('error', (err) => {
       state.exitCode = -1
       state.settled = true
       state.settledAt = Date.now()
       state.stderr += String(err)
-      emit({ kind: 'failed', at: new Date().toISOString(), message: String(err) })
+      this.#emit(state, { kind: 'failed', at: new Date().toISOString(), message: String(err) })
     })
   }
 
   async sendInput(binding: RemoteTaskBinding, input: AgentInput): Promise<void> {
-    const state = this.#require(binding)
+    const state = await this.#require(binding)
     if (state.settled) {
       throw new AdapterError('TASK_ALREADY_SETTLED', '任务已结束，无法补充输入', false, 'settled')
     }
@@ -406,7 +536,8 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async getStatus(binding: RemoteTaskBinding): Promise<NormalizedAgentStatus> {
-    const state = this.#require(binding)
+    const state = await this.#require(binding)
+    await this.#refresh(state)
     const at = new Date().toISOString()
 
     if (!state.settled) {
@@ -423,6 +554,11 @@ export class CodexAdapter implements AgentAdapter {
         detail: state.terminalDetail ?? 'canceled',
       }
     }
+    if (state.recovered) {
+      // 退出码已随 Worker 丢失；只认“完整结果文件”，否则是执行不确定，由上层走升级路径。
+      if (!state.resultComplete) throw uncertainRun(binding)
+      return { status: 'completed', at, terminal_observed: true }
+    }
     if (state.exitCode === 0) {
       return { status: 'completed', at, terminal_observed: true }
     }
@@ -438,7 +574,7 @@ export class CodexAdapter implements AgentAdapter {
     binding: RemoteTaskBinding,
     onEvent: (event: NormalizedAgentEvent) => Promise<void>,
   ): Promise<SubscriptionHandle> {
-    const state = this.#require(binding)
+    const state = await this.#require(binding)
     // 补发已发生的事件，避免订阅者错过启动阶段
     for (const e of state.events) await onEvent(e)
     state.listeners.add(onEvent)
@@ -450,11 +586,14 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async cancel(binding: RemoteTaskBinding, reason: string): Promise<void> {
-    const state = this.#require(binding)
+    const state = await this.#require(binding)
+    await this.#refresh(state)
     if (state.settled) return
     state.canceled = true
     state.terminalDetail = `已取消：${reason}`
-    state.termination ??= terminateOwnedProcessGroup(state.child)
+    state.termination ??= terminateOwnedProcessGroup(
+      state.child ?? { pid: state.pid ?? undefined, kill: (signal) => signalProcess(state.pid!, signal) },
+    )
     state.events.push({
       kind: 'failed',
       at: new Date().toISOString(),
@@ -474,7 +613,8 @@ export class CodexAdapter implements AgentAdapter {
    *  3. 身份字段由控制面填充，不取 Agent 自述——账本归控制面所有。
    */
   async collectResult(binding: RemoteTaskBinding): Promise<TaskResultV1> {
-    const state = this.#require(binding)
+    const state = await this.#require(binding)
+    await this.#refresh(state)
 
     if (!state.settled || (state.termination && !state.termination.confirmAbsent())) {
       throw new AdapterError('TASK_STILL_RUNNING', '任务尚未结束', true, 'still-running')
@@ -482,6 +622,7 @@ export class CodexAdapter implements AgentAdapter {
     if (state.canceled) {
       throw new AdapterError('TASK_CANCELED', 'Codex task was canceled', false, 'codex-canceled')
     }
+    if (state.recovered && !state.resultComplete) throw uncertainRun(binding)
 
     let raw: string
     try {
@@ -550,21 +691,148 @@ export class CodexAdapter implements AgentAdapter {
     this.#runs.delete(binding.remote_task_id)
   }
 
-  #require(binding: RemoteTaskBinding): RunState {
-    const state = this.#runs.get(binding.remote_task_id)
-    if (!state) {
-      throw new AdapterError(
-        'BINDING_NOT_FOUND',
-        `未知 binding：${binding.remote_task_id}`,
-        false,
-        'binding-not-found',
-      )
+  /** 内存里有就用；没有（Worker 重启）则按运行记录恢复，记录缺失或 pid 未落盘即视为未知 binding。 */
+  async #require(binding: RemoteTaskBinding): Promise<RunState> {
+    const known = this.#runs.get(binding.remote_task_id)
+    if (known) return known
+    const recovered = await this.#recover(binding)
+    if (!recovered) throw uncertainRun(binding)
+    this.#runs.set(binding.remote_task_id, recovered)
+    return recovered
+  }
+
+  async #recover(binding: RemoteTaskBinding): Promise<RunState | null> {
+    const taskId = /^codex:(.+):\d+$/.exec(binding.remote_task_id)?.[1]
+    if (!this.#runsDir || !taskId || !TASK_ID.test(taskId)) return null
+    const record = await readRecord(this.#runsDir, taskId)
+    if (!record || record.remote_task_id !== binding.remote_task_id || record.pid === null) return null
+    return {
+      child: null,
+      pid: record.pid,
+      processStart: record.process_start,
+      recovered: true,
+      resultComplete: false,
+      stdoutFile: record.stdout_file,
+      stderrFile: record.stderr_file,
+      resultFile: record.result_file,
+      workDir: record.work_dir,
+      ownsWorkDir: record.owns_work_dir,
+      envelope: record.envelope,
+      events: [],
+      listeners: new Set(),
+      sessionId: null,
+      tokens: null,
+      startedAt: Date.parse(record.started_at),
+      settledAt: null,
+      exitCode: null,
+      stderr: '',
+      settled: false,
+      canceled: false,
+      terminalDetail: undefined,
+      termination: null,
     }
-    return state
+  }
+
+  /** 恢复态没有 close 事件：每次查询时看进程组是否还在，退出了就补做收尾（读输出、验结果文件）。 */
+  async #refresh(state: RunState): Promise<void> {
+    if (!state.recovered || state.settled || runGroupAlive(state.pid!, state.processStart)) return
+    await this.#ingestFiles(state)
+    state.resultComplete = await readResultJson(state.resultFile) !== undefined
+    state.settledAt = (await stat(state.resultFile).catch(() => null))?.mtimeMs ?? Date.now()
+    state.settled = true
   }
 }
 
 // ------------------------------------------------------------------ 辅助
+
+/**
+ * task_id 在契约里只是非空字符串（实际有 `tsk_<64 位十六进制>` 与含冒号的 DAG 子任务 ID），
+ * 这里收紧到可安全作文件名：首字符字母数字，不含路径分隔符，长度留足 `.json/.out/.err` 后缀余量。
+ */
+const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** 进程已退出且没有完整结果，或根本没有可用的运行记录：不知道 codex 到底做了什么。 */
+const uncertainRun = (binding: RemoteTaskBinding): AdapterError =>
+  new AdapterError(
+    'BINDING_NOT_FOUND',
+    `无法确认执行结果，不重跑：${binding.remote_task_id}`,
+    false,
+    'binding-not-found',
+  )
+
+const readRecord = async (runsDir: string, taskId: string): Promise<RunRecord | null> => {
+  try {
+    const parsed = JSON.parse(await readFile(join(runsDir, `${taskId}.json`), 'utf8')) as RunRecord
+    return parsed.schema === 'cmap/codex-run/v1' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** 独占创建（wx）。已存在返回 false，其余错误原样抛出。 */
+const createRunRecord = async (runsDir: string, record: RunRecord): Promise<boolean> => {
+  if (!TASK_ID.test(record.task_id)) {
+    throw new AdapterError('RUN_RECORD_INVALID', `taskId 不能作为运行记录文件名：${record.task_id}`, false, 'run-record-invalid')
+  }
+  await mkdir(runsDir, { recursive: true, mode: 0o700 })
+  try {
+    await writeFile(join(runsDir, `${record.task_id}.json`), JSON.stringify(record), { flag: 'wx', mode: 0o600 })
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+}
+
+/** 覆盖更新记录（写临时文件再 rename，读者不会看到半截 JSON）。 */
+const persistRecord = async (runsDir: string, record: RunRecord): Promise<void> => {
+  const path = join(runsDir, `${record.task_id}.json`)
+  await writeFile(`${path}.tmp`, JSON.stringify(record), { mode: 0o600 })
+  await rename(`${path}.tmp`, path)
+}
+
+/** 结果文件是完整 JSON 才返回内容；不存在或写了一半返回 undefined。 */
+const readResultJson = async (path: string): Promise<unknown> => {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+const processStartOf = (pid: number): string | null => {
+  try {
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString().trim()
+    return out || null
+  } catch {
+    return null
+  }
+}
+
+const signalProcess = (pid: number, signal: NodeJS.Signals | number | undefined): boolean => {
+  try {
+    process.kill(pid, signal)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 记录里的进程组是否仍有成员。组长还在时核对启动时间，排除 pid 被无关进程复用；
+ * 组长已退出但组内还有后代，仍算我们的。取不到启动时间时偏保守（当作还在）。
+ */
+const runGroupAlive = (pid: number, recordedStart: string | null): boolean => {
+  try {
+    process.kill(-pid, 0)
+  } catch {
+    return false
+  }
+  const current = processStartOf(pid)
+  return current === null || recordedStart === null || current === recordedStart
+}
 
 const RISK_ORDER: readonly RiskLevel[] = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
 

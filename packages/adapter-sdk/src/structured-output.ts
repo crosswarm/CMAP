@@ -176,7 +176,7 @@ export const readVerifiedArtifact = async (
 
 export const normalizeAgentOutput = async (
   raw: unknown,
-  envelope: TaskEnvelopeV1,
+  envelope: Pick<TaskEnvelopeV1, 'identity' | 'classification' | 'evidence_requirements'>,
   workDir: string,
   sessionId?: string,
 ): Promise<TaskResultV1> => {
