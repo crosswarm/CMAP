@@ -178,6 +178,12 @@ export interface AgentAdapter {
    * 派发许可受众与 binding.runner_id 都绑定它。
    */
   readonly runnerId?: string
+  /**
+   * 重启安全：Worker 重启后，新实例仅凭已落账的 binding 就能恢复观察与收取结果，且绝不重新启动 Agent
+   * （Codex 运行记录模式；远程 runner——lap 侧也是 Codex 运行记录）。只有为 true 时，dag/v1 才允许 Worker
+   * 失联后的那次 attempt 重试；缺省视为不安全，照旧升级。
+   */
+  readonly restartSafe?: boolean
 
   discover(): Promise<AdapterDescriptor>
 

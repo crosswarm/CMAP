@@ -7,6 +7,7 @@ import type {
   Store,
   TaskRecord,
 } from '#domain-model'
+import { ApplicationFailure, Context } from '@temporalio/activity'
 import { ApprovalDecisionConflictError, detectNoProgress, isTerminal, snapshotRunnerDescriptor } from '#domain-model'
 import { createActivities, type ActivityDeps } from './activities.ts'
 import { createDagAttemptRunner } from './dag-attempt.ts'
@@ -34,6 +35,15 @@ const TERMINAL_MISSION = new Set<MissionState>(['COMPLETED', 'FAILED', 'ESCALATE
 const SAFE_REASON = /^[A-Z][A-Z0-9_:-]*$/
 
 const now = (): string => new Date().toISOString()
+
+/** Temporal 的 attempt 序号；单测直接调用时没有 Activity 上下文，按首次处理。 */
+const activityAttempt = (): number => {
+  try {
+    return Context.current().info.attempt
+  } catch {
+    return 1
+  }
+}
 
 const nodeById = (plan: MissionPlanV1, nodeId: string): DagNode => {
   const node = plan.nodes.find((n) => n.node_id === nodeId)
@@ -270,6 +280,7 @@ export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: st
   const runner = snapshotRunnerDescriptor(deps.runner)
   const base = createActivities(deps)
   const runAttempt = createDagAttemptRunner(deps)
+  const adapters = deps.adapters ?? (deps.adapter ? [deps.adapter] : [])
 
   return {
     async loadDagSchedule(missionId: string): Promise<{
@@ -300,8 +311,23 @@ export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: st
       return materializeDagTask({ store, workRoot: deps.workRoot, runner, ...(deps.memory ? { memory: deps.memory } : {}) }, input)
     },
 
+    /**
+     * dag/v1 Workflow 只在 Worker 失联（心跳/超时）后重试一次：Activity 自己抛的错一律不可重试，避免二次路由。
+     * 重试的 attempt 先确认已落账的 binding 属于重启安全的 Adapter，否则不碰它、照旧升级；没有 binding 说明
+     * 此前没有启动过 Agent（binding 先于 startTask 落账），照常首次派发。恢复本身靠 runner 对 binding 的幂等。
+     */
     async runDagAttempt(input: { taskId: string }) {
-      return runAttempt(input)
+      if (activityAttempt() > 1) {
+        const binding = (await store.getTask(input.taskId))?.binding
+        if (binding && adapters.find((a) => a.adapterId === binding.adapter)?.restartSafe !== true) {
+          throw ApplicationFailure.nonRetryable(`Adapter ${binding.adapter} 不支持 Worker 重启恢复，不重试`, 'ATTEMPT_NOT_RESTART_SAFE')
+        }
+      }
+      try {
+        return await runAttempt(input)
+      } catch (error) {
+        throw ApplicationFailure.fromError(error, { nonRetryable: true })
+      }
     },
 
     async checkDagApproval(taskId: string): Promise<{ decision: 'approved' | 'pending' | 'rejected' }> {

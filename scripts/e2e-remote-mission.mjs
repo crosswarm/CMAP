@@ -320,17 +320,15 @@ const scenarios = {
     await verifyNode(missionId, (await tasksOf(missionId)).solo, 'lap', s.groups)
   },
 
-  /** dag/v1：runDagAttempt 不重试（maximumAttempts 1），Worker 被杀即心跳超时升级——只核不重跑。 */
+  /** dag/v1：Worker 被杀后 runDagAttempt 心跳超时（2 分钟）重试一次，只按 lap 上的既有 binding 恢复观察——应完成且 lap 只执行 1 次。 */
   async 'worker-restart'() {
     const { missionId, result, s } = await killWorkerDuringLapRun('worker-restart', [producer('solo', 7, 'lap', { slow: true })])
+    await verifyCompletedMission(missionId, result)
     const t = (await tasksOf(missionId)).solo
     const evs = await events(missionId)
-    ok(`Mission ${result.state}：${result.nodeOutcomes.map((o) => `${o.nodeId}:${o.status}:${o.reason ?? ''}`).join(',')}，任务 ${t.state}`)
-    check(t.binding?.runner_id === remoteId, 'binding 未保留在 lap')
-    check(routingOf(evs, t.id).length === 1 && countOf(evs, 'TASK_STARTED', t.id) === 1, '出现改派或二次启动')
+    check(countOf(evs, 'INPUT_REQUIRED') === 0, '出现 INPUT_REQUIRED')
     check((await store.queryTasks({ missionId })).length === 1 && !(await localRunRecord(t.id)), '出现重跑')
-    check(lapRunRecords(t.id) === 1 && s.groups.size <= 1, `lap 运行记录 ${lapRunRecords(t.id)}、进程组 ${s.groups.size}`)
-    ok(`binding 保留 lap，ROUTING_DECIDED=1，TASK_STARTED=1，任务数 1，lap 运行记录 1、进程组采样 ${s.groups.size}，本地 0`)
+    await verifyNode(missionId, t, 'lap', s.groups)
   },
 
   /** inspect/v1：本机 codex 设为不健康（测试专用 CODEX_BIN），路由按注册顺序落到 codex@lap；Worker 重启后应完成。 */

@@ -28,6 +28,16 @@ const attempt = proxyActivities<Pick<DagActivities,'runDagAttempt'>>({
   // 不在派发确认不明时另起一次 Agent；节点返工通过新 Task 表达。
   retry:{maximumAttempts:1},
 })
+/**
+ * Worker 重启恢复：Worker 失联（心跳/超时）后重试一次。runDagAttempt 自身的错误不可重试，
+ * 重试的 attempt 只对重启安全 Adapter 的既有 binding 恢复观察，绝不新启动 Agent。
+ * 旧历史重放时 patched() 为 false，仍按 maximumAttempts 1 调度。
+ */
+const ATTEMPT_RESUME_PATCH='dag-attempt-restart-resume-v1'
+const resumableAttempt = proxyActivities<Pick<DagActivities,'runDagAttempt'>>({
+  startToCloseTimeout:'2 hours',heartbeatTimeout:'2 minutes',
+  retry:{initialInterval:'2 seconds',maximumAttempts:2},
+})
 
 /** 停在等待点（等审批 / 等资源锁）的节点，continueAsNew 后从这里继续，不重新物化。 */
 export interface ParkedDagNode {
@@ -122,7 +132,7 @@ export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWo
         }
         for(;;) {
           if(stopping) return stopped()
-          const result=await attempt.runDagAttempt({taskId:current})
+          const result=await (patched(ATTEMPT_RESUME_PATCH)?resumableAttempt:attempt).runDagAttempt({taskId:current})
           if(result.outcome==='collected')break
           if(result.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'escalated',reason:result.reason??'ATTEMPT_FAILED'})
           if(shouldPark())return park('attempt')

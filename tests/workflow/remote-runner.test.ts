@@ -5,7 +5,7 @@
 import { access, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { mock, test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { MemoryStore, verifyDispatchPermit, type Mission, type TaskEnvelopeV1 } from '#domain-model'
@@ -13,6 +13,8 @@ import type { DispatchContext } from '#adapter-sdk'
 import { RemoteRunnerAdapter } from '../../adapters/remote-runner/src/index.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { createDagAttemptRunner } from '../../workflows/dag-attempt.ts'
+import { createDagActivities } from '../../workflows/dag-activities.ts'
+import { Context } from '@temporalio/activity'
 import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 import {
   ISSUER, close, deadUrl, envelope, trust, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signer, startLap, startTamperProxy,
@@ -298,5 +300,39 @@ test('宽限先于超时（dag/v1 attempt）：执行中失联 → EXECUTION_UNC
     assert.equal((await lines(f.codex.launches)).length, 1)
   } finally {
     await cleanupOffline(f, 'tsk-remote-grace-dag')
+  }
+})
+
+test('Worker 重启（dag/v1）：新 Worker 进程的 RemoteRunnerAdapter 在重试 attempt 上按既有 binding 恢复，lap 只执行 1 次', async () => {
+  const f = await fixture('tsk-remote-worker-restart')
+  try {
+    // 被杀的 Worker：路由到 lap、落 binding、lap 已启动 codex
+    assert.equal((await f.acts.dispatchTask('tsk-remote-worker-restart')).dispatched, true)
+    // 新 Worker：全新的适配器实例（进程内状态为空），只凭账本里的 binding
+    const restarted = new RemoteRunnerAdapter({
+      authorization: remoteAuthorization('lap'), ...remoteKeys, baseUrl: f.lap.url, runnerId: 'lap', agentId: 'codex@lap', workRoot: f.cm, capabilities: ['code.analyze'],
+    })
+    const dag = createDagActivities({
+      store: f.store, adapters: [restarted, f.local], signDispatchPermit: signer, workRoot: f.cm, pollIntervalMs: 10,
+      runner: syntheticRunner({ runner_id: 'crossmini', agents: ['codex@lap', 'codex'] }),
+    })
+    const current = mock.method(Context, 'current', () => ({ info: { attempt: 2 }, heartbeat: () => {} }) as unknown as ReturnType<typeof Context.current>)
+    try {
+      assert.deepEqual(await dag.runDagAttempt({ taskId: 'tsk-remote-worker-restart' }), { outcome: 'collected', taskId: 'tsk-remote-worker-restart' })
+    } finally {
+      current.mock.restore()
+    }
+    const task = (await f.store.getTask('tsk-remote-worker-restart'))!
+    // 结果已入账（任务终态由随后的 reviewDagAttempt 推进）
+    assert.equal(task.result!.status, 'completed')
+    assert.equal((await f.store.listArtifacts('tsk-remote-worker-restart'))[0]!.sha256, sha256('ok'))
+    assert.equal(task.binding!.runner_id, 'lap')
+    const evs = await f.store.listEvents('mis-remote')
+    assert.equal(evs.filter((e) => e.event_type === 'ROUTING_DECIDED').length, 1)
+    assert.equal(evs.filter((e) => e.event_type === 'TASK_STARTED').length, 1)
+    assert.equal((await lines(f.codex.launches)).length, 1)
+    assert.equal(f.local.startCalls.length, 0)
+  } finally {
+    await f.cleanup()
   }
 })

@@ -107,6 +107,8 @@ export interface RemoteRunnerAdapterOptions {
 
 export class RemoteRunnerAdapter implements AgentAdapter {
   readonly adapterId = REMOTE_ADAPTER_ID
+  /** lap 侧是 Codex 运行记录模式、binding 只含 remote_task_id：Worker 重启后据 binding 继续轮询即可，不会重发。 */
+  readonly restartSafe = true
   readonly agentId: string
   readonly runnerId: string
   readonly authorizationMode: AdapterAuthorization['mode']

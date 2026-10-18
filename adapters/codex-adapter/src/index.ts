@@ -246,6 +246,8 @@ export interface CodexAdapterOptions {
 export class CodexAdapter implements AgentAdapter {
   readonly adapterId = ADAPTER_ID
   readonly agentId = AGENT_ID
+  /** 只有运行记录模式能在 Worker 重启后据记录恢复；进程内存模式重启即丢失观察。 */
+  readonly restartSafe: boolean
 
   readonly #bin: string
   readonly #outputSchemaPath: string
@@ -264,6 +266,7 @@ export class CodexAdapter implements AgentAdapter {
     this.#outputSchemaPath = opts.outputSchemaPath
     this.#idempotency = opts.idempotencyStore ?? new Map()
     this.#runsDir = opts.runsDir
+    this.restartSafe = opts.runsDir !== undefined
     this.#defaultModel = opts.defaultModel
   }
 
