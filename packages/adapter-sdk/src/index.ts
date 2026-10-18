@@ -163,6 +163,11 @@ export interface AgentAdapter {
   readonly adapterId: string
   readonly agentId: string
   readonly authorizationMode: AdapterAuthorization['mode']
+  /**
+   * 实际执行的 runner。缺省为控制面本机 runner；远程 runner Adapter（ADR-0006）设为目标 runner_id，
+   * 派发许可受众与 binding.runner_id 都绑定它。
+   */
+  readonly runnerId?: string
 
   discover(): Promise<AdapterDescriptor>
 

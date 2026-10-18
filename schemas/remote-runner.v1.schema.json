@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/remote-runner/v1",
+  "title": "RemoteRunnerMessageV1",
+  "description": "ADR-0006 thin protocol between the single control plane (CrossMini) and the lap runner daemon over Tailscale. Only the control plane initiates HTTP requests (dispatch, status, result, cancel, health); the runner never calls back. Dispatch carries a cmap1 dispatch permit bound to runner_id, adapter audience and the exact envelope SHA256; the runner verifies it with a pinned public key and at most 2 seconds of clock skew. Input files are frozen by the control plane and shipped inline; result artifacts are pulled by the control plane, which recomputes every SHA256 itself and never trusts runner-reported hashes. Bodies never carry credentials, database addresses or provider stderr; error bodies carry only category, code and retryable.",
+  "oneOf": [
+    { "$ref": "#/$defs/dispatch" },
+    { "$ref": "#/$defs/dispatchAccepted" },
+    { "$ref": "#/$defs/status" },
+    { "$ref": "#/$defs/result" },
+    { "$ref": "#/$defs/cancel" },
+    { "$ref": "#/$defs/health" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "schemaTag": { "type": "string", "const": "cmap/remote-runner/v1" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s*]+$" },
+    "remoteTaskId": { "type": "string", "pattern": "^codex:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}:[1-9][0-9]{0,15}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "base64": { "type": "string", "maxLength": 22369624, "pattern": "^[A-Za-z0-9+/]*={0,2}$" },
+    "dispatch": {
+      "title": "RemoteRunnerDispatchV1",
+      "description": "POST /v1/tasks. envelope is the exact control-plane TaskEnvelopeV1; its integrity comes from permit.envelope_sha256, not from this schema.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "permit", "envelope", "trace_id", "correlation_id", "deadline_at", "inputs"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "dispatch" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "permit": { "type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^cmap1\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$" },
+        "envelope": { "type": "object" },
+        "trace_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "correlation_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "deadline_at": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "inputs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["uri", "sha256", "content_base64"],
+            "properties": {
+              "uri": { "type": "string", "pattern": "^inputs/(memory|review)/[a-f0-9]{64}/payload$" },
+              "sha256": { "$ref": "#/$defs/sha256" },
+              "content_base64": { "$ref": "#/$defs/base64" }
+            }
+          }
+        }
+      }
+    },
+    "dispatchAccepted": {
+      "title": "RemoteRunnerDispatchAcceptedV1",
+      "description": "Response to dispatch. A replay of the same permit to the same runner returns the existing remote_task_id without a second execution.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "remote_task_id"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "dispatch_accepted" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "remote_task_id": { "$ref": "#/$defs/remoteTaskId" }
+      }
+    },
+    "status": {
+      "title": "RemoteRunnerStatusV1",
+      "description": "Response to GET /v1/tasks/{remote_task_id}. No provider detail or stderr crosses the wire.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "remote_task_id", "status", "terminal_observed"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "status" },
+        "remote_task_id": { "$ref": "#/$defs/remoteTaskId" },
+        "status": { "enum": ["queued", "running", "input_required", "auth_required", "completed", "failed", "canceled", "rejected"] },
+        "terminal_observed": { "type": "boolean" }
+      }
+    },
+    "result": {
+      "title": "RemoteRunnerResultV1",
+      "description": "Response to GET /v1/tasks/{remote_task_id}/result. result must validate as TaskResultV1 on the control plane; identity fields are overwritten by the control plane. Each artifact is pulled inline and its sha256 is recomputed by the control plane before any ledger write.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "remote_task_id", "result", "artifacts"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "result" },
+        "remote_task_id": { "$ref": "#/$defs/remoteTaskId" },
+        "result": { "type": "object" },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["uri", "content_base64"],
+            "properties": {
+              "uri": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "pattern": "^[^/\\u0000][^\\u0000]*$",
+                "not": { "pattern": "(^|/)\\.\\.?(/|$)" }
+              },
+              "content_base64": { "$ref": "#/$defs/base64" }
+            }
+          }
+        }
+      }
+    },
+    "cancel": {
+      "title": "RemoteRunnerCancelV1",
+      "description": "POST /v1/tasks/{remote_task_id}/cancel. reason is a control-plane code, never prompt text.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "remote_task_id", "reason"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "cancel" },
+        "remote_task_id": { "$ref": "#/$defs/remoteTaskId" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "health": {
+      "title": "RemoteRunnerHealthV1",
+      "description": "Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "state", "checked_at"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "health" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "state": { "enum": ["healthy", "degraded", "unavailable"] },
+        "checked_at": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "error": {
+      "title": "RemoteRunnerErrorV1",
+      "description": "permit: DispatchPermitErrorCode, no execution happened. admission: RunnerAdmissionErrorCode from the runner's own allowlist, no execution happened. adapter: AdapterError code from the wrapped adapter. protocol: malformed request, unknown task or oversized body.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "category", "code", "retryable"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "error" },
+        "category": { "enum": ["permit", "admission", "adapter", "protocol"] },
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}

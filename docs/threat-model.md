@@ -236,14 +236,14 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 | 闸口 | 规则 | 状态 |
 |---|---|---|
-| 控制面唯一 | CrossMini 是唯一控制面、账本写入者与 Artifact 存储；lap 不接入 Temporal / PostgreSQL，只运行 runner 守护进程 | ⬜ 规则已定（Stage 0），runner 守护进程待 Stage 2 |
-| 许可签名与受众 | 派发许可为 Ed25519，受众绑定 `runner_id`（及 Adapter、任务、信封摘要）；lap 只持验签公钥，不持签名私钥 | 🟡 本机受管派发已验证（见 [dispatch-permit](dispatch-permit.md)）；跨主机验签待 Stage 2 |
-| 时钟偏差 | 两机验签允许的时钟偏差 ≤ 2 秒，超出拒绝，不以放宽偏差规避 | ⬜ 本机实现当前不放宽偏差；跨主机的 2 秒上限待 Stage 2 |
-| 离线宽限 | 失联超过 600 秒，lap 上进行中的任务进入 `EXECUTION_UNCERTAIN`，**不自动改派、不重跑**，由人决定 | ⬜ 待 Stage 2；其前提「执行不确定则升级、绝不重跑」见下一行 |
-| 重启不重跑 | Codex 启动前独占写运行记录；重启后按记录判断：进程仍在则等待收集，已退出且结果完整则收集，否则走执行不确定，绝不重跑 | 🟡 Codex 已实现并真实验证：`<workRoot>/.runs/<taskId>.json` 以 `wx` 创建、输出落文件，单测覆盖进程在/已退/不确定/记录已存在四种情形；`node scripts/e2e-mission.mjs --restart-worker` 在 Codex 执行期间 SIGKILL Worker 后 Mission COMPLETED 且 Codex 只执行 1 次（2026-10-18）。Kimi 与 YonWork 尚未覆盖 |
-| 暴露面 | runner 仅监听 `lap:8790`，不绑公网；Tailscale ACL 只允许 CrossMini → lap:8790，无其他入站、无 lap → CrossMini 入站 | ⬜ 待 Stage 2（ACL 与监听配置须实测放行与拒绝两面） |
-| 秘密隔离 | lap 不持有 Memross 令牌与数据库地址；Memross 快照由 CrossMini 冻结后随任务输入下发；提供方子进程环境沿用白名单 | 🟡 子进程环境白名单已实现；lap 部署核查待 Stage 2 |
-| 账本与证据 | 结果只经 CrossMini 采集后写账本；Artifact 由 CrossMini 拉取并独立复算 sha256，不采信 lap 自报 | 🟡 本机独立复算已实现；跨主机拉取待 Stage 2 |
+| 控制面唯一 | CrossMini 是唯一控制面、账本写入者与 Artifact 存储；lap 不接入 Temporal / PostgreSQL，只运行 runner 守护进程 | 🟡 守护进程 `apps/runner` 已实现：只依赖 HTTP + CodexAdapter，不含 Temporal/PostgreSQL 客户端，账本只由 CrossMini 的 Activities 写；本机双端口模拟验证（2026-10-18）。lap 未部署（Stage 4），见 [远程 runner](remote-runner.md) |
+| 许可签名与受众 | 派发许可为 Ed25519，受众绑定 `runner_id`（及 Adapter、任务、信封摘要）；lap 只持验签公钥，不持签名私钥 | 🟡 CrossMini 签名密钥持久化于 `CMAP_PERMIT_KEY_FILE`（首次生成 0600，宽权限拒绝启动）；lap 从配置文件固定公钥（含私钥材料拒绝）；受众为 lap `runner_id` + `remote-runner-adapter`，投到别的 runner → `CLAIM_MISMATCH`，单测、Activities 测试与本机双守护进程模拟均验证。跨主机实测待 Stage 4 |
+| 时钟偏差 | 两机验签允许的时钟偏差 ≤ 2 秒，超出拒绝，不以放宽偏差规避 | 🟡 lap 侧验签固定 `clockSkewSeconds=2`，配置大于 2 或非整数直接报错；±2 秒通过、±3 秒拒绝有单测，偏差 63 秒的模拟 lap → `EXPIRED`、执行 0 次。本机验签仍为 0。两机真实时钟未测 |
+| 离线宽限 | 失联超过 600 秒，lap 上进行中的任务进入 `EXECUTION_UNCERTAIN`，**不自动改派、不重跑**，由人决定 | 🟡 `RemoteRunnerAdapter` 状态查询失联在 600 秒宽限内视为执行中，超过即走既有执行不确定路径（`INPUT_REQUIRED`、保留 binding、再次派发返回原 binding）；Activities 测试以缩短宽限关闭模拟 lap，Codex 只执行 1 次、未回落本地。宽限计时在 Worker 内存，重启重新计时（只会更晚判定）；真实网络失联待 Stage 4 |
+| 重启不重跑 | Codex 启动前独占写运行记录；重启后按记录判断：进程仍在则等待收集，已退出且结果完整则收集，否则走执行不确定，绝不重跑 | 🟡 Codex 已实现并真实验证：`<workRoot>/.runs/<taskId>.json` 以 `wx` 创建、输出落文件，单测覆盖进程在/已退/不确定/记录已存在四种情形；`node scripts/e2e-mission.mjs --restart-worker` 在 Codex 执行期间 SIGKILL Worker 后 Mission COMPLETED 且 Codex 只执行 1 次（2026-10-18）。Kimi 与 YonWork 尚未覆盖。lap 守护进程复用同一 CodexAdapter 与 `<CMAP_WORK_ROOT>/.runs`，守护进程重启场景未单独实测 |
+| 暴露面 | runner 仅监听 `lap:8790`，不绑公网；Tailscale ACL 只允许 CrossMini → lap:8790，无其他入站、无 lap → CrossMini 入站 | 🟡 守护进程必须显式配置监听地址，`0.0.0.0`/`::` 拒绝启动，默认端口 8790；ACL 规则文本见 [远程 runner](remote-runner.md)。**ACL 未配置**，放行与拒绝两面未实测（Stage 4）；状态/结果/取消端点无应用层认证，依赖 ACL |
+| 秘密隔离 | lap 不持有 Memross 令牌与数据库地址；Memross 快照由 CrossMini 冻结后随任务输入下发；提供方子进程环境沿用白名单 | 🟡 守护进程见到 `CMAP_DATABASE_URL`、`MEMROSS_URL`、`MEMROSS_TOKEN`、`CMAP_PERMIT_KEY_FILE`、`TEMPORAL_ADDRESS` 即拒绝启动；冻结输入随派发下发，lap 以 `publishInput` 落盘并复核哈希，被改动的输入在发送前按 `INPUT_INVALID` 拒绝（单测）；子进程环境白名单沿用。lap 实机核查待 Stage 4 |
+| 账本与证据 | 结果只经 CrossMini 采集后写账本；Artifact 由 CrossMini 拉取并独立复算 sha256，不采信 lap 自报 | 🟡 跨主机拉取已实现：产物字节随结果拉回 CrossMini 工作区，`readVerifiedArtifact` 复算；字节被篡改 → `EVIDENCE_HASH_MISMATCH`、任务失败、不写 artifact 记录并删除落盘文件（Activities 测试）；本机双端口模拟用真实 Codex 验证一次。两机实测待 Stage 4 |
 | 例外前提 | 只有 Cross 一个用户；前提变化（引入协作者）即例外失效，需重新评审 | ✅ 规则已写入 ADR-0006 |
 
 ## 残余风险

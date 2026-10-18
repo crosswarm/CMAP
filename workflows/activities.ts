@@ -621,7 +621,9 @@ export const createActivities = (deps: ActivityDeps) => {
         })
       }
 
-      const token = deps.signDispatchPermit(envelope,{runnerId,adapterId:selectedAdapter.adapterId})
+      // 远程 runner Adapter（ADR-0006）的许可受众与 binding 绑定目标 runner，其余仍是本机 runner。
+      const targetRunnerId = selectedAdapter.runnerId ?? runnerId
+      const token = deps.signDispatchPermit(envelope,{runnerId:targetRunnerId,adapterId:selectedAdapter.adapterId})
       if (typeof token !== 'string' || token.length === 0) throw new Error('DISPATCH_PERMIT_SIGNER_INVALID')
       const timeoutMs = (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
 
@@ -632,7 +634,7 @@ export const createActivities = (deps: ActivityDeps) => {
 
       const context: DispatchContext = {
         token,
-        runner_id: runnerId,
+        runner_id: targetRunnerId,
         trace_id: taskId,
         correlation_id: envelope.identity.idempotency_key,
         ...(worktree ? { worktree } : {}),
@@ -641,7 +643,7 @@ export const createActivities = (deps: ActivityDeps) => {
 
       if (selectedAdapter.prepareBinding) {
         const prepared = selectedAdapter.prepareBinding(envelope, context)
-        if (prepared.adapter !== selectedAdapter.adapterId || prepared.runner_id !== runnerId) {
+        if (prepared.adapter !== selectedAdapter.adapterId || prepared.runner_id !== targetRunnerId) {
           throw new Error('Prepared binding identity mismatch')
         }
         const claim = await store.claimTaskBinding({taskId,binding:prepared,actor:ACTOR})
@@ -676,10 +678,12 @@ export const createActivities = (deps: ActivityDeps) => {
           }})
         } catch (error) {
           if (revoked) return {dispatched:false,...revoked}
-          if (error instanceof DispatchPermitError) {
+          // 远程 runner 自己的验签或准入拒绝同样是发送意图后的确定性拒绝：保留 binding，不重发。
+          if (error instanceof DispatchPermitError || error instanceof RunnerAdmissionError) {
             const task = await store.getTask(taskId)
             if (!task) throw new Error('TASK_NOT_FOUND')
-            const denial = await persistAdmissionDenial(store,runner,task,new RunnerAdmissionError('PERMIT_INVALID'),'post-intent')
+            const denial = await persistAdmissionDenial(store,runner,task,
+              error instanceof RunnerAdmissionError ? error : new RunnerAdmissionError('PERMIT_INVALID'),'post-intent')
             return {dispatched:false,...denial}
           }
           throw error
@@ -757,7 +761,7 @@ export const createActivities = (deps: ActivityDeps) => {
         try { status = await a.getStatus(t.binding) }
         catch (error) {
           if (!(error instanceof AdapterError) || error.code !== 'BINDING_NOT_FOUND' ||
-            !['codex-adapter','kimi-adapter'].includes(t.binding.adapter)) throw error
+            !['codex-adapter','kimi-adapter','remote-runner-adapter'].includes(t.binding.adapter)) throw error
           const current = await store.getTask(taskId)
           if (!current || !isDeepStrictEqual(current.binding,t.binding)) throw new Error('CLI_RECOVERY_BINDING_CHANGED')
           if (current.result) {

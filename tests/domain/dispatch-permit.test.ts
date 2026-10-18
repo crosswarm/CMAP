@@ -2,9 +2,12 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 import { createHash, createPublicKey, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 import { describe, test } from 'node:test'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { TaskEnvelopeV1 } from '#domain-model'
-import { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit } from '../../packages/domain-model/src/dispatch-permit.ts'
+import { DispatchPermitError, issueDispatchPermit, loadOrCreatePermitKey, loadPinnedPublicKey, verifyDispatchPermit } from '../../packages/domain-model/src/dispatch-permit.ts'
 
 const nowMs = 1_800_000_000_000
 
@@ -249,5 +252,60 @@ describe('dispatch permit native crypto core', () => {
     })
     assert.equal(child.status, 0, child.stderr)
     assert.equal(child.stdout, '')
+  })
+})
+
+describe('dual-host permit trust (ADR-0006)', () => {
+  test('cross-host verification tolerates at most 2 seconds of clock skew', () => {
+    const { privateKey, publicKey } = keys()
+    const token = issueDispatchPermit({ ...input(privateKey), ttlSeconds: 10 })
+    const at = (deltaSeconds: number, clockSkewSeconds = 2) =>
+      () => verifyDispatchPermit(token, { ...verifyInput(publicKey), nowMs: nowMs + deltaSeconds * 1000, clockSkewSeconds })
+    assert.equal(at(-2)(), undefined)
+    assert.equal(at(11)(), undefined)
+    assert.equal(codeOf(at(-3)), 'NOT_YET_VALID')
+    assert.equal(codeOf(at(12)), 'EXPIRED')
+    assert.equal(codeOf(at(-1, 0)), 'NOT_YET_VALID')
+    assert.throws(at(0, 3), /CLOCK_SKEW_OUT_OF_RANGE/)
+    assert.throws(at(0, 1.5), /CLOCK_SKEW_OUT_OF_RANGE/)
+  })
+
+  test('signing key file is created once with 0600 and reloaded unchanged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cmap-permit-key-'))
+    try {
+      const path = join(dir, 'permit.key')
+      const first = loadOrCreatePermitKey(path)
+      assert.equal((await stat(path)).mode & 0o777, 0o600)
+      const second = loadOrCreatePermitKey(path)
+      const der = (k: KeyObject) => k.export({ type: 'spki', format: 'der' }).toString('hex')
+      assert.equal(der(second.publicKey), der(first.publicKey))
+      const token = issueDispatchPermit(input(second.privateKey))
+      assert.equal(verifyDispatchPermit(token, verifyInput(first.publicKey)), undefined)
+
+      await chmod(path, 0o644)
+      assert.throws(() => loadOrCreatePermitKey(path), /PERMIT_KEY_FILE_MODE/)
+      await chmod(path, 0o600)
+      const rsa = generateKeyPairSync('rsa', { modulusLength: 1024 })
+      await writeFile(path, rsa.privateKey.export({ type: 'pkcs8', format: 'pem' }))
+      assert.throws(() => loadOrCreatePermitKey(path), /UNKNOWN_KEY/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('runner pins only a public key and refuses private key material', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cmap-permit-pub-'))
+    try {
+      const keyPath = join(dir, 'permit.key')
+      const { privateKey, publicKey } = loadOrCreatePermitKey(keyPath)
+      const pubPath = join(dir, 'control-plane.pub')
+      await writeFile(pubPath, publicKey.export({ type: 'spki', format: 'pem' }))
+      const pinned = loadPinnedPublicKey(pubPath)
+      assert.equal(verifyDispatchPermit(issueDispatchPermit(input(privateKey)), verifyInput(pinned)), undefined)
+      assert.throws(() => loadPinnedPublicKey(keyPath), /PINNED_KEY_NOT_PUBLIC/)
+      assert.ok((await readFile(keyPath, 'utf8')).includes('PRIVATE KEY'))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

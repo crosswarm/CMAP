@@ -80,6 +80,17 @@ describe('模型与努力度落到命令行', () => {
     )
   })
 
+  test('runner 配置了默认模型（lap 的 CMAP_CODEX_MODEL）时无 model_policy 也显式传 -m，不依赖 ~/.codex 默认', () => {
+    const args = buildCodexArgs(envelope(), { ...opts, defaultModel: 'gpt-5.6-lap' })
+    assert.equal(valueOf(args, '-m'), 'gpt-5.6-lap')
+    assert.equal(args.filter((a) => a === '-m').length, 1)
+    assert.ok(!args.some((a) => a.startsWith('model_reasoning_effort')))
+    // 信封显式解析出的 model_policy 优先于 runner 默认
+    const policy = buildCodexArgs(envelope({ model: 'gpt-5.6-sol', effort: 'low', source: 'task_override' }), { ...opts, defaultModel: 'gpt-5.6-lap' })
+    assert.equal(valueOf(policy, '-m'), 'gpt-5.6-sol')
+    assert.equal(policy.filter((a) => a === '-m').length, 1)
+  })
+
   test('四档都能构造', () => {
     for (const effort of ['low', 'medium', 'high', 'xhigh'] as const) {
       const args = buildCodexArgs(

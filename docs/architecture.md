@@ -74,6 +74,7 @@ spawn 出的 worker **不继承任何上下文**——所以任务信封必须�
 | `review-decision.v1` | 返工契约 | ✅ 已实现 |
 | `codex-output.v1` | 传给 Agent 的输出格式 | ✅ 已实现 |
 | `dispatch-permit.v1` | 本机受管启动的短期签名凭据 | ✅ 本机契约；远程身份仍未实现，见 [派发凭据](dispatch-permit.md) |
+| `remote-runner.v1` | CrossMini ↔ lap runner 守护进程的派发/状态/结果/取消消息（ADR-0006） | 🟡 已实现，本机双端口模拟验证；两机未部署，见 [远程 runner](remote-runner.md) |
 
 ### 为什么 Agent 输出与账本格式必须分开
 
@@ -217,7 +218,8 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 语义 Reviewer / Judge | ⬜ 尚未接入；当前为确定性硬门槛判定，多分支测试中的 Reviewer 决定为合成夹具；不同于 Planner 的认证阻断 |
 | yonwork-adapter | 🟡 P3；受控派发、预写意图、相关终态与报告捕获已通过本地合成集成回归；真实专用 profile 闭环尚未验收，见 [运行说明](yonwork-adapter.md) 与 [验证](verification-yonwork-core-2026-09-22.md) |
 | Codex/Kimi 启动前持久意图 | ✅ 本机；未知运行状态保留绑定并升级，不能自动重接管，见 [验证](verification-cli-dispatch-intent-2026-09-22.md) |
-| 远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
+| 单用户双主机远程 runner（ADR-0006） | 🟡 Stage 2–3：`remote-runner.v1` 薄协议、持久化许可密钥与 lap 固定公钥、`RemoteRunnerAdapter` 与 `apps/runner` 守护进程已实现，本机双端口模拟验证；lap 部署与 Tailscale ACL（Stage 4）未做，见 [远程 runner](remote-runner.md) |
+| 多人多机远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 
 P2 后端出口验证记录在 `scripts/e2e-mission.mjs`（不代表 WebUI 或整个 P2 完成）：建 Mission → Workflow 派发 →
 codex 真实执行 → 收结果落账本 → 逐条核对验收标准 → 独立复算证据哈希 →

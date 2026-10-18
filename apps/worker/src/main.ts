@@ -24,9 +24,10 @@ import { generateKeyPairSync } from 'node:crypto'
 
 import { Worker, NativeConnection } from '@temporalio/worker'
 
-import { PgStore, issueDispatchPermit, verifyDispatchPermit, DispatchPermitError } from '#domain-model'
-import type { AdapterAuthorization, DispatchPermitSigner } from '#adapter-sdk'
-import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
+import { PgStore, issueDispatchPermit, verifyDispatchPermit, DispatchPermitError, loadOrCreatePermitKey } from '#domain-model'
+import type { AdapterAuthorization, AgentAdapter, DispatchPermitSigner } from '#adapter-sdk'
+import { CodexAdapter, CODEX_CAPABILITIES } from '../../../adapters/codex-adapter/src/index.ts'
+import { RemoteRunnerAdapter } from '../../../adapters/remote-runner/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
 import { parseAdapterNames } from './adapter-config.ts'
@@ -52,8 +53,10 @@ const memoryUrl = process.env['MEMROSS_URL'] ?? ''
 const memoryToken = process.env['MEMROSS_TOKEN'] ?? ''
 const memory = memoryUrl && memoryToken ? { url: memoryUrl, token: memoryToken } : undefined
 
-// Local ephemeral trust exercises the managed boundary; it is not remote host identity.
-const {privateKey,publicKey}=generateKeyPairSync('ed25519')
+// 未配置 CMAP_PERMIT_KEY_FILE 时沿用本机临时密钥（不是远程主机身份）；远程 runner 要求持久化密钥，
+// lap 固定其公钥验签（ADR-0006）。私钥只在本进程内，不进日志、账本或子进程环境。
+const permitKeyFile = process.env['CMAP_PERMIT_KEY_FILE']?.trim()
+const {privateKey,publicKey}=permitKeyFile ? loadOrCreatePermitKey(permitKeyFile) : generateKeyPairSync('ed25519')
 const issuer='cmap:local-control-plane'
 const signDispatchPermit:DispatchPermitSigner=(envelope,{runnerId:audienceRunner,adapterId})=>
   issueDispatchPermit({privateKey,issuer,runnerId:audienceRunner,adapterId,envelope})
@@ -63,7 +66,7 @@ const authorization:AdapterAuthorization={mode:'managed',verifier:(token,envelop
 }}
 
 const adapterNames = parseAdapterNames(process.env['CMAP_AGENTS'])
-const adapters = adapterNames.map((name) =>
+const adapters: AgentAdapter[] = adapterNames.map((name) =>
   name === 'kimi'
     ? new KimiAdapter({authorization})
     : name === 'yonwork'
@@ -75,6 +78,25 @@ const adapters = adapterNames.map((name) =>
         runsDir: join(workRoot, '.runs'),
       }),
 )
+
+// 远程 runner（ADR-0006）：只由本机主动访问 lap:8790；lap 不在线时路由按健康探测回落本地。
+const remoteRunnerUrl = process.env['CMAP_REMOTE_RUNNER_URL']?.trim()
+if (remoteRunnerUrl) {
+  const remoteRunnerId = process.env['CMAP_REMOTE_RUNNER_ID']?.trim() ?? ''
+  if (!permitKeyFile) throw new Error('CMAP_REMOTE_RUNNER_URL 需要 CMAP_PERMIT_KEY_FILE：远程 runner 只认固定公钥')
+  if (!remoteRunnerId || remoteRunnerId === runnerId) throw new Error('CMAP_REMOTE_RUNNER_ID 必填且不能与本机 RUNNER_ID 相同')
+  adapters.push(new RemoteRunnerAdapter({
+    authorization:{mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{
+      if(contextRunner!==remoteRunnerId)throw new DispatchPermitError('CLAIM_MISMATCH')
+      return verifyDispatchPermit(token,{publicKey,issuer,runnerId:remoteRunnerId,adapterId,envelope})
+    }},
+    baseUrl: remoteRunnerUrl,
+    runnerId: remoteRunnerId,
+    agentId: `codex@${remoteRunnerId}`,
+    workRoot,
+    capabilities: CODEX_CAPABILITIES,
+  }))
+}
 
 const descriptors = await Promise.all(adapters.map(adapter => adapter.discover()))
 for (const [index, descriptor] of descriptors.entries()) {
@@ -137,7 +159,7 @@ process.on('SIGTERM', stop)
 
 console.log(
   `Worker 就绪：temporal=${address} ns=${namespace} queue=${taskQueue} ` +
-    `db.schema=${schema} runner=${runnerId} adapters=${adapterNames.join(',')} 工作区=${workRoot} memross=${memory ? memoryUrl : '未配置'}`,
+    `db.schema=${schema} runner=${runnerId} adapters=${adapters.map(a => a.agentId).join(',')} 工作区=${workRoot} memross=${memory ? memoryUrl : '未配置'}`,
 )
 
 await worker.run()

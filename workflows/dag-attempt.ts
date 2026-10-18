@@ -37,7 +37,7 @@ const executionUncertainReason = (code: string): string => `EXECUTION_UNCERTAIN:
 const isCliBindingNotFound = (error: unknown, binding: RemoteTaskBinding): error is AdapterError =>
   error instanceof AdapterError &&
   error.code === 'BINDING_NOT_FOUND' &&
-  (binding.adapter === 'codex-adapter' || binding.adapter === 'kimi-adapter')
+  (binding.adapter === 'codex-adapter' || binding.adapter === 'kimi-adapter' || binding.adapter === 'remote-runner-adapter')
 
 const heartbeat = (): void => {
   try {

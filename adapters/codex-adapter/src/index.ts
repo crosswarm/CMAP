@@ -50,6 +50,14 @@ import { codexProviderEnv } from '../../../packages/adapter-sdk/src/provider-env
 const ADAPTER_ID = 'codex-adapter'
 const AGENT_ID = 'codex'
 const ADAPTER_VERSION = '0.1.0'
+/** 远程 runner（lap 上同一个 CodexAdapter）的静态描述复用这份清单。 */
+export const CODEX_CAPABILITIES = [
+  'code.implement',
+  'code.analyze',
+  'performance.root_cause',
+  'yonwork.debug',
+  'realdevice-validation',
+] as const
 
 /** codex 沙箱档位。绝不使用 danger-full-access。 */
 type CodexSandbox = 'read-only' | 'workspace-write'
@@ -102,6 +110,8 @@ export interface CodexArgsOptions {
   readonly resultFile: string
   readonly outputSchemaPath: string
   readonly prompt: string
+  /** runner 侧默认模型（lap 上 codex 内置默认不可用）。仅在信封无 model_policy 时以 -m 显式传入。 */
+  readonly defaultModel?: string
 }
 
 /**
@@ -142,6 +152,8 @@ export const buildCodexArgs = (
     // 在拿到 effort 的生效证据前，UI 不得把它呈现为「已生效」，
     // 否则就是又造了一个假信号。
     args.push('-m', policy.model, '-c', `model_reasoning_effort="${policy.effort}"`)
+  } else if (opts.defaultModel) {
+    args.push('-m', opts.defaultModel)
   }
 
   args.push(opts.prompt)
@@ -227,6 +239,8 @@ export interface CodexAdapterOptions {
    * Worker 重启后可据记录判断进程是否仍在、结果是否已完整。不设置则保持进程内存模式。
    */
   readonly runsDir?: string
+  /** 见 CodexArgsOptions.defaultModel。 */
+  readonly defaultModel?: string
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -240,6 +254,7 @@ export class CodexAdapter implements AgentAdapter {
   readonly #runs = new Map<string, RunState>()
   readonly #idempotency: Map<string, RemoteTaskBinding>
   readonly #runsDir: string | undefined
+  readonly #defaultModel: string | undefined
   readonly #pending = new Map<string, Promise<RemoteTaskBinding>>()
 
   constructor(opts: CodexAdapterOptions) {
@@ -249,6 +264,7 @@ export class CodexAdapter implements AgentAdapter {
     this.#outputSchemaPath = opts.outputSchemaPath
     this.#idempotency = opts.idempotencyStore ?? new Map()
     this.#runsDir = opts.runsDir
+    this.#defaultModel = opts.defaultModel
   }
 
   async discover(): Promise<AdapterDescriptor> {
@@ -257,13 +273,7 @@ export class CodexAdapter implements AgentAdapter {
       agent_id: AGENT_ID,
       provider: 'openai-codex',
       version: ADAPTER_VERSION,
-      capabilities: [
-        'code.implement',
-        'code.analyze',
-        'performance.root_cause',
-        'yonwork.debug',
-        'realdevice-validation',
-      ],
+      capabilities: [...CODEX_CAPABILITIES],
       risk_ceiling: 'mutating',
       // codex exec resume 本身可用，但控制面不走续跑路线：返工一律派生
       // 新 Task 以保留证据历史，因此此处如实报告为不支持。
@@ -328,6 +338,7 @@ export class CodexAdapter implements AgentAdapter {
       resultFile,
       outputSchemaPath: this.#outputSchemaPath,
       prompt,
+      ...(this.#defaultModel ? { defaultModel: this.#defaultModel } : {}),
     })
 
     try {

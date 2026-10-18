@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json --noEmit",
     "start:worker": "node --env-file-if-exists=.env apps/worker/src/main.ts",
     "start:api": "node --env-file-if-exists=.env apps/control-plane-api/src/main.ts",
+    "start:runner": "node apps/runner/src/main.ts",
     "test": "node --test tests/contract/*.test.mjs tests/tooling/*.test.mjs tests/adapter/*.test.ts tests/domain/memory-store.test.ts tests/domain/task-state.test.ts tests/domain/evidence-pack.test.ts tests/domain/no-progress.test.ts tests/domain/criterion-check.test.ts tests/domain/mission-plan.test.ts tests/domain/runner-admission.test.ts tests/domain/dispatch-permit.test.ts",
     "test:contract": "node --test tests/contract/*.test.mjs",
     "test:adapter": "node --test tests/adapter/*.test.ts",

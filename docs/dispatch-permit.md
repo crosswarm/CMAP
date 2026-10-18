@@ -26,4 +26,6 @@ Worker 启动时生成一次临时密钥：Activities 取得签发函数，Adapt
 - 直接 SDK 单跳显式配置 `authorization: { mode: 'standalone' }`，不进入受管 Workflow，也不具备签名授权或持久化派发保证。已有单跳脚本已明确选择此模式。
 - Codex/Kimi 仅继承运行所需环境白名单；Codex 保留明确的自身提供方配置/凭据变量。控制面数据库、runner 令牌、TypeSafe 与其他未知环境变量不传给提供方。健康探测同样过滤。环境过滤不等于完整文件系统或网络隔离。
 
+单用户双主机例外（[ADR-0006](adr/0006-single-user-dual-host-exception.md)）：设置 `CMAP_PERMIT_KEY_FILE` 时 Worker 改用持久化签名密钥（首次生成 0600，宽权限拒绝）；lap 守护进程从配置文件固定对应公钥，受众为 lap 的 `runner_id` 与 `remote-runner-adapter`，验签允许且仅允许 2 秒时钟偏差。见[远程 runner](remote-runner.md)。
+
 远程 WSS/mTLS、认证注册/心跳、OIDC、跨进程持久防重放与审计存储仍待 P4；nonce 本身不能替代防重放状态。验收证据见[验证记录](verification-dispatch-permit-2026-09-22.md)。

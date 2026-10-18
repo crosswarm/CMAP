@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { createHash, createPublicKey, randomUUID, sign, verify, type KeyObject } from 'node:crypto'
+import { readFileSync, statSync, writeFileSync } from 'node:fs'
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign, verify, type KeyObject } from 'node:crypto'
 import { TextDecoder } from 'node:util'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 
@@ -42,6 +42,8 @@ type VerifyDispatchPermitInput = {
   adapterId: string
   envelope: TaskEnvelopeV1
   nowMs?: number
+  /** Cross-host only (ADR-0006): integer 0..2 seconds. Local verification keeps the default 0. */
+  clockSkewSeconds?: number
 }
 
 const PREFIX = 'cmap1'
@@ -160,9 +162,11 @@ const assertClaims = (
   ) fail('CLAIM_MISMATCH')
 }
 
-const assertTime = (permit: DispatchPermitV1, now: number): void => {
-  if (now < permit.issued_at || now < permit.not_before) fail('NOT_YET_VALID')
-  if (now >= permit.expires_at) fail('EXPIRED')
+const MAX_CLOCK_SKEW_SECONDS = 2
+
+const assertTime = (permit: DispatchPermitV1, now: number, skew: number): void => {
+  if (now + skew < permit.issued_at || now + skew < permit.not_before) fail('NOT_YET_VALID')
+  if (now - skew >= permit.expires_at) fail('EXPIRED')
 }
 
 export const issueDispatchPermit = (input: IssueDispatchPermitInput): string => {
@@ -186,6 +190,8 @@ export const issueDispatchPermit = (input: IssueDispatchPermitInput): string => 
 
 export const verifyDispatchPermit = (token: string, input: VerifyDispatchPermitInput): undefined => {
   assertEd25519(input.publicKey, 'public')
+  const skew = input.clockSkewSeconds ?? 0
+  if (!Number.isInteger(skew) || skew < 0 || skew > MAX_CLOCK_SKEW_SECONDS) throw new RangeError('CLOCK_SKEW_OUT_OF_RANGE')
   if (typeof token !== 'string') fail('MALFORMED')
   if (Buffer.byteLength(token, 'utf8') > MAX_TOKEN_BYTES) fail('MALFORMED')
   const parts = token.split('.')
@@ -202,6 +208,34 @@ export const verifyDispatchPermit = (token: string, input: VerifyDispatchPermitI
 
   assertLifetime(permit)
   assertClaims(permit, input, kid)
-  assertTime(permit, trustedNowSeconds(input.nowMs))
+  assertTime(permit, trustedNowSeconds(input.nowMs), skew)
   return undefined
+}
+
+/**
+ * Control-plane signing key (CMAP_PERMIT_KEY_FILE). Generated once as PKCS8 PEM with 0600 so the lap
+ * runner can pin the matching public key; a key file readable by group/other is refused, not repaired.
+ */
+export const loadOrCreatePermitKey = (path: string): { privateKey: KeyObject; publicKey: KeyObject } => {
+  try {
+    const pair = generateKeyPairSync('ed25519')
+    writeFileSync(path, pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { flag: 'wx', mode: 0o600 })
+    return pair
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  const st = statSync(path)
+  if (!st.isFile() || (st.mode & 0o077) !== 0) throw new Error('PERMIT_KEY_FILE_MODE')
+  const privateKey = createPrivateKey(readFileSync(path))
+  assertEd25519(privateKey, 'private')
+  return { privateKey, publicKey: createPublicKey(privateKey) }
+}
+
+/** Runner-side trust anchor: a pinned SPKI public key file, never private key material. */
+export const loadPinnedPublicKey = (path: string): KeyObject => {
+  const pem = readFileSync(path, 'utf8')
+  if (pem.includes('PRIVATE KEY')) throw new Error('PINNED_KEY_NOT_PUBLIC')
+  const publicKey = createPublicKey(pem)
+  assertEd25519(publicKey, 'public')
+  return publicKey
 }
