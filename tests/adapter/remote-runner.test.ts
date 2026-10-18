@@ -140,6 +140,26 @@ test('冻结输入（Memross 快照）随派发下发并在 lap 复核；本地�
   }
 })
 
+test('DAG 父节点产物（inputs/<node_id>/…）随派发下发并在 lap 原路径落盘复核（C1 子节点在 lap）', async () => {
+  const { root, codex, cm } = await setup()
+  const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap') })
+  try {
+    const bucket = 'c'.repeat(64)
+    const uri = `inputs/left/${bucket}/payload`
+    const e = { ...envelope('tsk-unit-dag-input'), inputs: { artifact_refs: [{ artifact_id: 'art_left_report', role: 'report', uri, sha256: sha256('{"value":17}') }] } }
+    const ctx = await ctxFor(cm, 'tsk-unit-dag-input', signer(e, { runnerId: 'lap', adapterId: REMOTE_ADAPTER_ID }))
+    await mkdir(join(ctx.worktree!, 'inputs/left', bucket), { recursive: true })
+    await writeFile(join(ctx.worktree!, uri), '{"value":17}')
+    await adapterFor(lap.url, cm).startTask(e, ctx)
+    assert.equal(await readFile(join(root, 'lap', 'tsk-unit-dag-input', uri), 'utf8'), '{"value":17}')
+    await waitTerminal(adapterFor(lap.url, cm), { adapter: REMOTE_ADAPTER_ID, remote_task_id: 'codex:tsk-unit-dag-input:1', protocol: 'cmap-remote-runner', protocol_version: '1', runner_id: 'lap' })
+    assert.equal((await lines(codex.launches)).length, 1)
+  } finally {
+    await close(lap.server)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('lap 自有准入白名单拒绝 owner → OWNER_DENIED，执行 0 次', async () => {
   const { root, codex, cm } = await setup()
   const lap = await startLap({ env: lapEnv('lap', codex.bin, { RUNNER_ALLOWED_OWNERS: 'someone-else' }), workRoot: join(root, 'lap') })

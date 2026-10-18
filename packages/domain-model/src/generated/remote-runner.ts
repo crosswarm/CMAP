@@ -37,6 +37,9 @@ export interface RemoteRunnerDispatchV1 {
    * @maxItems 64
    */
   inputs: {
+    /**
+     * 控制面已冻结的输入：memory/review 快照、continues 续作输入或 DAG 父节点产物（inputs/<node_id>/<桶>/payload）；第二段为 safe_id，不含点与斜杠。
+     */
     uri: string
     sha256: Sha256
     content_base64: Base64

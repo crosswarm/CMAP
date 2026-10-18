@@ -40,7 +40,7 @@ import { RUNNER_AUTH_HEADERS, signRunnerRequest, verifyRunnerResponse } from '..
 export const REMOTE_ADAPTER_ID = 'remote-runner-adapter'
 const SCHEMA = 'cmap/remote-runner/v1'
 const REMOTE_TASK_ID = /^codex:([A-Za-z0-9][A-Za-z0-9._:-]{0,127}):([1-9][0-9]{0,15})$/
-const INPUT_URI = /^inputs\/(memory|review)\/[a-f0-9]{64}\/payload$/
+const INPUT_URI = /^inputs\/[A-Za-z][A-Za-z0-9_-]{0,63}\/[a-f0-9]{64}\/payload$/
 
 const ajv = new Ajv2020({ strict: true })
 const readSchema = (name: string): object =>

@@ -64,7 +64,7 @@
             "additionalProperties": false,
             "required": ["uri", "sha256", "content_base64"],
             "properties": {
-              "uri": { "type": "string", "pattern": "^inputs/(memory|review)/[a-f0-9]{64}/payload$" },
+              "uri": { "type": "string", "pattern": "^inputs/[A-Za-z][A-Za-z0-9_-]{0,63}/[a-f0-9]{64}/payload$", "description": "控制面已冻结的输入：memory/review 快照、continues 续作输入或 DAG 父节点产物（inputs/<node_id>/<桶>/payload）；第二段为 safe_id，不含点与斜杠。" },
               "sha256": { "$ref": "#/$defs/sha256" },
               "content_base64": { "$ref": "#/$defs/base64" }
             }

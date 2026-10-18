@@ -12,7 +12,8 @@ const valid = {
   dispatch: {
     schema: S, kind: 'dispatch', runner_id: 'lap', permit: 'cmap1.eyJ.c2ln', envelope: { schema: 'cmap/task-envelope/v1' },
     trace_id: 'tsk-1', correlation_id: 'mis-1:tsk-1', deadline_at: '2026-10-18T00:00:00.000Z',
-    inputs: [{ uri: `inputs/memory/${H}/payload`, sha256: H, content_base64: 'b2s=' }],
+    // memory/review 冻结输入与 DAG 父节点产物（inputs/<node_id>/…）同一布局
+    inputs: [{ uri: `inputs/memory/${H}/payload`, sha256: H, content_base64: 'b2s=' }, { uri: `inputs/left_1/${H}/payload`, sha256: H, content_base64: 'b2s=' }],
   },
   dispatch_accepted: { schema: S, kind: 'dispatch_accepted', runner_id: 'lap', remote_task_id: 'codex:tsk-1:1' },
   status: { schema: S, kind: 'status', remote_task_id: 'codex:tsk_ab:cd:2', status: 'running', terminal_observed: false },
@@ -43,7 +44,10 @@ describe('remote-runner schema', () => {
       patch('dispatch', (v) => { v.permit = 'Bearer abc' }),
       patch('dispatch', (v) => { delete v.inputs }),
       patch('dispatch', (v) => { v.inputs[0].uri = '../inputs/memory/x/payload' }),
-      patch('dispatch', (v) => { v.inputs[0].uri = `inputs/other/${H}/payload` }),
+      patch('dispatch', (v) => { v.inputs[0].uri = `inputs/.memory/${H}/payload` }),
+      patch('dispatch', (v) => { v.inputs[0].uri = `inputs/1node/${H}/payload` }),
+      patch('dispatch', (v) => { v.inputs[0].uri = `inputs/a/b/${H}/payload` }),
+      patch('dispatch', (v) => { v.inputs[0].uri = `inputs/${'n'.repeat(65)}/${H}/payload` }),
       patch('dispatch', (v) => { v.inputs[0].content_base64 = 'not base64!' }),
       patch('dispatch', (v) => { v.token = 'secretref://x' }),
       patch('dispatch_accepted', (v) => { v.remote_task_id = 'codex:../x:1' }),
