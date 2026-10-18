@@ -150,6 +150,14 @@ export const EVENT_TYPES = [
   'MISSION_FAILED',
   /** 其余状态流转（如进入 RUNNING）。没有它，中间态只能借用终态事件，届时界面会显示假信号。 */
   'MISSION_STATE_CHANGED',
+  /** 验收通过的结论已作为候选提交 Memross（只存 proposal_id 与状态，不存正文）。 */
+  'KNOWLEDGE_PROPOSED',
+  /** 提交 Memross 候选失败（错误类别）。旁路失败，不影响 Mission 结果。 */
+  'KNOWLEDGE_PROPOSAL_FAILED',
+  /** Mission 升级时已写 Memross 交接记录（只存 handoff_id）。 */
+  'HANDOFF_RECORDED',
+  /** 交接记录写入失败（错误类别）。不影响升级流程。 */
+  'HANDOFF_FAILED',
 ] as const
 export type EventType = (typeof EVENT_TYPES)[number]
 

@@ -40,6 +40,7 @@ import { MEMORY_ROLE, freezeMemoryInput, registerMemoryArtifact, type FrozenInpu
 import { safeChildDir } from './artifact-files.ts'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import { applyReviewApplication } from './review-application.ts'
+import { proposeTaskKnowledge, recordEscalationHandoff } from './memross-writeback.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
 import { frozenInputArtifactIds, prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
@@ -384,9 +385,10 @@ export const createActivities = (deps: ActivityDeps) => {
       const existing = await store.getTask(taskId)
       let ref = existing?.envelope.inputs?.artifact_refs?.find((r) => r.role === MEMORY_ROLE) as FrozenInputRef | undefined
       if (existing && !ref) return createLedgerTask(store,input)
+      // artifact_id 是账本全局主键：同目标的两个 Mission 会冻结出同一份字节，必须带上任务 ID。
       ref ??= await freezeMemoryInput(deps.memory, child, {
         projectId: memory.project_id, query: (memory.query ?? mission.goal).slice(0, 500), limit: memory.limit ?? 3,
-      }, (digest) => `art_mem_${digest.slice(0, 32)}`)
+      }, (digest) => `art_mem_${createHash('sha256').update(JSON.stringify([taskId, digest])).digest('hex').slice(0, 32)}`)
       // 与 Agent 侧同一道复核：路径不越界、散列一致、不含已知凭据模式。
       const verified = await readVerifiedArtifact(child, { uri: ref.uri, role: ref.role, sha256: ref.sha256 })
       const out = await createLedgerTask(store, { ...input, artifactRefs: [ref] })
@@ -1080,6 +1082,16 @@ export const createActivities = (deps: ActivityDeps) => {
      */
     async applyReviewDecision(input: ApplyReviewInput): Promise<ApplyReviewOutput> {
       return applyReviewApplication(store, input)
+    },
+
+    /** 协作：验收通过的可复用结论提交 Memross 候选。旁路，失败只记事件。 */
+    async proposeTaskKnowledge(input: { missionId: string; taskId: string }): Promise<void> {
+      await proposeTaskKnowledge({ store, ...(workRoot ? { workRoot } : {}), ...(deps.memory ? { memory: deps.memory } : {}) }, input)
+    },
+
+    /** 交接：Mission 升级时写 Memross 交接记录。旁路，失败只记事件。 */
+    async recordEscalationHandoff(input: { missionId: string; reason: string }): Promise<void> {
+      await recordEscalationHandoff({ store, ...(workRoot ? { workRoot } : {}), ...(deps.memory ? { memory: deps.memory } : {}) }, input)
     },
   }
 

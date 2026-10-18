@@ -26,6 +26,13 @@
 
 返工与后继：首轮快照不重新检索，而是以 review input（`source_task_id` 指向首轮任务）交给返工后继，派发时复核 registry 与字节后复制到 `inputs/review/<sha256(artifact_id)>/payload`，因此同一 Mission 前后各轮看到同一份记忆。DAG 后继节点经依赖产物复制拿到父节点的快照。返工信封另带 `inputs.previous_attempt`（上一轮未通过的标准与 focus），提示词渲染为「上一轮未通过」一节。inspect/v1 的这一形状由 review-application `followup_format: 3` 冻结，旧回执按原格式重建。
 
+## 回写（协作与交接）
+
+两类写入都是旁路，用 Worker 同一个 `MEMROSS_TOKEN`（cmap-worker actor，需 `propose_projects` 覆盖目标项目），Memross 拒绝或不可达时只记 `KNOWLEDGE_PROPOSAL_FAILED` / `HANDOFF_FAILED`（错误类别），不改变 Mission 结果。项目范围取 DAG 节点 memory，其次 Mission memory；都没有则不回写。Workflow 新增调用用 `patched()` 守卫，旧历史重放不插入新 Activity。
+
+- **协作**：任务 `REVIEW_ACCEPTED` 后，结果里非 info 级 `findings`（kind `pitfall`）与 `recommended_followups`（kind `procedure`）各一条提交 `POST /api/memory/v1/propose`，每任务至多 5 条。证据为本任务结果产物 `cmap-artifact:<task_id>/<artifact_id>`（冒号等字符按位替换为 `.`）+ 散列，以及任务冻结快照里同项目的 `memross-block`；块已被取代而被拒时退回只带 `cmap-artifact`。幂等键逻辑上是 `missionId:taskId:i`，因 Memross 限 128 字符取 `cmap:<sha256(missionId:taskId) 前 40 位>:<i>`。事件 `KNOWLEDGE_PROPOSED` 只存 proposal_id 与状态。
+- **交接**：Mission 落 `ESCALATED` 时 `POST /api/memory/v1/handoff`（`op: put`）一次：goal、终态与原因、各任务状态/绑定（adapter@runner）/结果状态、控制面重新判定的失败标准、证据链接（artifact URI、role、sha256）、`refs.mission_ids` 与快照里的 `block_ids`。事件 `HANDOFF_RECORDED` 只存 handoff_id；Memross 的 put 本身不幂等，CMAP 以事件为回执避免重复写。
+
 ## 配置与失败处理
 
 Worker 环境变量 `MEMROSS_URL`、`MEMROSS_TOKEN`（Memross 只读 actor，`node scripts/memory.mjs add-actor` 生成，不入库）。令牌只进 Authorization 头；Agent 子进程环境白名单不含它。

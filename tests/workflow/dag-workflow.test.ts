@@ -73,6 +73,9 @@ before(async()=>{
     reviewDagAttempt:(input:Parameters<DagActivities['reviewDagAttempt']>[0])=>byTask(input.taskId).reviewDagAttempt(input),
     finishDagNode:(input:Parameters<DagActivities['finishDagNode']>[0])=>runs.get(input.missionId)!.activities.finishDagNode(input),
     finalizeDagMission:(id:string)=>runs.get(id)!.activities.finalizeDagMission(id),
+    // S5 旁路回写：本文件只验证调度，回写由 memross-writeback / mission-continuity 覆盖。
+    proposeTaskKnowledge:async()=>{},
+    recordEscalationHandoff:async()=>{},
   }})
   running=worker.run()
 })

@@ -16,21 +16,10 @@ import {dagTaskId} from '../../workflows/dag-materialization.ts'
 import {MEMORY_ROLE} from '../../workflows/memory-context.ts'
 import {prepareReviewInputs,reviewArtifactUri} from '../../workflows/review-inputs.ts'
 import {syntheticActivityDeps,syntheticRunner} from './fake-adapter.ts'
+import {fakeMemross} from './fake-memross.ts'
 
 const sha=(v:string|Buffer)=>createHash('sha256').update(v).digest('hex')
 const actor:EventActor={type:'system',id:'rework-context-test'}
-const blockBody='## 坑\n\n刷新后必须回读持久化结果。\n'
-
-export function fakeMemross() {
-  const searches:any[]=[]
-  const fetchImpl=(async(url:string|URL,init?:RequestInit)=>{
-    const path=new URL(String(url)).pathname,payload=JSON.parse(String(init?.body))
-    const json=(value:unknown)=>new Response(JSON.stringify(value),{status:200,headers:{'content-type':'application/json'}})
-    if(path==='/api/memory/v1/search'){searches.push(payload);return json({request_id:'req_s',index_version:'idx',results:[{document_id:'doc_aaaaaaaaaaaaaaaaaaaaaaaa',revision_id:'rev_'+'b'.repeat(32),block_id:'blk_cccccccccccccccccccccccc',body_sha256:sha(blockBody),title:'坑'}]})}
-    return json({request_id:'req_r',body:blockBody,body_sha256:sha(blockBody),returned_body_sha256:sha(blockBody),truncated:false})
-  }) as typeof fetch
-  return {searches,memory:{url:'http://memross.test',token:'test-token',fetch:fetchImpl}}
-}
 
 const now=new Date().toISOString()
 const criterion={criterion_id:'C',metric:'value',operator:'eq' as const,expected:3,hard_gate:true}

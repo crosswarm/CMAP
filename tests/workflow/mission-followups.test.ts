@@ -171,6 +171,9 @@ before(async () => {
         if (state.cleanupFailureReason === input.reason) throw new Error(`cleanup failed:${input.reason}`)
         state.canceled.push(input)
       },
+      // S5 旁路回写：本文件只验证多后继调度，回写由 mission-continuity 覆盖。
+      proposeTaskKnowledge: async () => {},
+      recordEscalationHandoff: async () => {},
     },
   })
   running = worker.run()

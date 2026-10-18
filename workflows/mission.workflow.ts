@@ -59,6 +59,9 @@ const approvalWait = proxyActivities<Activities>({
 const MAX_FOLLOWUPS_PER_TASK = 16
 const MAX_DISCOVERED_TASKS = 128
 const FOLLOWUP_QUEUE_PATCH = 'mission-followup-queue-v1'
+/** S5 协作/交接：旧历史重放时 patched() 为 false，不插入新 Activity。 */
+const KNOWLEDGE_PATCH = 'mission-knowledge-propose-v1'
+const HANDOFF_PATCH = 'mission-escalation-handoff-v1'
 
 type StopReason = Parameters<Activities['cancelPendingMissionTasks']>[0]['reason']
 
@@ -120,6 +123,20 @@ export async function missionWorkflow(
   }
   remember([first.taskId])
 
+  // 旁路回写 Memross：Activity 自己吞掉 Memross 错误；这里再兜住 Activity 失败，不改变 Mission 结果。
+  const sideEffect = async (run: () => Promise<void>): Promise<void> => {
+    try { await run() } catch (error) { if (isCancellation(error)) throw error }
+  }
+  const proposeKnowledge = (taskId: string) => sideEffect(async () => {
+    if (patched(KNOWLEDGE_PATCH)) await acts.proposeTaskKnowledge({ missionId, taskId })
+  })
+  const escalated = async (result: MissionWorkflowResult): Promise<MissionWorkflowResult> => {
+    await sideEffect(async () => {
+      if (patched(HANDOFF_PATCH)) await acts.recordEscalationHandoff({ missionId, reason: result.escalationReason ?? result.summary })
+    })
+    return result
+  }
+
   const pendingIds = (): readonly string[] => queue.map((item) => item.taskId)
   const cancelPending = async (reason: StopReason): Promise<readonly string[]> => {
     const ids = pendingIds()
@@ -180,7 +197,7 @@ export async function missionWorkflow(
         recoverActivityFailure = false
         await cancelPending('ADMISSION_DENIED')
         await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
-        return {missionId,state:'ESCALATED',taskIds,summary:`${prefix}:${dispatch.admissionDenied.code}`,failedCriteria:[],rounds:maxRound}
+        return escalated({missionId,state:'ESCALATED',taskIds,summary:`${prefix}:${dispatch.admissionDenied.code}`,failedCriteria:[],rounds:maxRound})
       }
 
       // 等 Agent 干完并收结果。
@@ -194,7 +211,7 @@ export async function missionWorkflow(
           state: 'ESCALATED',
           idempotencyKey: `mission-execution-uncertain:${taskId}`,
         })
-        return {
+        return escalated({
           missionId,
           state: 'ESCALATED',
           taskIds,
@@ -202,13 +219,13 @@ export async function missionWorkflow(
           failedCriteria: [],
           escalationReason: reason,
           rounds: maxRound,
-        }
+        })
       }
       if (collected.admissionDenied) {
         recoverActivityFailure = false
         await cancelPending('ADMISSION_DENIED')
         await acts.setMissionState({missionId,state:'ESCALATED',idempotencyKey:`admission:${taskId}`})
-        return {missionId,state:'ESCALATED',taskIds,summary:collected.summary,failedCriteria:[],rounds:maxRound}
+        return escalated({missionId,state:'ESCALATED',taskIds,summary:collected.summary,failedCriteria:[],rounds:maxRound})
       }
 
       // 硬门槛由确定性程序判定，不看 Agent 的措辞。
@@ -229,6 +246,7 @@ export async function missionWorkflow(
       })
 
       if (outcome.outcome === 'accept') {
+        await proposeKnowledge(taskId)
         const next = queue.shift()
         if (next) {
           current = next
@@ -250,7 +268,7 @@ export async function missionWorkflow(
         recoverActivityFailure = false
         await cancelPending('BRANCH_ESCALATED')
         // Mission 状态已由 applyReviewDecision 置为 ESCALATED
-        return {
+        return escalated({
           missionId,
           state: 'ESCALATED',
           taskIds,
@@ -258,7 +276,7 @@ export async function missionWorkflow(
           failedCriteria: collected.failedCriteria,
           ...(outcome.escalationReason ? { escalationReason: outcome.escalationReason } : {}),
           rounds: maxRound,
-        }
+        })
       }
 
       const followups = [...outcome.followupTaskIds]
@@ -284,7 +302,7 @@ export async function missionWorkflow(
           await acts.cancelPendingMissionTasks({ missionId, taskIds: toCancel, reason: 'MISSION_TASK_LIMIT' })
         }
         await acts.setMissionState({ missionId, state: 'ESCALATED', idempotencyKey: `mission-task-limit:${taskId}` })
-        return {
+        return escalated({
           missionId,
           state: 'ESCALATED',
           taskIds,
@@ -292,7 +310,7 @@ export async function missionWorkflow(
           failedCriteria: collected.failedCriteria,
           escalationReason: 'MISSION_TASK_LIMIT',
           rounds: maxRound,
-        }
+        })
       }
 
       remember(followups)
@@ -304,7 +322,7 @@ export async function missionWorkflow(
       recoverActivityFailure = false
       await cancelPending('WORKFLOW_ACTIVITY_FAILED')
       await acts.setMissionState({ missionId, state: 'ESCALATED', idempotencyKey: `workflow-activity-failed:${taskId}` })
-      return {
+      return escalated({
         missionId,
         state: 'ESCALATED',
         taskIds,
@@ -312,7 +330,7 @@ export async function missionWorkflow(
         failedCriteria: [],
         escalationReason: 'WORKFLOW_ACTIVITY_FAILED',
         rounds: maxRound,
-      }
+      })
     }
   }
 }

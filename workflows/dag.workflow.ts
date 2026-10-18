@@ -1,5 +1,6 @@
-import { proxyActivities, sleep } from '@temporalio/workflow'
+import { isCancellation, patched, proxyActivities, sleep } from '@temporalio/workflow'
 import type { ProgressSnapshot } from '#domain-model'
+import type { Activities } from './activities.ts'
 import type { DagActivities, DagNodeOutcome } from './dag-activities.ts'
 
 export type DagWorkflowResult = Awaited<ReturnType<DagActivities['finalizeDagMission']>>
@@ -8,6 +9,17 @@ const acts = proxyActivities<DagActivities>({
   startToCloseTimeout:'5 minutes',
   retry:{initialInterval:'2 seconds',maximumAttempts:3},
 })
+const writeback = proxyActivities<Pick<Activities,'proposeTaskKnowledge'|'recordEscalationHandoff'>>({
+  startToCloseTimeout:'5 minutes',
+  retry:{initialInterval:'2 seconds',maximumAttempts:3},
+})
+/** S5 协作/交接：旧历史重放时 patched() 为 false，不插入新 Activity。 */
+const KNOWLEDGE_PATCH='dag-knowledge-propose-v1'
+const HANDOFF_PATCH='dag-escalation-handoff-v1'
+// 旁路回写：失败不改变节点或 Mission 结果。
+const sideEffect=async (run:()=>Promise<void>):Promise<void>=>{
+  try{await run()}catch(error){if(isCancellation(error))throw error}
+}
 const attempt = proxyActivities<Pick<DagActivities,'runDagAttempt'>>({
   startToCloseTimeout:'2 hours',heartbeatTimeout:'2 minutes',
   // 不在派发确认不明时另起一次 Agent；节点返工通过新 Task 表达。
@@ -60,6 +72,10 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
         }
         // 已启动的分支必须完成结果/评审落账，即使别的分支已触发停止。
         const reviewed=await acts.reviewDagAttempt({taskId,...(previousProgress?{previousProgress}:{})})
+        if(reviewed.status==='accepted'){
+          const accepted=taskId
+          await sideEffect(async()=>{if(patched(KNOWLEDGE_PATCH))await writeback.proposeTaskKnowledge({missionId,taskId:accepted})})
+        }
         if(reviewed.status!=='rework')return reviewed
         if(attemptNumber>schedule.maxAdditionalCycles) {
           return acts.finishDagNode({missionId,nodeId:node.node_id,taskId,status:'escalated',reason:'BUDGET_EXHAUSTED'})
@@ -95,5 +111,10 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
     }
     await Promise.race(running.values())
   }
-  return acts.finalizeDagMission(missionId)
+  const final=await acts.finalizeDagMission(missionId)
+  if(final.state==='ESCALATED') {
+    const reason=final.nodeOutcomes.filter(o=>o.status==='escalated').map(o=>`${o.nodeId}:${o.reason??'ESCALATED'}`).join(',')||'DAG_ESCALATED'
+    await sideEffect(async()=>{if(patched(HANDOFF_PATCH))await writeback.recordEscalationHandoff({missionId,reason})})
+  }
+  return final
 }
