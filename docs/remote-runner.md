@@ -1,6 +1,6 @@
 # 远程 runner（单用户双主机，ADR-0006）
 
-状态：Stage 2–3（含应用层请求/响应认证）已实现并在**本机双端口模拟**下验证；Stage 4（部署到 lap、配置 Tailscale ACL、两机实测）**未做**。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
+状态：Stage 2–3（含应用层请求/响应认证）已实现；Stage 4 部分完成（2026-10-18）——lap 守护进程以 launchd `com.cmap.runner` 运行（代码 `a4fb971`，只监听 lap 的 Tailscale IPv4），`scripts/e2e-remote-runner.mjs` 真实两机实跑通过：健康探测、派发与同 runner 重放、请求受众不符/未签名/过期/重放 401、跨 runner 许可 CLAIM_MISMATCH、32 秒完成、产物在 CrossMini 复算哈希一致、lap 上运行记录 1 条。按 [ADR-0006 修订 1](adr/0006-single-user-dual-host-exception.md) 不配置 ACL。尚未实测：经 Temporal 全链路派发到 `codex@lap`、跨主机 DAG（C1）、lap 离线回落（C5）、执行中守护进程/Worker 重启、离线超宽限。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
 
 ## 形态
 
