@@ -1,6 +1,10 @@
 /**
  * lap runner 守护进程（ADR-0006）：只接受 CrossMini 发起的 HTTP 请求，契约见 schemas/remote-runner.v1.schema.json。
  *
+ * 请求认证（先于一切路由与读体）：每个请求（含 health）须带 CrossMini 签名头——方法、路径、体 sha256、时间戳（偏差 ≤ 2 秒）、
+ * nonce（窗口内单次）、受众 runner_id；任何一项不过一律同一个无细节的 401，不执行任何动作。
+ * 其余响应由本机密钥签名（绑定所答请求的 nonce），CrossMini 固定本机公钥验签。
+ *
  * 派发顺序：协议校验 → 固定公钥验签（受众 runner_id + remote-runner-adapter，偏差 ≤ 2 秒）
  * → 本机准入白名单 → 落地并复核已冻结输入 → 复用 CodexAdapter（运行记录、绝不重跑）执行。
  * 不接入 Temporal / PostgreSQL，不持有签名私钥、Memross 令牌或数据库地址；不写账本。
@@ -21,6 +25,9 @@ import { REMOTE_ADAPTER_ID, validateRemoteMessage } from '../../../adapters/remo
 import { readVerifiedArtifact } from '../../../packages/adapter-sdk/src/structured-output.ts'
 import { existingChildDir, publishInput, safeChildDir, safeMkdir } from '../../../workflows/artifact-files.ts'
 import { buildRunnerDescriptor } from '../../worker/src/runner-config.ts'
+import {
+  RUNNER_AUTH_HEADERS, RUNNER_AUTH_MAX_SKEW_MS, runnerBodySha256, signRunnerResponse, verifyRunnerRequest,
+} from '../../../packages/domain-model/src/dispatch-permit.ts'
 
 const SCHEMA = 'cmap/remote-runner/v1'
 const MAX_BODY_BYTES = 64 * 1024 * 1024
@@ -44,6 +51,8 @@ export const readRunnerDaemonConfig = (env: NodeJS.ProcessEnv) => {
     listenHost,
     port,
     publicKeyFile: required('CMAP_PERMIT_PUBLIC_KEY_FILE'),
+    /** 本机响应签名私钥（首次启动生成 0600）；CrossMini 以 CMAP_REMOTE_RUNNER_PUBKEY_FILE 固定其公钥。 */
+    signingKeyFile: required('CMAP_RUNNER_KEY_FILE'),
     issuer: env['CMAP_PERMIT_ISSUER']?.trim() || 'cmap:local-control-plane',
     codexModel: required('CMAP_CODEX_MODEL'),
     workRoot: env['CMAP_WORK_ROOT']?.trim() || undefined,
@@ -73,12 +82,13 @@ const toReply = (error: unknown): [number, object] => {
   return [500, errorBody('protocol', 'INTERNAL')]
 }
 
-const send = (res: ServerResponse, status: number, body?: object): void => {
-  if (body === undefined) res.writeHead(status).end()
-  else res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body))
+/** 认证失败的唯一对外形态：固定 401、固定体、不签名，不区分是哪一项没过。 */
+const UNAUTHORIZED_BODY = JSON.stringify(errorBody('protocol', 'UNAUTHORIZED'))
+const sendUnauthorized = (res: ServerResponse): void => {
+  res.writeHead(401, { 'content-type': 'application/json', connection: 'close' }).end(UNAUTHORIZED_BODY)
 }
 
-const readJson = async (req: IncomingMessage): Promise<unknown> => {
+const readBody = async (req: IncomingMessage): Promise<Buffer> => {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
@@ -86,10 +96,35 @@ const readJson = async (req: IncomingMessage): Promise<unknown> => {
     if (size > MAX_BODY_BYTES) throw new ProtocolFault(413, 'BODY_TOO_LARGE')
     chunks.push(chunk as Buffer)
   }
+  return Buffer.concat(chunks)
+}
+
+const parseJson = (raw: Buffer): unknown => {
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return JSON.parse(raw.toString('utf8'))
   } catch {
     throw new ProtocolFault(400, 'MALFORMED_REQUEST')
+  }
+}
+
+/**
+ * nonce 窗口缓存：时间戳只容忍 ±2 秒，所以一个已用过的 nonce 只需保留到窗口结束（2×偏差 + 余量）。
+ * ponytail: 内存缓存，守护进程重启后窗口内（≤ 约 4 秒）理论上可重放一个已见过的请求；时间戳窗口限定了这个缺口。
+ * 需要彻底消除再把 nonce 落盘。容量满时丢最旧项；只有通过验签的请求才会入缓存，未认证流量填不满它。
+ */
+const NONCE_RETENTION_MS = 2 * RUNNER_AUTH_MAX_SKEW_MS + 1000
+const NONCE_CAPACITY = 4096
+const createNonceCache = (now: () => number) => {
+  const seen = new Map<string, number>()
+  return (nonce: string): boolean => {
+    const t = now()
+    for (const [key, expires] of seen) {
+      if (expires > t && seen.size < NONCE_CAPACITY) break
+      seen.delete(key)
+    }
+    if (seen.has(nonce)) return false
+    seen.set(nonce, t + NONCE_RETENTION_MS)
+    return true
   }
 }
 
@@ -127,6 +162,8 @@ export interface RunnerDaemonOptions {
   readonly publicKey: KeyObject
   readonly issuer: string
   readonly workRoot: string
+  /** 本机响应签名私钥（loadOrCreatePermitKey 生成的 Ed25519）；公钥由 CrossMini 固定。 */
+  readonly signingKey: KeyObject
   /** 测试注入时钟偏差；生产用本机时钟。 */
   readonly nowMs?: () => number
 }
@@ -135,6 +172,17 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
   const codexModel = opts.env['CMAP_CODEX_MODEL']?.trim()
   if (!codexModel) throw new RangeError('CMAP_CODEX_MODEL is required')
   const runnerId = opts.env['RUNNER_ID']?.trim() ?? ''
+  const clock = opts.nowMs ?? Date.now
+  const firstUse = createNonceCache(clock)
+  /** 通过请求认证的响应才签名；签名绑定所答请求的 nonce，旧响应不能冒充新请求的答复。 */
+  const requestNonce = new WeakMap<ServerResponse, string>()
+  const send = (res: ServerResponse, status: number, body?: object): void => {
+    const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8')
+    const nonce = requestNonce.get(res)
+    const signature = nonce === undefined ? undefined : signRunnerResponse({ privateKey: opts.signingKey, audience: runnerId, requestNonce: nonce, status, ...(bytes ? { body: bytes } : {}) })
+    res.writeHead(status, { ...(bytes ? { 'content-type': 'application/json' } : {}), ...(signature ? { [RUNNER_AUTH_HEADERS.signature]: signature } : {}) })
+    res.end(bytes)
+  }
   const verifyPermit = (token: string, envelope: TaskEnvelopeV1): undefined => verifyDispatchPermit(token, {
     publicKey: opts.publicKey, issuer: opts.issuer, runnerId, adapterId: REMOTE_ADAPTER_ID, envelope, clockSkewSeconds: 2,
     ...(opts.nowMs ? { nowMs: opts.nowMs() } : {}),
@@ -157,14 +205,27 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
   const runner = buildRunnerDescriptor(opts.env, [await adapter.discover()])
   const bindings = new Map<string, RemoteTaskBinding>()
 
+  /** 先验签再登记 nonce：只有通过验签的请求才占缓存。任何异常都按未认证处理（fail closed）。 */
+  const authenticate = (req: IncomingMessage, url: URL): { nonce: string; contentSha256: string } | undefined => {
+    try {
+      const verified = verifyRunnerRequest({
+        publicKey: opts.publicKey, method: req.method ?? '', target: url.pathname + url.search, audience: runnerId,
+        headers: req.headers, nowMs: clock(),
+      })
+      return firstUse(verified.nonce) ? verified : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   const bindingFor = (id: string): RemoteTaskBinding => {
     if (!REMOTE_TASK_ID.test(id)) throw new ProtocolFault(404, 'NOT_FOUND')
     // 守护进程重启后内存为空：CodexAdapter 只凭 remote_task_id 与运行记录恢复，记录缺失即 BINDING_NOT_FOUND。
     return bindings.get(id) ?? { adapter: adapter.adapterId, remote_task_id: id, protocol: 'codex-exec', protocol_version: '0.1.0', runner_id: runnerId }
   }
 
-  const dispatch = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const msg = await readJson(req)
+  const dispatch = async (raw: Buffer, res: ServerResponse): Promise<void> => {
+    const msg = parseJson(raw)
     if (!validateRemoteMessage(msg) || msg.kind !== 'dispatch') throw new ProtocolFault(400, 'MALFORMED_REQUEST')
     if (msg.runner_id !== runnerId) throw new DispatchPermitError('CLAIM_MISMATCH')
     const envelope = msg.envelope as TaskEnvelopeV1
@@ -201,8 +262,8 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
     send(res, 200, { schema: SCHEMA, kind: 'result', remote_task_id: id, result: { ...collected, artifacts: described }, artifacts })
   }
 
-  const cancel = async (id: string, req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const msg = await readJson(req)
+  const cancel = async (id: string, raw: Buffer, res: ServerResponse): Promise<void> => {
+    const msg = parseJson(raw)
     if (!validateRemoteMessage(msg) || msg.kind !== 'cancel' || msg.remote_task_id !== id) throw new ProtocolFault(400, 'MALFORMED_REQUEST')
     await adapter.cancel(bindingFor(id), msg.reason)
     send(res, 204)
@@ -214,16 +275,24 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
   }
 
   const server = createServer(async (req, res) => {
+    // 认证先于路由与读体：签名、受众、时间窗、nonce 任何一项不过都是同一个 401，什么都不执行。
+    const url = new URL(req.url ?? '/', 'http://runner')
+    const auth = authenticate(req, url)
+    if (!auth) return sendUnauthorized(res)
+    const { nonce, contentSha256 } = auth
+    requestNonce.set(res, nonce)
     try {
-      const path = new URL(req.url ?? '/', 'http://runner').pathname
+      const raw = await readBody(req)
+      if (runnerBodySha256(raw) !== contentSha256) return sendUnauthorized(res)
+      const path = url.pathname
       const task = /^\/v1\/tasks\/([^/]+)(\/result|\/cancel)?$/.exec(path)
       if (req.method === 'GET' && path === '/v1/health') return await health(res)
-      if (req.method === 'POST' && path === '/v1/tasks') return await dispatch(req, res)
+      if (req.method === 'POST' && path === '/v1/tasks') return await dispatch(raw, res)
       if (task) {
         const id = decodeURIComponent(task[1]!)
         if (req.method === 'GET' && !task[2]) return await status(id, res)
         if (req.method === 'GET' && task[2] === '/result') return await result(id, res)
-        if (req.method === 'POST' && task[2] === '/cancel') return await cancel(id, req, res)
+        if (req.method === 'POST' && task[2] === '/cancel') return await cancel(id, raw, res)
       }
       throw new ProtocolFault(404, 'NOT_FOUND')
     } catch (error) {

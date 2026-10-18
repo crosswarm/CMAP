@@ -3,21 +3,24 @@
  *
  * 契约：schemas/remote-runner.v1.schema.json。只由控制面发起请求；lap 不回连、不写账本。
  *
- * 四条不放松的规则：
+ * 五条不放松的规则：
  *  1. 派发许可受众绑定目标 runner_id；lap 用固定公钥验签，拒绝即不执行（PERMIT_INVALID / 准入拒绝）。
  *  2. 失联不改派：状态查询失败在离线宽限（默认 600 秒）内视为仍在执行，超过则报 BINDING_NOT_FOUND，
  *     由控制面走执行不确定，绝不重跑、不换 runner。
  *  3. 证据由控制面拉取并独立复算 sha256（readVerifiedArtifact），不采信 lap 自报；对不上即失败。
- *  4. 线上只有信封、许可与已冻结输入；不传凭据或控制面秘密，lap 不回传提供方 stderr，错误只带 category/code/retryable。
+ *  4. 每个请求（含 health）由控制面的许可私钥签名，lap 的每个应答由 lap 自己的密钥签名并绑定所答请求；
+ *     应答验签失败一律不采信：结果端点按 EVIDENCE_HASH_MISMATCH 处理（不落盘、不写 artifact 记录），其余端点按协议失败。
+ *  5. 线上只有信封、许可与已冻结输入；不传凭据或控制面秘密，lap 不回传提供方 stderr，错误只带 category/code/retryable。
  */
 
 import { readFileSync } from 'node:fs'
+import type { KeyObject } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 
 import type { RemoteRunnerMessageV1, RemoteTaskBinding, RiskLevel, TaskEnvelopeV1, TaskResultV1, RunnerAdmissionErrorCode, DispatchPermitErrorCode } from '#domain-model'
-import { DispatchPermitError, RUNNER_ADMISSION_CODES, RunnerAdmissionError } from '#domain-model'
+import { DispatchPermitError, RUNNER_ADMISSION_CODES, RunnerAdmissionError, loadOrCreatePermitKey, loadPinnedPublicKey } from '#domain-model'
 import type {
   AdapterAuthorization,
   AdapterDescriptor,
@@ -32,6 +35,7 @@ import type {
 import { AdapterError, assertAdapterAuthorization, snapshotAdapterAuthorization, snapshotDispatchContext } from '#adapter-sdk'
 import { readVerifiedArtifact } from '../../../packages/adapter-sdk/src/structured-output.ts'
 import { hasKnownSecret } from '../../../packages/adapter-sdk/src/secret-patterns.ts'
+import { RUNNER_AUTH_HEADERS, signRunnerRequest, verifyRunnerResponse } from '../../../packages/domain-model/src/dispatch-permit.ts'
 
 export const REMOTE_ADAPTER_ID = 'remote-runner-adapter'
 const SCHEMA = 'cmap/remote-runner/v1'
@@ -52,6 +56,13 @@ const unreachable = (): AdapterError =>
 const protocolInvalid = (): AdapterError =>
   new AdapterError('REMOTE_PROTOCOL_INVALID', '远程 runner 响应不符合 remote-runner.v1', false, 'remote-protocol-invalid')
 
+const unauthorized = (): AdapterError =>
+  new AdapterError('REMOTE_UNAUTHORIZED', '远程 runner 拒绝了请求认证（签名、受众、时钟或重放）', true, 'remote-unauthorized')
+/** 结果响应验签失败与产物哈希对不上同等对待：不采信、不落盘、不写 artifact 记录。 */
+const badResponseSignature = (path: string): AdapterError => path.endsWith('/result')
+  ? new AdapterError('EVIDENCE_HASH_MISMATCH', '远程结果响应签名无效，证据不采信', false, 'evidence-hash-mismatch:response-signature')
+  : new AdapterError('REMOTE_RESPONSE_SIGNATURE_INVALID', '远程 runner 响应签名无效', false, 'remote-response-signature-invalid')
+
 /** 远端拒绝原样还原为本地错误类型，控制面据此落 PERMIT_INVALID / 准入拒绝等既有回执。 */
 const raise = (error: ErrorMessage): never => {
   if (error.category === 'permit') throw new DispatchPermitError(error.code as DispatchPermitErrorCode)
@@ -61,8 +72,18 @@ const raise = (error: ErrorMessage): never => {
   throw new AdapterError(error.code, `远程 runner 拒绝：${error.category}:${error.code}`, error.retryable, `remote:${error.code}`)
 }
 
+const requiredEnv = (key: string): string => {
+  const value = process.env[key]?.trim()
+  if (!value) throw new RangeError(`${key} is required for the remote runner (ADR-0006)`)
+  return value
+}
+
 export interface RemoteRunnerAdapterOptions {
   readonly authorization: AdapterAuthorization
+  /** 请求签名私钥 = 控制面派发许可私钥。省略时从 CMAP_PERMIT_KEY_FILE 加载（与 Worker 同一文件）。 */
+  readonly signingKey?: KeyObject
+  /** 固定的 lap 响应验签公钥。省略时从 CMAP_REMOTE_RUNNER_PUBKEY_FILE 加载；两者都没有则拒绝构造（fail closed）。 */
+  readonly runnerPublicKey?: KeyObject
   /** 例如 http://cross-m1mx:8790。只由控制面主动访问。 */
   readonly baseUrl: string
   /** 目标 runner_id（lap 守护进程的 RUNNER_ID）。 */
@@ -87,6 +108,8 @@ export class RemoteRunnerAdapter implements AgentAdapter {
   readonly authorizationMode: AdapterAuthorization['mode']
 
   readonly #authorization: AdapterAuthorization
+  readonly #signingKey: KeyObject
+  readonly #runnerPublicKey: KeyObject
   readonly #baseUrl: string
   readonly #workRoot: string
   readonly #capabilities: readonly string[]
@@ -104,6 +127,8 @@ export class RemoteRunnerAdapter implements AgentAdapter {
   constructor(opts: RemoteRunnerAdapterOptions) {
     this.#authorization = snapshotAdapterAuthorization(opts.authorization)
     this.authorizationMode = this.#authorization.mode
+    this.#signingKey = opts.signingKey ?? loadOrCreatePermitKey(requiredEnv('CMAP_PERMIT_KEY_FILE')).privateKey
+    this.#runnerPublicKey = opts.runnerPublicKey ?? loadPinnedPublicKey(requiredEnv('CMAP_REMOTE_RUNNER_PUBKEY_FILE'))
     this.agentId = opts.agentId
     this.runnerId = opts.runnerId
     this.#baseUrl = opts.baseUrl
@@ -153,17 +178,24 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     await frozenCtx.beforeSend?.(binding)
     assertAdapterAuthorization(this.#authorization, frozenEnvelope, frozenCtx, REMOTE_ADAPTER_ID)
 
-    const reply = await this.#call('POST', '/v1/tasks', {
-      schema: SCHEMA,
-      kind: 'dispatch',
-      runner_id: this.runnerId,
-      permit: frozenCtx.token,
-      envelope: frozenEnvelope,
-      trace_id: frozenCtx.trace_id,
-      correlation_id: frozenCtx.correlation_id,
-      deadline_at: frozenCtx.deadline_at,
-      inputs,
-    })
+    let reply: Reply
+    try {
+      reply = await this.#call('POST', '/v1/tasks', {
+        schema: SCHEMA,
+        kind: 'dispatch',
+        runner_id: this.runnerId,
+        permit: frozenCtx.token,
+        envelope: frozenEnvelope,
+        trace_id: frozenCtx.trace_id,
+        correlation_id: frozenCtx.correlation_id,
+        deadline_at: frozenCtx.deadline_at,
+        inputs,
+      })
+    } catch (error) {
+      // 请求认证被拒时 lap 什么都没执行；按许可无效落账（保留 binding、不重发），与许可被拒同一条路径。
+      if (error instanceof AdapterError && error.code === 'REMOTE_UNAUTHORIZED') throw new DispatchPermitError('BAD_SIGNATURE')
+      throw error
+    }
     const body = this.#expect(reply, 'dispatch_accepted')
     if (body.remote_task_id !== binding.remote_task_id || body.runner_id !== this.runnerId) throw protocolInvalid()
     return binding
@@ -179,7 +211,7 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     try {
       reply = await this.#call('GET', `/v1/tasks/${encodeURIComponent(id)}`)
     } catch (error) {
-      if (!(error instanceof AdapterError) || error.code !== 'REMOTE_UNREACHABLE') throw error
+      if (!(error instanceof AdapterError) || (error.code !== 'REMOTE_UNREACHABLE' && error.code !== 'REMOTE_UNAUTHORIZED')) throw error
       const now = this.#now()
       const since = this.#offlineSince.get(id) ?? now
       this.#offlineSince.set(id, since)
@@ -298,18 +330,33 @@ export class RemoteRunnerAdapter implements AgentAdapter {
   }
 
   async #call(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = this.#requestTimeoutMs): Promise<Reply> {
+    const url = new URL(path, this.#baseUrl)
+    const payload = body === undefined ? undefined : JSON.stringify(body)
+    const auth = signRunnerRequest({ privateKey: this.#signingKey, method, target: url.pathname + url.search, audience: this.runnerId, ...(payload === undefined ? {} : { body: payload }) })
     let res: Response
-    let text: string
+    let bytes: Buffer
     try {
-      res = await fetch(new URL(path, this.#baseUrl), {
+      res = await fetch(url, {
         method,
-        ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+        headers: { ...(payload === undefined ? {} : { 'content-type': 'application/json' }), ...auth },
+        ...(payload === undefined ? {} : { body: payload }),
         signal: AbortSignal.timeout(timeoutMs),
       })
-      text = await res.text()
+      bytes = Buffer.from(await res.arrayBuffer())
     } catch {
       throw unreachable()
     }
+    // 401 是 lap 唯一不签名的应答（认证失败，什么都没执行）；其余应答验签通过才解析。
+    if (res.status === 401) throw unauthorized()
+    try {
+      verifyRunnerResponse({
+        publicKey: this.#runnerPublicKey, audience: this.runnerId, requestNonce: auth[RUNNER_AUTH_HEADERS.nonce]!,
+        status: res.status, body: bytes, signature: res.headers.get(RUNNER_AUTH_HEADERS.signature),
+      })
+    } catch {
+      throw badResponseSignature(path)
+    }
+    const text = bytes.toString('utf8')
     if (res.status === 204 && text === '') return { status: 204, body: undefined }
     let parsed: unknown
     try {

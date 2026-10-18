@@ -5,7 +5,7 @@
  */
 
 /**
- * ADR-0006 thin protocol between the single control plane (CrossMini) and the lap runner daemon over Tailscale. Only the control plane initiates HTTP requests (dispatch, status, result, cancel, health); the runner never calls back. Dispatch carries a cmap1 dispatch permit bound to runner_id, adapter audience and the exact envelope SHA256; the runner verifies it with a pinned public key and at most 2 seconds of clock skew. Input files are frozen by the control plane and shipped inline; result artifacts are pulled by the control plane, which recomputes every SHA256 itself and never trusts runner-reported hashes. Bodies never carry credentials, database addresses or provider stderr; error bodies carry only category, code and retryable.
+ * ADR-0006 thin protocol between the single control plane (CrossMini) and the lap runner daemon over Tailscale. Only the control plane initiates HTTP requests (dispatch, status, result, cancel, health); the runner never calls back. Dispatch carries a cmap1 dispatch permit bound to runner_id, adapter audience and the exact envelope SHA256; the runner verifies it with a pinned public key and at most 2 seconds of clock skew. Input files are frozen by the control plane and shipped inline; result artifacts are pulled by the control plane, which recomputes every SHA256 itself and never trusts runner-reported hashes. Bodies never carry credentials, database addresses or provider stderr; error bodies carry only category, code and retryable. Application-layer authentication (ADR-0006 Stage 3): every request, health included, carries requestAuthHeaders signed by the control plane permit key (Ed25519) over method, path+query, body sha256, millisecond timestamp (skew at most 2 seconds), nonce (single use inside the window) and audience runner_id; any failure is an identical unsigned 401 error with code UNAUTHORIZED and no detail, and nothing is executed. Every other response carries responseAuthHeaders signed by the runner key over audience, the request nonce, status and body sha256; the control plane pins the runner public key and treats a bad signature like an evidence hash mismatch.
  */
 export type RemoteRunnerMessageV1 =
   | RemoteRunnerDispatchV1
@@ -97,7 +97,7 @@ export interface RemoteRunnerHealthV1 {
   checked_at: string
 }
 /**
- * permit: DispatchPermitErrorCode, no execution happened. admission: RunnerAdmissionErrorCode from the runner's own allowlist, no execution happened. adapter: AdapterError code from the wrapped adapter. protocol: malformed request, unknown task or oversized body.
+ * permit: DispatchPermitErrorCode, no execution happened. admission: RunnerAdmissionErrorCode from the runner's own allowlist, no execution happened. adapter: AdapterError code from the wrapped adapter. protocol: malformed request, unknown task or oversized body, or UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure).
  */
 export interface RemoteRunnerErrorV1 {
   schema: SchemaTag

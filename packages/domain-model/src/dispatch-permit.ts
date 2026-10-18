@@ -1,5 +1,5 @@
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign, verify, type KeyObject } from 'node:crypto'
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify, type KeyObject } from 'node:crypto'
 import { TextDecoder } from 'node:util'
 import { Ajv2020 } from 'ajv/dist/2020.js'
 
@@ -238,4 +238,156 @@ export const loadPinnedPublicKey = (path: string): KeyObject => {
   const publicKey = createPublicKey(pem)
   assertEd25519(publicKey, 'public')
   return publicKey
+}
+
+/**
+ * ADR-0006 Stage 3：CrossMini ↔ lap 的应用层请求/响应认证（schemas/remote-runner.v1.schema.json 的 requestAuthHeaders / responseAuthHeaders）。
+ *
+ * 请求由 CrossMini 的派发许可私钥签名，覆盖方法、路径（含查询）、请求体 sha256、时间戳（毫秒）、nonce 与受众 runner_id；
+ * 响应由 lap 自己的密钥签名，覆盖受众、所答请求的 nonce、状态码与响应体 sha256（不能把旧响应重放给新请求）。
+ * 签名串带各自的域前缀（cmap-runner-req1 / cmap-runner-res1），与许可的 `cmap1.` 互不通用。
+ * 任何失败都只抛 RunnerAuthError，不带原因：对外一律 401，不泄露是哪一项没过。
+ */
+export class RunnerAuthError extends Error {
+  constructor() {
+    super('UNAUTHORIZED')
+    this.name = 'RunnerAuthError'
+  }
+}
+
+export const RUNNER_AUTH_MAX_SKEW_MS = 2000
+export const RUNNER_AUTH_HEADERS = {
+  timestamp: 'x-cmap-timestamp',
+  nonce: 'x-cmap-nonce',
+  audience: 'x-cmap-audience',
+  contentSha256: 'x-cmap-content-sha256',
+  signature: 'x-cmap-signature',
+} as const
+
+const REQUEST_DOMAIN = 'cmap-runner-req1\n'
+const RESPONSE_DOMAIN = 'cmap-runner-res1\n'
+const AUTH_TIMESTAMP = /^[0-9]{10,16}$/
+const AUTH_NONCE = /^[A-Za-z0-9_-]{16,64}$/
+const AUTH_SHA256 = /^[a-f0-9]{64}$/
+
+const authFail = (): never => {
+  throw new RunnerAuthError()
+}
+
+const bodySha256 = (body: Uint8Array | string | undefined): string =>
+  createHash('sha256').update(body ?? '').digest('hex')
+
+/** 换行会让签名串字段边界歧义，签发与验证两侧都拒绝。 */
+const assertLineSafe = (...fields: string[]): void => {
+  for (const field of fields) if (field.includes('\n') || field.includes('\r')) authFail()
+}
+
+const requestSigningBytes = (f: { method: string; target: string; contentSha256: string; timestamp: string; nonce: string; audience: string }): Buffer =>
+  Buffer.from(`${REQUEST_DOMAIN}${f.method}\n${f.target}\n${f.contentSha256}\n${f.timestamp}\n${f.nonce}\n${f.audience}`, 'utf8')
+
+const responseSigningBytes = (f: { audience: string; requestNonce: string; status: number; bodySha256: string }): Buffer =>
+  Buffer.from(`${RESPONSE_DOMAIN}${f.audience}\n${f.requestNonce}\n${f.status}\n${f.bodySha256}`, 'utf8')
+
+/** 返回需要附在请求上的认证头。target 是 `pathname + search`，与服务端从请求行解析出的一致。 */
+export const signRunnerRequest = (input: {
+  privateKey: KeyObject
+  method: string
+  target: string
+  body?: Uint8Array | string
+  audience: string
+  nowMs?: number
+}): Record<string, string> => {
+  assertEd25519(input.privateKey, 'private')
+  assertLineSafe(input.method, input.target, input.audience)
+  const fields = {
+    method: input.method,
+    target: input.target,
+    contentSha256: bodySha256(input.body),
+    timestamp: String(input.nowMs ?? Date.now()),
+    nonce: randomBytes(18).toString('base64url'),
+    audience: input.audience,
+  }
+  return {
+    [RUNNER_AUTH_HEADERS.timestamp]: fields.timestamp,
+    [RUNNER_AUTH_HEADERS.nonce]: fields.nonce,
+    [RUNNER_AUTH_HEADERS.audience]: fields.audience,
+    [RUNNER_AUTH_HEADERS.contentSha256]: fields.contentSha256,
+    [RUNNER_AUTH_HEADERS.signature]: b64url(sign(null, requestSigningBytes(fields), input.privateKey)),
+  }
+}
+
+/**
+ * 只验头部（签名、受众、时间窗），不读请求体：未认证的请求在读体之前就被拒绝。
+ * 调用方随后必须核对 `bodySha256(收到的体) === contentSha256`，并用 nonce 做防重放。
+ */
+export const verifyRunnerRequest = (input: {
+  publicKey: KeyObject
+  method: string
+  target: string
+  /** 本机 runner_id：请求受众必须等于它。 */
+  audience: string
+  headers: Record<string, string | string[] | undefined>
+  nowMs?: number
+}): { nonce: string; contentSha256: string } => {
+  assertEd25519(input.publicKey, 'public')
+  const one = (name: string): string => {
+    const value = input.headers[name]
+    return typeof value === 'string' ? value : authFail()
+  }
+  const timestamp = one(RUNNER_AUTH_HEADERS.timestamp)
+  const nonce = one(RUNNER_AUTH_HEADERS.nonce)
+  const audience = one(RUNNER_AUTH_HEADERS.audience)
+  const contentSha256 = one(RUNNER_AUTH_HEADERS.contentSha256)
+  const signature = one(RUNNER_AUTH_HEADERS.signature)
+  assertLineSafe(input.method, input.target, input.audience)
+  if (!AUTH_TIMESTAMP.test(timestamp) || !AUTH_NONCE.test(nonce) || !AUTH_SHA256.test(contentSha256)) authFail()
+  if (Math.abs((input.nowMs ?? Date.now()) - Number(timestamp)) > RUNNER_AUTH_MAX_SKEW_MS) authFail()
+  if (audience !== input.audience) authFail()
+  let signatureBytes: Buffer
+  try {
+    signatureBytes = decodeB64url(signature, 64)
+  } catch {
+    return authFail()
+  }
+  if (signatureBytes.length !== 64) authFail()
+  if (!verify(null, requestSigningBytes({ method: input.method, target: input.target, contentSha256, timestamp, nonce, audience }), input.publicKey, signatureBytes)) authFail()
+  return { nonce, contentSha256 }
+}
+
+export const runnerBodySha256 = bodySha256
+
+/** lap 对响应体签名；body 必须是实际发出的字节。 */
+export const signRunnerResponse = (input: {
+  privateKey: KeyObject
+  audience: string
+  requestNonce: string
+  status: number
+  body?: Uint8Array | string
+}): string => {
+  assertEd25519(input.privateKey, 'private')
+  assertLineSafe(input.audience, input.requestNonce)
+  return b64url(sign(null, responseSigningBytes({ ...input, bodySha256: bodySha256(input.body) }), input.privateKey))
+}
+
+/** CrossMini 对收到的响应验签；失败即不采信（调用方按证据完整性失败处理）。 */
+export const verifyRunnerResponse = (input: {
+  publicKey: KeyObject
+  audience: string
+  requestNonce: string
+  status: number
+  body?: Uint8Array | string
+  signature: string | null | undefined
+}): undefined => {
+  assertEd25519(input.publicKey, 'public')
+  assertLineSafe(input.audience, input.requestNonce)
+  if (typeof input.signature !== 'string') authFail()
+  let signatureBytes: Buffer
+  try {
+    signatureBytes = decodeB64url(input.signature as string, 64)
+  } catch {
+    return authFail()
+  }
+  if (signatureBytes.length !== 64) authFail()
+  if (!verify(null, responseSigningBytes({ ...input, bodySha256: bodySha256(input.body) }), input.publicKey, signatureBytes)) authFail()
+  return undefined
 }

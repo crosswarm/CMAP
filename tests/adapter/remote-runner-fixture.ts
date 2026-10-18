@@ -2,7 +2,7 @@
  * 远程 runner 测试夹具：本机用独立端口模拟 lap 守护进程（ADR-0006），假 codex 只记执行次数与 -m 值。
  * 本文件不以 .test.ts 结尾，避免被测试运行器当作独立用例执行。
  */
-import { createHash, generateKeyPairSync } from 'node:crypto'
+import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto'
 import { chmod, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -11,11 +11,16 @@ import { join } from 'node:path'
 import { issueDispatchPermit, verifyDispatchPermit, DispatchPermitError, type TaskEnvelopeV1 } from '#domain-model'
 import type { AdapterAuthorization, DispatchPermitSigner } from '#adapter-sdk'
 import { REMOTE_ADAPTER_ID } from '../../adapters/remote-runner/src/index.ts'
+import { signRunnerRequest, signRunnerResponse } from '../../packages/domain-model/src/dispatch-permit.ts'
 import { createRunnerDaemon } from '../../apps/runner/src/server.ts'
 
 export const sha256 = (s: string | Buffer): string => createHash('sha256').update(s).digest('hex')
 
 export const trust = generateKeyPairSync('ed25519')
+/** lap 的响应签名密钥；CrossMini 侧固定其公钥。 */
+export const lapTrust = generateKeyPairSync('ed25519')
+/** RemoteRunnerAdapter 的两把密钥：请求签名用控制面许可私钥，响应验签用固定的 lap 公钥。 */
+export const remoteKeys = { signingKey: trust.privateKey, runnerPublicKey: lapTrust.publicKey }
 export const ISSUER = 'cmap:local-control-plane'
 
 export const signer: DispatchPermitSigner = (envelope, { runnerId, adapterId }) =>
@@ -112,6 +117,7 @@ export const startLap = async (opts: { env: NodeJS.ProcessEnv; workRoot: string;
   const daemon = await createRunnerDaemon({
     env: opts.env,
     publicKey: trust.publicKey,
+    signingKey: lapTrust.privateKey,
     issuer: ISSUER,
     workRoot: opts.workRoot,
     ...(opts.clockOffsetMs ? { nowMs: () => Date.now() + opts.clockOffsetMs! } : {}),
@@ -128,22 +134,64 @@ export const deadUrl = async (): Promise<string> => {
   return url
 }
 
-/** 中间人：把结果里的产物字节换掉、保留 lap 自报哈希，模拟传输或 lap 侧篡改。 */
-export const startTamperProxy = async (target: string): Promise<{ url: string; server: Server }> => {
+/** 直接对守护进程发一个带（可被篡改的）请求签名的原始请求：测试认证与许可各自的拒绝路径。 */
+export const signedFetch = (url: string, init: {
+  method?: 'GET' | 'POST'
+  path: string
+  body?: unknown
+  audience: string
+  privateKey?: KeyObject
+  nowMs?: number
+}): Promise<Response> => {
+  const method = init.method ?? 'GET'
+  const payload = init.body === undefined ? undefined : JSON.stringify(init.body)
+  const auth = signRunnerRequest({
+    privateKey: init.privateKey ?? trust.privateKey, method, target: init.path, audience: init.audience,
+    ...(payload === undefined ? {} : { body: payload }), ...(init.nowMs === undefined ? {} : { nowMs: init.nowMs }),
+  })
+  return fetch(new URL(init.path, url), {
+    method,
+    headers: { ...(payload === undefined ? {} : { 'content-type': 'application/json' }), ...auth },
+    ...(payload === undefined ? {} : { body: payload }),
+  })
+}
+
+const tamperArtifacts = (path: string, text: string): string => {
+  if (!path.endsWith('/result')) return text
+  const body = JSON.parse(text)
+  for (const art of body.artifacts ?? []) art.content_base64 = Buffer.from('tampered').toString('base64')
+  return JSON.stringify(body)
+}
+
+/**
+ * 中间人：默认把结果里的产物字节换掉、保留 lap 自报哈希。请求头（含 CrossMini 的请求签名）原样转发；
+ * 应答的 lap 签名默认原样带回——于是被改动的应答签名对不上。resign 模拟「lap 自己签了一份错误字节」，
+ * dropSignature 模拟签名被剥掉。
+ */
+export const startTamperProxy = async (
+  target: string,
+  opts: { mutate?: (path: string, text: string) => string; resign?: boolean; dropSignature?: boolean } = {},
+): Promise<{ url: string; server: Server }> => {
+  const mutate = opts.mutate ?? tamperArtifacts
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(chunk as Buffer)
+    const forwarded = Object.fromEntries(Object.entries(req.headers).filter(([k, v]) => k.startsWith('x-cmap-') && typeof v === 'string')) as Record<string, string>
     const upstream = await fetch(new URL(req.url!, target), {
       method: req.method!,
-      ...(req.method === 'POST' ? { headers: { 'content-type': 'application/json' }, body: Buffer.concat(chunks) } : {}),
+      headers: { ...(req.method === 'POST' ? { 'content-type': 'application/json' } : {}), ...forwarded },
+      ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}),
     })
-    let text = await upstream.text()
-    if (req.url!.endsWith('/result') && upstream.status === 200) {
-      const body = JSON.parse(text)
-      for (const art of body.artifacts) art.content_base64 = Buffer.from('tampered').toString('base64')
-      text = JSON.stringify(body)
+    const original = await upstream.text()
+    const text = upstream.status === 200 ? mutate(req.url!, original) : original
+    let signature = upstream.headers.get('x-cmap-signature')
+    if (opts.resign) {
+      signature = signRunnerResponse({
+        privateKey: lapTrust.privateKey, audience: forwarded['x-cmap-audience']!, requestNonce: forwarded['x-cmap-nonce']!,
+        status: upstream.status, body: Buffer.from(text, 'utf8'),
+      })
     }
-    res.writeHead(upstream.status, { 'content-type': 'application/json' }).end(text)
+    res.writeHead(upstream.status, { 'content-type': 'application/json', ...(signature && !opts.dropSignature ? { 'x-cmap-signature': signature } : {}) }).end(text)
   })
   return { url: await listen(server), server }
 }

@@ -14,7 +14,7 @@ import { AdapterError, type DispatchContext } from '#adapter-sdk'
 import { RemoteRunnerAdapter } from '../../adapters/remote-runner/src/index.ts'
 import { readRunnerDaemonConfig } from '../../apps/runner/src/server.ts'
 import {
-  ISSUER, REMOTE_ADAPTER_ID, close, deadUrl, envelope, lapEnv, lines, makeFakeCodex, remoteAuthorization, sha256, signer, startLap, trust,
+  ISSUER, REMOTE_ADAPTER_ID, close, deadUrl, envelope, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signedFetch, signer, startLap, trust,
 } from './remote-runner-fixture.ts'
 
 const setup = async () => {
@@ -27,7 +27,7 @@ const setup = async () => {
 
 const adapterFor = (url: string, cm: string, extra: Partial<ConstructorParameters<typeof RemoteRunnerAdapter>[0]> = {}) =>
   new RemoteRunnerAdapter({
-    authorization: remoteAuthorization(extra.runnerId ?? 'lap'),
+    authorization: remoteAuthorization(extra.runnerId ?? 'lap'), ...remoteKeys,
     baseUrl: url, runnerId: 'lap', agentId: 'codex@lap', workRoot: cm, capabilities: ['code.analyze'],
     ...extra,
   })
@@ -78,30 +78,27 @@ test('lap 验签后执行一次，显式 -m；CrossMini 拉回产物并独立复
   }
 })
 
-test('许可拿到别的 runner 重放 → CLAIM_MISMATCH；过期或超出 2 秒偏差 → EXPIRED；均执行 0 次', async () => {
+test('许可拿到别的 runner 重放 → 请求受众不符先被拒；许可自身受众不符 → CLAIM_MISMATCH；过期 → EXPIRED；时钟超窗 → 请求被拒；均执行 0 次', async () => {
   const { root, codex, cm } = await setup()
   const other = await startLap({ env: lapEnv('lap-2', codex.bin), workRoot: join(root, 'lap-2') })
   const skewed = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap'), clockOffsetMs: 63_000 })
   try {
     const e = envelope('tsk-unit-deny')
     const token = signer(e, { runnerId: 'lap', adapterId: REMOTE_ADAPTER_ID })
-    assert.equal((await adapterFor(other.url, cm).health()).state, 'unavailable') // 探测到的 runner_id 不符即不路由
-    await rejectsWith(adapterFor(other.url, cm).startTask(e, await ctxFor(cm, 'tsk-unit-deny', token)), DispatchPermitError, 'CLAIM_MISMATCH')
-    await rejectsWith(adapterFor(skewed.url, cm).startTask(e, await ctxFor(cm, 'tsk-unit-deny', token)), DispatchPermitError, 'EXPIRED')
+    assert.equal((await adapterFor(other.url, cm).health()).state, 'unavailable') // 请求受众是 lap，lap-2 拒绝
+    // 受众为 lap 的请求被投到 lap-2：请求认证先拒绝（落 PERMIT_INVALID 同一路径），什么都不执行
+    await rejectsWith(adapterFor(other.url, cm).startTask(e, await ctxFor(cm, 'tsk-unit-deny', token)), DispatchPermitError, 'BAD_SIGNATURE')
+    // lap 时钟比请求时间戳快 63 秒：超出 2 秒窗口，请求被拒
+    await rejectsWith(adapterFor(skewed.url, cm).startTask(e, await ctxFor(cm, 'tsk-unit-deny', token)), DispatchPermitError, 'BAD_SIGNATURE')
 
-    // 绕过控制面自检直接投递已过期许可：lap 自己也拒绝
+    // 请求签名正确（受众 lap-2）时，才轮到许可自己的检查：已过期的许可 → EXPIRED
     const expired = issueDispatchPermit({ privateKey: trust.privateKey, issuer: ISSUER, runnerId: 'lap-2', adapterId: REMOTE_ADAPTER_ID, envelope: e, nowMs: Date.now() - 120_000 })
-    const res = await fetch(new URL('/v1/tasks', other.url), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema: 'cmap/remote-runner/v1', kind: 'dispatch', runner_id: 'lap-2', permit: expired, envelope: e, trace_id: 't', correlation_id: 'c', deadline_at: 'd', inputs: [] }),
-    })
+    const dispatch = (permit: string) => ({ schema: 'cmap/remote-runner/v1', kind: 'dispatch', runner_id: 'lap-2', permit, envelope: e, trace_id: 't', correlation_id: 'c', deadline_at: 'd', inputs: [] })
+    const res = await signedFetch(other.url, { method: 'POST', path: '/v1/tasks', body: dispatch(expired), audience: 'lap-2' })
     assert.equal(res.status, 403)
     assert.deepEqual(await res.json(), { schema: 'cmap/remote-runner/v1', kind: 'error', category: 'permit', code: 'EXPIRED', retryable: false })
-    // 改写消息里的 runner_id 也没用：许可本身的受众是 lap
-    const relabeled = await fetch(new URL('/v1/tasks', other.url), {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema: 'cmap/remote-runner/v1', kind: 'dispatch', runner_id: 'lap-2', permit: token, envelope: e, trace_id: 't', correlation_id: 'c', deadline_at: 'd', inputs: [] }),
-    })
+    // 许可本身的受众是 lap：改写消息里的 runner_id 也没用
+    const relabeled = await signedFetch(other.url, { method: 'POST', path: '/v1/tasks', body: dispatch(token), audience: 'lap-2' })
     assert.equal(((await relabeled.json()) as { code: string }).code, 'CLAIM_MISMATCH')
     assert.equal((await lines(codex.launches)).length, 0)
   } finally {
@@ -191,7 +188,7 @@ test('失联在宽限内仍视为执行中，超过宽限报 BINDING_NOT_FOUND�
 })
 
 test('守护进程配置：必须显式非通配监听地址、显式模型、固定公钥；拒绝持有控制面秘密', () => {
-  const base = { CMAP_RUNNER_LISTEN_HOST: '100.64.0.2', CMAP_PERMIT_PUBLIC_KEY_FILE: '/k.pub', CMAP_CODEX_MODEL: 'gpt-x' }
+  const base = { CMAP_RUNNER_LISTEN_HOST: '100.64.0.2', CMAP_PERMIT_PUBLIC_KEY_FILE: '/k.pub', CMAP_RUNNER_KEY_FILE: '/runner.key', CMAP_CODEX_MODEL: 'gpt-x' }
   const config = readRunnerDaemonConfig(base)
   assert.equal(config.port, 8790)
   assert.equal(config.listenHost, '100.64.0.2')
@@ -202,6 +199,7 @@ test('守护进程配置：必须显式非通配监听地址、显式模型、�
     { ...base, CMAP_RUNNER_LISTEN_HOST: '' },
     { ...base, CMAP_CODEX_MODEL: '' },
     { ...base, CMAP_PERMIT_PUBLIC_KEY_FILE: undefined },
+    { ...base, CMAP_RUNNER_KEY_FILE: undefined },
     { ...base, CMAP_DATABASE_URL: 'postgres://x' },
     { ...base, MEMROSS_TOKEN: 'x' },
     { ...base, CMAP_PERMIT_KEY_FILE: '/k' },

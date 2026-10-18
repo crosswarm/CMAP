@@ -8,11 +8,12 @@
  *       --fake-codex 用确定性假 codex，不调用模型。
  *   node scripts/e2e-remote-runner.mjs
  *       Stage 4 骨架：对真实 lap 运行同样的派发与判据。需要
- *       CMAP_REMOTE_RUNNER_URL、CMAP_REMOTE_RUNNER_ID、CMAP_PERMIT_KEY_FILE（CrossMini 的签名密钥）。
+ *       CMAP_REMOTE_RUNNER_URL、CMAP_REMOTE_RUNNER_ID、CMAP_PERMIT_KEY_FILE（CrossMini 的签名密钥）、
+ *       CMAP_REMOTE_RUNNER_PUBKEY_FILE（固定的 lap 响应验签公钥）。
  *       codex 执行次数只能在 lap 上核对（<CMAP_WORK_ROOT>/.runs/<task>.json），脚本不远程登录 lap。
  *
  * 判据只认：健康探测的协议响应、结果终态、CrossMini 侧独立复算的产物哈希、codex exec 计数、
- * 同一许可投到另一 runner 时的 CLAIM_MISMATCH。不认进程 rc=0、端口 LISTEN。
+ * 未签名请求在 lap 上被 401 拒绝、受众为别的 runner 的请求被拒、同一许可投到另一 runner 时的 CLAIM_MISMATCH。不认进程 rc=0、端口 LISTEN。
  * 不打印许可、密钥或提示词正文。
  */
 import { createHash } from 'node:crypto'
@@ -26,7 +27,8 @@ import { fileURLToPath } from 'node:url'
 process.env['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
 
-const { issueDispatchPermit, verifyDispatchPermit, loadOrCreatePermitKey, DispatchPermitError } = await import('#domain-model')
+const { issueDispatchPermit, verifyDispatchPermit, loadOrCreatePermitKey, loadPinnedPublicKey, DispatchPermitError } = await import('#domain-model')
+const { signRunnerRequest } = await import('../packages/domain-model/src/dispatch-permit.ts')
 const { RemoteRunnerAdapter, REMOTE_ADAPTER_ID } = await import('../adapters/remote-runner/src/index.ts')
 const { CODEX_CAPABILITIES } = await import('../adapters/codex-adapter/src/index.ts')
 
@@ -60,13 +62,14 @@ await mkdir(crossmini)
 
 step(1, simulate ? '本机双端口模拟：生成控制面密钥，拉起两个守护进程' : '真实 lap：读取 CrossMini 签名密钥与目标地址')
 
-let keyFile, runnerId, lapUrl, replayUrl, replayRunnerId, launchesFile = null, otherLaunches = null
+let keyFile, runnerId, lapUrl, replayUrl, replayRunnerId, replayTargetId, launchesFile = null, otherLaunches = null
+const runnerKeys = new Map() // runner_id → 固定的 lap 响应验签公钥
 if (simulate) {
   keyFile = join(root, 'permit.key')
   const { publicKey } = loadOrCreatePermitKey(keyFile)
   const pubFile = join(root, 'control-plane.pub')
   await writeFile(pubFile, publicKey.export({ type: 'spki', format: 'pem' }))
-  ok('签名密钥 0600 已生成；守护进程只拿到公钥文件')
+  ok('签名密钥 0600 已生成；守护进程只拿到公钥文件，各自生成响应签名密钥（公钥由本脚本固定）')
 
   const makeBin = async (name) => {
     const bin = join(root, `${name}-codex`)
@@ -102,6 +105,8 @@ fs.writeFileSync(out, JSON.stringify({ status: 'completed', summary: 'wrote hell
     const { bin, launches } = await makeBin(id)
     const env = { ...process.env }
     for (const k of ['CMAP_DATABASE_URL', 'MEMROSS_URL', 'MEMROSS_TOKEN', 'CMAP_PERMIT_KEY_FILE', 'TEMPORAL_ADDRESS']) delete env[k]
+    const runnerKeyFile = join(root, `${id}.key`)
+    runnerKeys.set(id, loadOrCreatePermitKey(runnerKeyFile).publicKey) // 守护进程随后加载同一把密钥
     const child = spawn(process.execPath, ['apps/runner/src/main.ts'], {
       cwd: repoRoot, stdio: ['ignore', 'ignore', 'pipe'],
       env: {
@@ -109,7 +114,7 @@ fs.writeFileSync(out, JSON.stringify({ status: 'completed', summary: 'wrote hell
         RUNNER_ID: id, RUNNER_TENANT: 'team-ycc', RUNNER_HOST: id, RUNNER_ALLOWED_TENANTS: 'team-ycc',
         RUNNER_ALLOWED_OWNERS: 'crosswarm', RUNNER_ALLOWED_CAPABILITIES: 'code.analyze', RUNNER_MAX_RISK: 'read-meta',
         CMAP_RUNNER_LISTEN_HOST: '127.0.0.1', CMAP_RUNNER_PORT: String(port),
-        CMAP_PERMIT_PUBLIC_KEY_FILE: pubFile, CMAP_CODEX_MODEL: model, CODEX_BIN: bin, CMAP_WORK_ROOT: join(root, id),
+        CMAP_PERMIT_PUBLIC_KEY_FILE: pubFile, CMAP_RUNNER_KEY_FILE: runnerKeyFile, CMAP_CODEX_MODEL: model, CODEX_BIN: bin, CMAP_WORK_ROOT: join(root, id),
       },
     })
     let stderr = ''
@@ -125,15 +130,19 @@ fs.writeFileSync(out, JSON.stringify({ status: 'completed', summary: 'wrote hell
   launchesFile = a.launches
   replayUrl = b.url
   replayRunnerId = runnerId // 受众是 lap-sim 的许可，被投到 lap-sim-2
+  replayTargetId = 'lap-sim-2'
   ok(`lap-sim → ${a.url}，lap-sim-2 → ${b.url}（${fakeCodex ? '假 codex' : '真实 codex'}，模型经 -m 显式传入）`)
   otherLaunches = b.launches
 } else {
   keyFile = process.env['CMAP_PERMIT_KEY_FILE']
   runnerId = process.env['CMAP_REMOTE_RUNNER_ID']
   lapUrl = process.env['CMAP_REMOTE_RUNNER_URL']
-  if (!keyFile || !runnerId || !lapUrl) fail('需要 CMAP_PERMIT_KEY_FILE、CMAP_REMOTE_RUNNER_ID、CMAP_REMOTE_RUNNER_URL')
+  const pinFile = process.env['CMAP_REMOTE_RUNNER_PUBKEY_FILE']
+  if (!keyFile || !runnerId || !lapUrl || !pinFile) fail('需要 CMAP_PERMIT_KEY_FILE、CMAP_REMOTE_RUNNER_ID、CMAP_REMOTE_RUNNER_URL、CMAP_REMOTE_RUNNER_PUBKEY_FILE')
+  runnerKeys.set(runnerId, loadPinnedPublicKey(pinFile))
   replayUrl = lapUrl
   replayRunnerId = `${runnerId}-replay` // 受众是别的 runner 的许可，被投到 lap
+  replayTargetId = runnerId
   ok(`目标 ${runnerId} @ ${lapUrl}`)
 }
 
@@ -142,8 +151,8 @@ const authorizationFor = (id) => ({ mode: 'managed', verifier: (token, envelope,
   if (ctxRunner !== id) throw new DispatchPermitError('CLAIM_MISMATCH')
   return verifyDispatchPermit(token, { publicKey, issuer: ISSUER, runnerId: id, adapterId, envelope })
 } })
-const adapterFor = (id, url) => new RemoteRunnerAdapter({
-  authorization: authorizationFor(id), baseUrl: url, runnerId: id, agentId: `codex@${id}`,
+const adapterFor = (id, url, pinnedAs = id) => new RemoteRunnerAdapter({
+  authorization: authorizationFor(id), signingKey: privateKey, runnerPublicKey: runnerKeys.get(pinnedAs), baseUrl: url, runnerId: id, agentId: `codex@${id}`,
   workRoot: crossmini, capabilities: CODEX_CAPABILITIES,
 })
 const adapter = adapterFor(runnerId, lapUrl)
@@ -195,12 +204,36 @@ ok('同 runner 重放复用既有 binding')
 const replayToken = replayRunnerId === runnerId ? token
   : issueDispatchPermit({ privateKey, issuer: ISSUER, runnerId: replayRunnerId, adapterId: REMOTE_ADAPTER_ID, envelope })
 try {
-  await adapterFor(replayRunnerId, replayUrl).startTask(envelope, await ctxFor(replayRunnerId, replayToken))
-  fail('另一 runner 接受了不属于它的许可')
+  await adapterFor(replayRunnerId, replayUrl, replayTargetId).startTask(envelope, await ctxFor(replayRunnerId, replayToken))
+  fail('另一 runner 接受了受众不是它的请求')
 } catch (error) {
-  if (!(error instanceof DispatchPermitError) || error.code !== 'CLAIM_MISMATCH') fail(`预期 CLAIM_MISMATCH，实际 ${error?.code ?? error}`)
+  // 请求签名的受众是 replayRunnerId，目标 runner 在读体与解析许可之前就以 401 拒绝
+  if (!(error instanceof DispatchPermitError) || error.code !== 'BAD_SIGNATURE') fail(`预期请求受众不符被拒（BAD_SIGNATURE），实际 ${error?.code ?? error}`)
 }
-ok('许可投到另一 runner → CLAIM_MISMATCH')
+ok('请求受众不是目标 runner → 401（落 BAD_SIGNATURE），未执行')
+
+// 绕过受众检查：请求签名对（受众是目标 runner），但许可本身是签给别的 runner 的
+const dispatchBody = JSON.stringify({
+  schema: 'cmap/remote-runner/v1', kind: 'dispatch', runner_id: replayTargetId, permit: replayToken, envelope,
+  trace_id: TASK_ID, correlation_id: envelope.identity.idempotency_key, deadline_at: new Date(Date.now() + 600_000).toISOString(), inputs: [],
+})
+const signedHeaders = (target, audience, body) => ({ 'content-type': 'application/json', ...signRunnerRequest({ privateKey, method: 'POST', target, audience, body }) })
+const cross = await fetch(new URL('/v1/tasks', replayUrl), { method: 'POST', headers: signedHeaders('/v1/tasks', replayTargetId, dispatchBody), body: dispatchBody })
+const crossBody = await cross.json()
+if (cross.status !== 403 || crossBody.code !== 'CLAIM_MISMATCH') fail(`预期许可受众不符 CLAIM_MISMATCH，实际 ${cross.status} ${crossBody.code}`)
+ok('签给别的 runner 的许可 → CLAIM_MISMATCH')
+
+// 应用层认证：未签名、过期、重放的请求在 lap 上一律 401
+const unsigned = await fetch(new URL('/v1/health', lapUrl))
+const stale = await fetch(new URL('/v1/health', lapUrl), { headers: signRunnerRequest({ privateKey, method: 'GET', target: '/v1/health', audience: runnerId, nowMs: Date.now() - 10_000 }) })
+const once = signRunnerRequest({ privateKey, method: 'GET', target: '/v1/health', audience: runnerId })
+const first = await fetch(new URL('/v1/health', lapUrl), { headers: once })
+const replayed = await fetch(new URL('/v1/health', lapUrl), { headers: once })
+if ([unsigned.status, stale.status, first.status, replayed.status].join() !== '401,401,200,401') {
+  fail(`请求认证判据不符：未签名/过期/首次/重放 = ${[unsigned.status, stale.status, first.status, replayed.status].join('/')}`)
+}
+if (!first.headers.get('x-cmap-signature') || unsigned.headers.get('x-cmap-signature')) fail('应答签名头不符：通过认证的要签名，401 不签名')
+ok('未签名 / 过期 / 重放 → 401；合法请求的应答带 lap 签名')
 
 // ------------------------------------------------------------ 4. 等终态并拉取结果
 

@@ -14,7 +14,7 @@ import { RemoteRunnerAdapter } from '../../adapters/remote-runner/src/index.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter, syntheticRunner } from './fake-adapter.ts'
 import {
-  ISSUER, close, deadUrl, envelope, trust, lapEnv, lines, makeFakeCodex, remoteAuthorization, sha256, signer, startLap, startTamperProxy,
+  ISSUER, close, deadUrl, envelope, trust, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signer, startLap, startTamperProxy,
 } from '../adapter/remote-runner-fixture.ts'
 
 const ACTOR = { type: 'system', id: 'remote-runner-test' } as const
@@ -48,7 +48,7 @@ const fixture = async (taskId: string, remoteUrl: (lapUrl: string) => Promise<st
   await mkdir(cm)
   const lap = await startLap({ env: lapEnv('lap', codex.bin, lapOverrides), workRoot: join(root, 'lap'), ...(opts.clockOffsetMs ? { clockOffsetMs: opts.clockOffsetMs } : {}) })
   const remote = new SpyRemote({
-    authorization: remoteAuthorization('lap'), baseUrl: await remoteUrl(lap.url), runnerId: 'lap', agentId: 'codex@lap',
+    authorization: remoteAuthorization('lap'), ...remoteKeys, baseUrl: await remoteUrl(lap.url), runnerId: 'lap', agentId: 'codex@lap',
     workRoot: cm, capabilities: ['code.analyze'], ...(opts.offlineGraceMs ? { offlineGraceMs: opts.offlineGraceMs } : {}),
   })
   const local = localCodex()
@@ -116,7 +116,7 @@ test('lap 不在线：3 秒健康探测失败即回落本地 codex，ROUTING_DEC
   }
 })
 
-test('许可被投到另一台 runner（lap-2）重放 → CLAIM_MISMATCH，落 PERMIT_INVALID，执行 0 次', async () => {
+test('许可被投到另一台 runner（lap-2）重放 → 请求受众不符被拒，落 PERMIT_INVALID，执行 0 次', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cmap-remote-wf-other-'))
   const otherCodex = await makeFakeCodex(root)
   const other = await startLap({ env: lapEnv('lap-2', otherCodex.bin), workRoot: join(root, 'lap-2') })
@@ -125,7 +125,7 @@ test('许可被投到另一台 runner（lap-2）重放 → CLAIM_MISMATCH，落 
   f.remote.health = async () => ({ state: 'healthy', checked_at: new Date().toISOString() })
   try {
     assert.deepEqual(await f.acts.dispatchTask('tsk-remote-replay'), { dispatched: false, admissionDenied: { phase: 'post-intent', code: 'PERMIT_INVALID' } })
-    assert.deepEqual(f.remote.errors, ['CLAIM_MISMATCH'])
+    assert.deepEqual(f.remote.errors, ['BAD_SIGNATURE'])
     const task = (await f.store.getTask('tsk-remote-replay'))!
     assert.equal(task.state, 'FAILED_TERMINAL')
     assert.equal(task.binding!.runner_id, 'lap')
@@ -137,11 +137,17 @@ test('许可被投到另一台 runner（lap-2）重放 → CLAIM_MISMATCH，落 
   }
 })
 
-test('lap 时钟超出 2 秒偏差 → EXPIRED，落 PERMIT_INVALID，执行 0 次', async () => {
+test('lap 时钟超出 2 秒偏差 → 健康探测请求时间戳超窗被 401，按 unhealthy 回落本地，lap 执行 0 次', async () => {
   const f = await fixture('tsk-remote-expired', undefined, {}, { clockOffsetMs: 63_000 })
   try {
-    assert.deepEqual(await f.acts.dispatchTask('tsk-remote-expired'), { dispatched: false, admissionDenied: { phase: 'post-intent', code: 'PERMIT_INVALID' } })
-    assert.deepEqual(f.remote.errors, ['EXPIRED'])
+    assert.equal((await f.acts.dispatchTask('tsk-remote-expired')).dispatched, true)
+    assert.equal((await f.store.getTask('tsk-remote-expired'))!.binding!.adapter, 'local-codex-adapter')
+    const [decision] = await routing(f.store)
+    assert.deepEqual(decision!.candidates.map((c: any) => [c.agent_id, c.verdict, c.reason]), [
+      ['codex@lap', 'skipped', 'unhealthy'],
+      ['codex', 'selected', null],
+    ])
+    assert.deepEqual(f.remote.errors, [])
     assert.equal((await lines(f.codex.launches)).length, 0)
   } finally {
     await f.cleanup()

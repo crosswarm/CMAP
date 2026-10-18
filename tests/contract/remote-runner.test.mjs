@@ -61,4 +61,46 @@ describe('remote-runner schema', () => {
       patch('error', (v) => { v.message = 'provider stderr' }),
     ]) assert.equal(validate(value), false, `${kind}: ${JSON.stringify(value)}`)
   })
+
+  test('error 允许无细节的 UNAUTHORIZED（401 体）', () => {
+    assert.equal(validate({ schema: S, kind: 'error', category: 'protocol', code: 'UNAUTHORIZED', retryable: false }), true)
+  })
+})
+
+describe('remote-runner 请求/响应认证头', () => {
+  const ajv = new Ajv({ strict: true, allErrors: true })
+  ajv.addSchema(schema)
+  const headers = (name) => ajv.getSchema(`${schema.$id}#/$defs/${name}`)
+  const SIG = 'A'.repeat(86)
+  const request = {
+    'x-cmap-timestamp': '1792281600000',
+    'x-cmap-nonce': 'bm9uY2Utbm9uY2Utbm9uY2U',
+    'x-cmap-audience': 'lap',
+    'x-cmap-content-sha256': H,
+    'x-cmap-signature': SIG,
+  }
+
+  test('接受完整的请求头与响应头', () => {
+    assert.equal(headers('requestAuthHeaders')(request), true)
+    assert.equal(headers('responseAuthHeaders')({ 'x-cmap-signature': SIG }), true)
+  })
+
+  test('拒绝缺头、通配受众、非 sha256、畸形时间戳/nonce/签名', () => {
+    const v = headers('requestAuthHeaders')
+    for (const name of Object.keys(request)) {
+      const { [name]: _omit, ...rest } = request
+      assert.equal(v(rest), false, `缺 ${name}`)
+    }
+    for (const patch of [
+      { 'x-cmap-audience': '*' },
+      { 'x-cmap-content-sha256': 'abc' },
+      { 'x-cmap-timestamp': '17922816' },
+      { 'x-cmap-timestamp': '1792281600.5' },
+      { 'x-cmap-nonce': 'short' },
+      { 'x-cmap-signature': 'A'.repeat(85) },
+      { 'x-cmap-signature': `${'A'.repeat(85)}=` },
+    ]) assert.equal(v({ ...request, ...patch }), false, JSON.stringify(patch))
+    assert.equal(headers('responseAuthHeaders')({}), false)
+    assert.equal(headers('responseAuthHeaders')({ 'x-cmap-signature': 'short' }), false)
+  })
 })

@@ -1,6 +1,6 @@
 # 远程 runner（单用户双主机，ADR-0006）
 
-状态：Stage 2–3 已实现并在**本机双端口模拟**下验证；Stage 4（部署到 lap、配置 Tailscale ACL、两机实测）**未做**。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
+状态：Stage 2–3（含应用层请求/响应认证）已实现并在**本机双端口模拟**下验证；Stage 4（部署到 lap、配置 Tailscale ACL、两机实测）**未做**。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
 
 ## 形态
 
@@ -14,6 +14,8 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 | `GET /v1/tasks/{id}/result` | 拉取结果与产物字节；CrossMini 落盘后用 `readVerifiedArtifact` 独立复算 sha256 |
 | `POST /v1/tasks/{id}/cancel` | 取消 |
 
+**每个请求（含 health）都带请求签名，每个应答（401 除外）都带 lap 的响应签名**，见下「应用层认证」。
+
 契约：[`schemas/remote-runner.v1.schema.json`](../schemas/remote-runner.v1.schema.json)。实现：`adapters/remote-runner`（CrossMini 侧 `RemoteRunnerAdapter`）、`apps/runner`（lap 侧守护进程，复用 `CodexAdapter`、`runner-config.ts` 与 `publishInput`）。
 
 行为要点：
@@ -23,11 +25,20 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 - 执行中失联：状态查询失败在 600 秒宽限内视为仍在执行；超过宽限进入既有「执行不确定」路径（任务 `INPUT_REQUIRED`、保留 binding），**不自动改派、不重跑**。宽限计时在 Worker 进程内存中，Worker 重启会重新计时——只会更晚判不确定，不会多执行。
 - lap 上的 Codex 一律以 `-m $CMAP_CODEX_MODEL` 显式指定模型（信封带 `model_policy` 时以信封为准），不依赖 lap 的 `~/.codex` 默认模型。
 
+## 应用层认证
+
+- **请求（CrossMini → lap）**：用 CrossMini 的派发许可私钥（`CMAP_PERMIT_KEY_FILE`，Ed25519）签 `方法 + 路径(含查询) + 请求体 sha256 + 毫秒时间戳 + nonce + 受众 runner_id`，放在 `x-cmap-timestamp` / `x-cmap-nonce` / `x-cmap-audience` / `x-cmap-content-sha256` / `x-cmap-signature` 头里（契约 `requestAuthHeaders`）。lap 在路由与读请求体**之前**验证：固定公钥验签、受众等于本机 `RUNNER_ID`、时间戳偏差 ≤ 2 秒、nonce 窗口内未用过；随后核对收到的体 sha256。任何一项不过都是同一个固定的 `401`（体为 `UNAUTHORIZED`，不签名，不区分原因），不执行任何动作。签名串带 `cmap-runner-req1` 域前缀，与派发许可的 `cmap1.` 不能互相冒用。
+- **应答（lap → CrossMini）**：lap 用自己的 Ed25519 私钥签 `受众 + 所答请求的 nonce + 状态码 + 应答体 sha256`（`x-cmap-signature`，契约 `responseAuthHeaders`）。绑定请求 nonce，旧应答不能冒充新请求的答复。CrossMini 用固定的 lap 公钥验签：结果端点验签失败按 `EVIDENCE_HASH_MISMATCH` 同等处理（不落盘、不写 artifact 记录）；其他端点是 `REMOTE_RESPONSE_SIGNATURE_INVALID`，健康探测判 `unavailable`。验签通过后产物仍由 CrossMini 独立复算 sha256。
+- **CrossMini 对 401 的处理**：派发被 401 拒绝时 lap 未执行，按 `PERMIT_INVALID`（`BAD_SIGNATURE`）落账、保留 binding、不重发；状态查询被 401 拒绝（密钥不符、时钟漂移）按失联处理，计入 600 秒离线宽限，不重跑。
+- **nonce 缓存**在 lap 进程内存（容量 4096，保留约 5 秒）。守护进程重启后，窗口内（时间戳 ±2 秒，理论上至多约 4 秒）一个已被用过的请求理论上可被重放；时间戳窗口限定了这个缺口，未落盘。
+- 这一层**不替代** Tailscale ACL（ACL 仍未配置），也不加密：信封、冻结输入、结果产物的机密性依赖 tailnet 的 WireGuard；应用层只保证来源、完整性、受众与防重放。
+
 ## CrossMini（控制面 Worker）配置
 
 | 变量 | 说明 |
 |---|---|
-| `CMAP_PERMIT_KEY_FILE` | 派发许可签名私钥路径。不存在则首次生成 Ed25519 PKCS8 PEM（0600）；文件对 group/other 可读即拒绝启动。配置远程 runner 时必填 |
+| `CMAP_PERMIT_KEY_FILE` | 派发许可签名私钥路径，**同一把私钥也签所有发往 lap 的请求**。不存在则首次生成 Ed25519 PKCS8 PEM（0600）；文件对 group/other 可读即拒绝启动。配置远程 runner 时必填 |
+| `CMAP_REMOTE_RUNNER_PUBKEY_FILE` | 固定的 lap 响应验签公钥（SPKI PEM，来自下面 lap 的导出命令）。配置远程 runner 时必填，没有或含私钥材料即拒绝构造适配器、Worker 启动失败；轮换 lap 密钥后必须同步更新 |
 | `CMAP_REMOTE_RUNNER_URL` | 例如 `http://cross-m1mx:8790`。不设置则不注册远程 runner |
 | `CMAP_REMOTE_RUNNER_ID` | lap 守护进程的 `RUNNER_ID`，例如 `lap`；不得与本机 `RUNNER_ID` 相同。注册的 Agent ID 为 `codex@<id>` |
 
@@ -45,6 +56,8 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
 
 把 `crossmini-permit.pub` 拷到 lap（例如 `~/.cmap/crossmini-permit.pub`）。轮换私钥后必须同步更新 lap 上的公钥文件；没有网络发现。
 
+`apps/worker` 未改动：适配器在没有显式传入密钥时，从 `CMAP_PERMIT_KEY_FILE`（请求签名）与 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`（应答验签）加载，缺任一项即拒绝构造。
+
 ## lap（runner 守护进程）配置
 
 | 变量 | 必填 | 说明 |
@@ -55,12 +68,21 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
 | `CMAP_RUNNER_LISTEN_HOST` | 是 | lap 的 Tailscale IPv4（`tailscale ip -4`）。`0.0.0.0`、`::` 等通配地址拒绝启动 |
 | `CMAP_RUNNER_PORT` | 否 | 默认 `8790` |
 | `CMAP_PERMIT_PUBLIC_KEY_FILE` | 是 | CrossMini 公钥文件；含私钥材料即拒绝启动 |
+| `CMAP_RUNNER_KEY_FILE` | 是 | lap 自己的响应签名私钥路径（例如 `~/.cmap/runner.key`）。首次启动自动生成 Ed25519 PKCS8 PEM（0600，父目录 0700）；宽权限拒绝启动。私钥不离开 lap |
 | `CMAP_CODEX_MODEL` | 是 | 显式传给 codex 的模型名 |
 | `CMAP_PERMIT_ISSUER` | 否 | 默认 `cmap:local-control-plane`，须与 Worker 一致 |
 | `CMAP_WORK_ROOT` | 否 | 默认仓库下 `.cmap-work`；运行记录在 `<CMAP_WORK_ROOT>/.runs/` |
 | `CODEX_BIN` | 否 | 默认 `codex` |
 
 以下变量出现在 lap 上即拒绝启动：`CMAP_DATABASE_URL`、`MEMROSS_URL`、`MEMROSS_TOKEN`、`CMAP_PERMIT_KEY_FILE`、`TEMPORAL_ADDRESS`。Codex 自身的提供方登录态由 lap 上的 codex 管理，不经 CMAP 下发。
+
+导出 lap 公钥给 CrossMini（首次启动守护进程生成密钥后执行，只导出公钥）：
+
+```bash
+node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.write(c.createPublicKey(f.readFileSync(process.argv[1])).export({type:'spki',format:'pem'}))" "$CMAP_RUNNER_KEY_FILE" > lap-runner.pub
+```
+
+把 `lap-runner.pub` 拷到 CrossMini（例如 `~/.cmap/lap-runner.pub`）并设为 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`。lap 的 `CMAP_RUNNER_KEY_FILE` 与 CrossMini 的 `CMAP_PERMIT_KEY_FILE` 是两把不同的密钥：前者签应答，后者签请求与派发许可。
 
 ### launchd 模板
 
@@ -91,6 +113,7 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
     <key>CMAP_RUNNER_LISTEN_HOST</key><string>100.x.y.z</string>
     <key>CMAP_RUNNER_PORT</key><string>8790</string>
     <key>CMAP_PERMIT_PUBLIC_KEY_FILE</key><string>/Users/cross/.cmap/crossmini-permit.pub</string>
+    <key>CMAP_RUNNER_KEY_FILE</key><string>/Users/cross/.cmap/runner.key</string>
     <key>CMAP_CODEX_MODEL</key><string>gpt-5.6-sol</string>
     <key>CMAP_WORK_ROOT</key><string>/Users/cross/.cmap/work</string>
   </dict>
@@ -129,14 +152,17 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
 | 层 | 命令 | 覆盖 |
 |---|---|---|
 | 契约 | `npm test`（`tests/contract/remote-runner.test.mjs`） | 各消息正反样例：通配 runner、路径穿越、多余字段、stderr 字段均拒绝 |
-| 单测 | `npm test`（`tests/adapter/remote-runner.test.ts`、`tests/domain/dispatch-permit.test.ts`） | 真实 HTTP + 假 codex：执行 1 次且显式 `-m`、同 runner 重放不二次执行、别的 runner `CLAIM_MISMATCH`、超偏差/过期 `EXPIRED`、owner 拒绝、输入下发与篡改拒绝、健康探测超时、宽限边界、配置拒绝、密钥 0600 与公钥固定 |
-| 控制面 | `npm run test:workflow`（`tests/workflow/remote-runner.test.ts`） | 路由到 lap 并完成、lap 不在线回落并记原因、重放 `PERMIT_INVALID`、过期 0 次执行、篡改产物 `EVIDENCE_HASH_MISMATCH` 且无 artifact 记录、`RUNNER_ADMISSION_REVOKED:OWNER_DENIED`、失联超宽限不确定且只执行 1 次 |
-| 本机双端口模拟 | `TMPDIR=/private/tmp CMAP_CODEX_MODEL=<model> node scripts/e2e-remote-runner.mjs --simulate`（加 `--fake-codex` 不调用模型） | 两个真实守护进程进程：健康、派发、重放、终态、CrossMini 复算哈希、exec 计数 |
-| Stage 4（未做） | lap 部署后 `node scripts/e2e-remote-runner.mjs`（读 `CMAP_REMOTE_RUNNER_URL`/`CMAP_REMOTE_RUNNER_ID`/`CMAP_PERMIT_KEY_FILE`）；再以 `preferred_agent: codex@lap` 跑一次 `scripts/e2e-mission.mjs` 级别的 Temporal 全链路；ACL 放行与拒绝两面实测 | 跨主机验签与时钟、真实网络失联、ACL |
+| 单测 | `npm test`（`tests/adapter/remote-runner.test.ts`、`tests/domain/dispatch-permit.test.ts`） | 真实 HTTP + 假 codex：执行 1 次且显式 `-m`、同 runner 重放不二次执行、许可受众不符 `CLAIM_MISMATCH`、过期 `EXPIRED`、请求受众不符/时钟超窗被 401 拒绝、owner 拒绝、输入下发与篡改拒绝、健康探测超时、宽限边界、配置拒绝、密钥 0600 与公钥固定 |
+| 认证 | `npm test`（`tests/adapter/remote-runner-auth.test.ts`、`tests/contract/remote-runner.test.mjs`） | health/dispatch/status/result/cancel 五个端点：未签名、错签、签名后改路径/方法/体、过期、未来、受众不符、缺头、重放均 401 且体逐字节一致、不执行（取消与派发无副作用）；应答被改/剥签/用错 lap 公钥 CrossMini 拒收，结果端点 `EVIDENCE_HASH_MISMATCH` 且不落盘；lap 自签错误字节仍被复算哈希拒绝；适配器缺密钥 fail closed；认证头契约正反样例 |
+| 控制面 | `npm run test:workflow`（`tests/workflow/remote-runner.test.ts`） | 路由到 lap 并完成、lap 不在线回落并记原因、受众不符的重放 `PERMIT_INVALID`、时钟超窗的 lap 健康探测 401 并回落本地且 lap 0 次执行、篡改产物 `EVIDENCE_HASH_MISMATCH` 且无 artifact 记录、`RUNNER_ADMISSION_REVOKED:OWNER_DENIED`、失联超宽限不确定且只执行 1 次 |
+| 本机双端口模拟 | `TMPDIR=/private/tmp CMAP_CODEX_MODEL=<model> node scripts/e2e-remote-runner.mjs --simulate`（加 `--fake-codex` 不调用模型） | 两个真实守护进程进程：健康、派发、重放、受众不符 401、许可受众不符 `CLAIM_MISMATCH`、未签名/过期/重放 401、应答带签名、终态、CrossMini 复算哈希、exec 计数 |
+| Stage 4（未做） | lap 部署后 `node scripts/e2e-remote-runner.mjs`（读 `CMAP_REMOTE_RUNNER_URL`/`CMAP_REMOTE_RUNNER_ID`/`CMAP_PERMIT_KEY_FILE`/`CMAP_REMOTE_RUNNER_PUBKEY_FILE`）；再以 `preferred_agent: codex@lap` 跑一次 `scripts/e2e-mission.mjs` 级别的 Temporal 全链路；ACL 放行与拒绝两面实测 | 跨主机验签与时钟、真实网络失联、ACL |
 
 ## 已知边界
 
-- 状态、结果、取消端点没有应用层认证，只靠 Tailscale ACL 限定来源；派发端点有签名许可。ACL 未落地前不得在 tailnet 上启动守护进程。
+- 所有端点已有应用层请求认证与应答签名，但 **Tailscale ACL 仍未配置**，仍是网络层缺口：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求会被读头后 401，但仍占连接）。ACL 落地并实测前，不得在 tailnet 上启动守护进程接收真实任务。
+- 应用层不加密。私钥泄露即失效：CrossMini 的 `CMAP_PERMIT_KEY_FILE` 一旦泄露，攻击者既能伪造请求也能签派发许可；轮换须同时更新 lap 上的 `CMAP_PERMIT_PUBLIC_KEY_FILE`。lap 的 `CMAP_RUNNER_KEY_FILE` 泄露则可伪造应答，须同步更新 CrossMini 的 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`。
+- nonce 防重放缓存在内存，守护进程重启后窗口内（≤ 约 4 秒）理论上可重放；时钟偏差超过 2 秒的请求一律被拒，两机需要 NTP 同步。
 - 产物随结果以 base64 内联拉取，单个约 16 MiB 上限，适合报告类证据，不适合大文件。
 - `RemoteRunnerAdapter` 的风险上限默认 `mutating`（与被包装的 Codex 一致），真正的上限由 lap 的 `RUNNER_MAX_RISK` 执行；超出时落准入拒绝而不是回落本地。
 - 只有一个远程 runner（固定 Adapter ID `remote-runner-adapter`）；第三台机器不在 ADR-0006 范围内。
