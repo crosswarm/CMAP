@@ -17,3 +17,14 @@
 - 新分支由 `patched('mission-cancel-v1')` / `patched('dag-cancel-v1')` 守卫：旧历史即使收到过同名信号（当时没有处理器），重放时照旧忽略。
 
 已知限制：Adapter 未确认停止的已绑定任务会让 Workflow 继续等该任务的终态（inspect/v1），或让 DAG 收尾时因仍有活动任务而失败；这是如实反映「执行可能还在进行」，需人工处理。
+
+## DAG 长等待换历史（continueAsNew）
+
+dag/v1 节点等审批（`checkDagApproval` 返回 pending）或等资源锁（`runDagAttempt` 返回 waiting_resource）时每秒轮询一次，每轮都写入 Activity 与 Timer 事件；等上数天会逼近 Temporal 单历史上限。
+
+- 历史事件数达到 `maxHistoryLength`（Workflow 输入，默认 8000）或服务端 `continueAsNewSuggested` 时开始收拢：不再派生新节点，各节点在下一个等待点停下（记下 task、轮次、上一轮进度与所处阶段），仍在执行 Activity 的节点照常跑完。
+- 所有节点都停下或结束后 `continueAsNew`，把已终结节点的结论与停下的节点交给新 run；新 run 从等待点继续，不重新物化任务，账本是唯一事实来源。
+- 收拢途中触发停止（分支失败或取消）时不换历史，停下的节点按停止原因收尾。
+- 由 `patched('dag-continue-as-new-v1')` 守卫；`tests/workflow/dag-continue-as-new.test.ts` 用小阈值在真实 Temporal 上跑出多段历史，并逐段 `runReplayHistory` 验证确定性。
+
+inspect/v1 的审批等待在单个 7 天 Activity 内轮询，历史不随等待增长，未引入 continueAsNew。

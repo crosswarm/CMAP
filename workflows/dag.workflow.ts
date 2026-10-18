@@ -1,4 +1,4 @@
-import { defineSignal, isCancellation, patched, proxyActivities, setHandler, sleep } from '@temporalio/workflow'
+import { continueAsNew, defineSignal, isCancellation, patched, proxyActivities, setHandler, sleep, workflowInfo } from '@temporalio/workflow'
 import type { ProgressSnapshot } from '#domain-model'
 import type { Activities } from './activities.ts'
 import type { DagActivities, DagNodeOutcome } from './dag-activities.ts'
@@ -29,7 +29,28 @@ const attempt = proxyActivities<Pick<DagActivities,'runDagAttempt'>>({
   retry:{maximumAttempts:1},
 })
 
-export async function dagMissionWorkflow(input: { missionId: string }): Promise<DagWorkflowResult> {
+/** 停在等待点（等审批 / 等资源锁）的节点，continueAsNew 后从这里继续，不重新物化。 */
+export interface ParkedDagNode {
+  readonly nodeId: string
+  readonly taskId: string
+  readonly attemptNumber: number
+  readonly previousProgress?: ProgressSnapshot
+  readonly phase: 'approval' | 'attempt'
+}
+
+export interface DagWorkflowInput {
+  readonly missionId: string
+  /** 历史事件数达到此值（或服务端建议）时在等待点 continueAsNew。测试用小值，默认 8000。 */
+  readonly maxHistoryLength?: number
+  /** 上一段 run 交接过来的进度：已终结节点的结论与停在等待点的节点。 */
+  readonly resume?: { readonly outcomes: readonly DagNodeOutcome[]; readonly parked: readonly ParkedDagNode[] }
+}
+
+/** S5 续接：长时间等待时换新历史。旧历史重放时 patched() 为 false，照旧原地 sleep。 */
+const CONTINUE_PATCH='dag-continue-as-new-v1'
+const DEFAULT_MAX_HISTORY=8000
+
+export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWorkflowResult> {
   const {missionId}=input
   let cancelReason:string|undefined
   let cancelSweep:Promise<unknown>=Promise.resolve()
@@ -37,63 +58,89 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
   if(['COMPLETED','FAILED','ESCALATED','CANCELED'].includes(schedule.state)) {
     return acts.finalizeDagMission(missionId)
   }
-  const outcomes=new Map<string,DagNodeOutcome>()
+  const outcomes=new Map<string,DagNodeOutcome>((input.resume?.outcomes??[]).map(o=>[o.nodeId,o]))
+  const resumable=new Map<string,ParkedDagNode>((input.resume?.parked??[]).map(p=>[p.nodeId,p]))
+  const parked=new Map<string,ParkedDagNode>()
   const running=new Map<string,Promise<void>>()
   let stopping=false
+  let draining=false
   setHandler(cancelMissionSignal,(signal)=>{
     if(cancelReason!==undefined||!patched(CANCEL_PATCH))return
     cancelReason=typeof signal?.reason==='string'&&signal.reason.trim()?signal.reason.slice(0,500):'MISSION_CANCELED'
     stopping=true
     cancelSweep=writeback.cancelMissionTasks({missionId,reason:cancelReason}).catch(()=>undefined)
   })
+  // 一旦开始收拢就不再派生新节点，各节点在下一个等待点停下；停止优先于收拢。
+  const shouldPark=():boolean=>{
+    if(stopping)return false
+    if(!draining) {
+      const info=workflowInfo()
+      if(!info.continueAsNewSuggested&&info.historyLength<(input.maxHistoryLength??DEFAULT_MAX_HISTORY))return false
+      if(!patched(CONTINUE_PATCH))return false
+      draining=true
+    }
+    return true
+  }
+  const stopReason=()=>cancelReason!==undefined?'MISSION_CANCELED':'DAG_STOPPED'
 
-  const executeNode=async (node:typeof schedule.nodes[number]):Promise<DagNodeOutcome>=>{
-    let taskId:string|undefined
-    let attemptNumber=1
-    let previousProgress:ProgressSnapshot|undefined
-    const stopped=()=>acts.finishDagNode({missionId,nodeId:node.node_id,...(taskId?{taskId}:{}),status:'failed',reason:cancelReason!==undefined?'MISSION_CANCELED':'DAG_STOPPED'})
+  const executeNode=async (node:typeof schedule.nodes[number],resume?:ParkedDagNode):Promise<DagNodeOutcome|ParkedDagNode>=>{
+    let taskId:string|undefined=resume?.taskId
+    let attemptNumber=resume?.attemptNumber??1
+    let previousProgress:ProgressSnapshot|undefined=resume?.previousProgress
+    let phase:'materialize'|'approval'|'attempt'=resume?.phase??'materialize'
+    const stopped=()=>acts.finishDagNode({missionId,nodeId:node.node_id,...(taskId?{taskId}:{}),status:'failed',reason:stopReason()})
+    const park=(at:'approval'|'attempt'):ParkedDagNode=>({nodeId:node.node_id,taskId:taskId!,attemptNumber,...(previousProgress?{previousProgress}:{}),phase:at})
     try {
       for(;;) {
-        if(stopping) return stopped()
-        const previousTaskId=taskId
-        const acceptedDeps=Object.fromEntries(node.deps.map(id=>{
-          const parent=outcomes.get(id)
-          if(parent?.status!=='accepted'||!parent.taskId)throw new Error('DAG dependency proof missing')
-          return [id,parent.taskId]
-        }))
-        const created=await acts.materializeDagNode({missionId,nodeId:node.node_id,attempt:attemptNumber,acceptedDeps,...(previousTaskId?{supersedesTaskId:previousTaskId}:{})})
-        if('admissionDenied' in created) {
-          const prefix=created.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
-          return acts.finishDagNode({missionId,nodeId:node.node_id,status:'escalated',reason:`${prefix}:${created.admissionDenied.code}`})
+        if(phase==='materialize') {
+          if(stopping) return stopped()
+          const previousTaskId=taskId
+          const acceptedDeps=Object.fromEntries(node.deps.map(id=>{
+            const parent=outcomes.get(id)
+            if(parent?.status!=='accepted'||!parent.taskId)throw new Error('DAG dependency proof missing')
+            return [id,parent.taskId]
+          }))
+          const created=await acts.materializeDagNode({missionId,nodeId:node.node_id,attempt:attemptNumber,acceptedDeps,...(previousTaskId?{supersedesTaskId:previousTaskId}:{})})
+          if('admissionDenied' in created) {
+            const prefix=created.admissionDenied.phase==='initial'?'RUNNER_ADMISSION_DENIED':'RUNNER_ADMISSION_REVOKED'
+            return acts.finishDagNode({missionId,nodeId:node.node_id,status:'escalated',reason:`${prefix}:${created.admissionDenied.code}`})
+          }
+          taskId=created.taskId
+          phase='approval'
         }
-        taskId=created.taskId
+        const current=taskId!
+        if(phase==='approval') {
+          for(;;) {
+            if(stopping) return stopped()
+            const approval=await acts.checkDagApproval(current)
+            if(approval.decision==='rejected')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'failed',reason:'APPROVAL_REJECTED'})
+            if(approval.decision==='approved')break
+            if(shouldPark())return park('approval')
+            await sleep('1 second')
+          }
+          phase='attempt'
+        }
         for(;;) {
           if(stopping) return stopped()
-          const approval=await acts.checkDagApproval(taskId)
-          if(approval.decision==='rejected')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId,status:'failed',reason:'APPROVAL_REJECTED'})
-          if(approval.decision==='approved')break
-          await sleep('1 second')
-        }
-        for(;;) {
-          if(stopping) return stopped()
-          const result=await attempt.runDagAttempt({taskId})
+          const result=await attempt.runDagAttempt({taskId:current})
           if(result.outcome==='collected')break
-          if(result.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId,status:'escalated',reason:result.reason??'ATTEMPT_FAILED'})
+          if(result.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'escalated',reason:result.reason??'ATTEMPT_FAILED'})
+          if(shouldPark())return park('attempt')
           await sleep('1 second')
         }
         // 取消时不再评审；其余停止原因下，已启动的分支必须完成结果/评审落账。
         if(cancelReason!==undefined)return stopped()
-        const reviewed=await acts.reviewDagAttempt({taskId,...(previousProgress?{previousProgress}:{})})
+        const reviewed=await acts.reviewDagAttempt({taskId:current,...(previousProgress?{previousProgress}:{})})
         if(reviewed.status==='accepted'){
-          const accepted=taskId
-          await sideEffect(async()=>{if(patched(KNOWLEDGE_PATCH))await writeback.proposeTaskKnowledge({missionId,taskId:accepted})})
+          await sideEffect(async()=>{if(patched(KNOWLEDGE_PATCH))await writeback.proposeTaskKnowledge({missionId,taskId:current})})
         }
         if(reviewed.status!=='rework')return reviewed
         if(attemptNumber>schedule.maxAdditionalCycles) {
-          return acts.finishDagNode({missionId,nodeId:node.node_id,taskId,status:'escalated',reason:'BUDGET_EXHAUSTED'})
+          return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'escalated',reason:'BUDGET_EXHAUSTED'})
         }
         previousProgress=reviewed.progress
         attemptNumber++
+        phase='materialize'
       }
     }catch{
       return acts.finishDagNode({missionId,nodeId:node.node_id,...(taskId?{taskId}:{}),status:'escalated',reason:'NODE_EXECUTION_ERROR'})
@@ -101,18 +148,38 @@ export async function dagMissionWorkflow(input: { missionId: string }): Promise<
   }
 
   for(;;) {
-    if(!stopping) {
+    if(!stopping&&!draining) {
       for(const node of schedule.nodes) {
         if(running.size>=schedule.concurrency)break
         if(outcomes.has(node.node_id)||running.has(node.node_id))continue
         if(!node.deps.every(id=>outcomes.get(id)?.status==='accepted'))continue
-        const promise=executeNode(node).then(outcome=>{
-          outcomes.set(node.node_id,outcome)
-          if(outcome.status==='failed'||outcome.status==='escalated')stopping=true
+        const resume=resumable.get(node.node_id)
+        resumable.delete(node.node_id)
+        const promise=executeNode(node,resume).then(outcome=>{
+          if('phase' in outcome)parked.set(node.node_id,outcome)
+          else {
+            outcomes.set(node.node_id,outcome)
+            if(outcome.status==='failed'||outcome.status==='escalated')stopping=true
+          }
           running.delete(node.node_id)
         })
         running.set(node.node_id,promise)
       }
+    }
+    if(!running.size&&parked.size) {
+      if(!stopping) {
+        // 所有在跑的节点都已停在等待点或结束：带着进度换一段新历史。
+        await continueAsNew<typeof dagMissionWorkflow>({
+          missionId,
+          ...(input.maxHistoryLength!==undefined?{maxHistoryLength:input.maxHistoryLength}:{}),
+          resume:{outcomes:[...outcomes.values()],parked:[...parked.values()]},
+        })
+      }
+      // 收拢途中触发了停止：停在等待点的节点按停止原因收尾。
+      for(const p of parked.values()) {
+        outcomes.set(p.nodeId,await acts.finishDagNode({missionId,nodeId:p.nodeId,taskId:p.taskId,status:'failed',reason:stopReason()}))
+      }
+      parked.clear()
     }
     if(!running.size) {
       if(!stopping&&outcomes.size!==schedule.nodes.length) {
