@@ -41,8 +41,8 @@
     },
     "followup_format": {
       "type": "integer",
-      "const": 2,
-      "description": "Absent means legacy child template1. New applications freeze format2 and the descriptor matrix into their canonical input hash; intent and completion must agree. Never reinterpret old child rows."
+      "enum": [2, 3],
+      "description": "Absent means legacy child template1. Format2 freezes the descriptor matrix into the canonical input hash; format3 (new applications) additionally copies the decision's failed criteria and focus into each child's inputs.previous_attempt. Intent and completion must agree. Never reinterpret old child rows."
     },
     "followup_inputs": {
       "type": "array",

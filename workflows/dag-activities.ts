@@ -297,7 +297,7 @@ export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: st
     },
 
     async materializeDagNode(input: Parameters<typeof materializeDagTask>[1]) {
-      return materializeDagTask({ store, workRoot: deps.workRoot, runner }, input)
+      return materializeDagTask({ store, workRoot: deps.workRoot, runner, ...(deps.memory ? { memory: deps.memory } : {}) }, input)
     },
 
     async runDagAttempt(input: { taskId: string }) {

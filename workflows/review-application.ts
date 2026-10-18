@@ -59,7 +59,7 @@ const progress = (snapshot: ApplyReviewInput['currentProgress']): unknown => {
   })
 }
 
-type FollowupFormat = 1 | 2
+type FollowupFormat = 1 | 2 | 3
 
 const snapshotParameters = (parameters: Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
   if (parameters === undefined) return undefined
@@ -82,7 +82,7 @@ const canonicalInput = (
   decision: input.decision,
   previousProgress: progress(input.previousProgress),
   currentProgress: progress(input.currentProgress),
-  ...(format === 2 ? { followup_format: 2, followup_inputs: matrix ?? [] } : {}),
+  ...(format !== 1 ? { followup_format: format, followup_inputs: matrix ?? [] } : {}),
 })
 
 const inputSha = (input: ApplyReviewInput, format: FollowupFormat, matrix?: ReviewInputMatrix): string =>
@@ -107,7 +107,7 @@ const reviewEventPayload = (
   round,
   input_sha256: hash,
   review_id: id,
-  ...(format === 2 ? { followup_format: 2, followup_inputs: matrix ?? [] } : {}),
+  ...(format !== 1 ? { followup_format: format, followup_inputs: matrix ?? [] } : {}),
   output: {
     outcome: output.outcome,
     followupTaskIds: [...output.followupTaskIds],
@@ -231,7 +231,7 @@ const assertReceiptFormat = (
     }
     return
   }
-  if (receipt.followup_format !== 2 || !isDeepStrictEqual(receipt.followup_inputs ?? [], matrix ?? [])) {
+  if (receipt.followup_format !== format || !isDeepStrictEqual(receipt.followup_inputs ?? [], matrix ?? [])) {
     throw new Error('Review application conflict')
   }
 }
@@ -388,7 +388,7 @@ const plannedOutput = async (
   const existing = (await store.queryTasks({ missionId: task.mission_id }))
     .filter((candidate) => candidate.supersedes_task_id === task.id)
   const followupTaskIds = await Promise.all(followups.map(async (_, i) => {
-    if (format === 2 && matrix === undefined) return taskIdFor(task.mission_id, reviewTaskKey(task.id, input.round, i))
+    if (format !== 1 && matrix === undefined) return taskIdFor(task.mission_id, reviewTaskKey(task.id, input.round, i))
     const matches = []
     for (const candidate of existing) {
       if (await taskCreationMatches(store, candidate, childInput(task, decision, input.round, i, format, matrix))) matches.push(candidate.id)
@@ -424,11 +424,19 @@ const childInput = (
   const refs = matrix?.[index]
   if (!refs) throw new Error('review input proof mismatch')
   const parameters = snapshotParameters(followup.parameters)
+  const [firstFailed, ...restFailed] = (decision.failed_criteria ?? [])
+    .map(({ criterion_id, expected, actual, reason }) => ({ criterion_id, expected, actual, reason }))
   return {
     ...base,
     taskType: followup.task_type,
     ...(parameters !== undefined ? { parameters } : {}),
     ...(refs.length > 0 ? { artifactRefs: structuredClone(refs) } : {}),
+    ...(format === 3 && firstFailed ? { previousAttempt: {
+      supersedes_task_id: source.id,
+      review_round: decision.review_round ?? round + 1,
+      failed_criteria: [firstFailed, ...restFailed],
+      ...(followup.focus?.length ? { focus: [...followup.focus] } : {}),
+    } } : {}),
   }
 }
 
@@ -718,16 +726,17 @@ export const applyReviewApplication = async (
   const legacy = assertTaskReviewConflicts(await taskReviews(store, task), frozen)
   const intents = await reviewApplicationEvents(store, task, 'intent', id)
   if (intents.length > 1) throw new Error('conflicting review intents')
-  const format: FollowupFormat = intents[0] ? (intents[0].followup_format === 2 ? 2 : 1) : legacy.length === 0 ? 2 : 1
+  // 新申请冻结为 format3（后继带 previous_attempt）；已有回执按其原格式重建，不改写旧子任务。
+  const format: FollowupFormat = intents[0] ? (intents[0].followup_format ?? 1) : legacy.length === 0 ? 3 : 1
   const legacyEscalation = format === 1 ? await legacyForcedEscalationOutput(store, task, frozen, legacy) : null
   let matrix: ReviewInputMatrix | undefined
   let output: ApplyReviewOutput
   if (intents[0]) {
-    matrix = format === 2 ? intents[0].followup_inputs ?? [] : undefined
+    matrix = format !== 1 ? intents[0].followup_inputs ?? [] : undefined
     output = asOutput(intents[0])
   } else {
     const preliminary = legacyEscalation ?? await plannedOutput(store, task, frozen, format)
-    matrix = format === 2
+    matrix = format !== 1
       ? preliminary.outcome === 'rework' ? await resolveReviewInputs(store, task, frozen.decision) : []
       : undefined
     output = legacyEscalation ?? await plannedOutput(store, task, frozen, format, matrix)

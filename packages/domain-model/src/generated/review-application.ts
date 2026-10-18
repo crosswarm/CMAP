@@ -17,9 +17,9 @@ export interface ReviewApplicationV1 {
   input_sha256: string
   review_id: string
   /**
-   * Absent means legacy child template1. New applications freeze format2 and the descriptor matrix into their canonical input hash; intent and completion must agree. Never reinterpret old child rows.
+   * Absent means legacy child template1. Format2 freezes the descriptor matrix into the canonical input hash; format3 (new applications) additionally copies the decision's failed criteria and focus into each child's inputs.previous_attempt. Intent and completion must agree. Never reinterpret old child rows.
    */
-  followup_format?: 2
+  followup_format?: 2 | 3
   /**
    * Format2 normalized artifact descriptors per child, in declared order. Exactly one entry per rework child and none for accept/escalated, checked at runtime. No source paths, bytes, goal or parameter text. Retries reconstruct children from this matrix; dispatch separately verifies current availability and permissions.
    */

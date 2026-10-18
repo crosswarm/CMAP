@@ -17,8 +17,6 @@ export const missionFromRequest = (input: unknown, tenant: string, owner: string
     throw new RangeError('请求不符合 mission-create v1，验收标准 ID 必须唯一')
   }
   const id = 'mis_' + createHash('sha256').update(JSON.stringify([tenant, owner, input.request_id])).digest('hex')
-  // 记忆快照只接在 inspect/v1 首个任务上；DAG 节点各有输入，混用会让快照归属不清。
-  if (input.plan !== undefined && input.memory !== undefined) throw new RangeError('memory 不能与 plan 同时出现（仅 inspect/v1 支持）')
   const plan = input.plan === undefined ? undefined : normalizeMissionPlan(input.plan, input.acceptance, input.risk_level)
   const memory = input.memory === undefined ? undefined : { ...input.memory, limit: input.memory.limit ?? 3 }
   const now = new Date().toISOString()

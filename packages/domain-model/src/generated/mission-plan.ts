@@ -41,6 +41,17 @@ export interface MissionPlanV1 {
         chat_send: true
         policy_sha256: string
       }
+      /**
+       * 可选：首轮派发前从 Memross 冻结该节点的记忆快照（memory_context 输入证据）。缺省时继承 Mission 的 memory 并以节点 goal 作查询；返工轮复用首轮快照，不重新检索。
+       */
+      memory?: {
+        project_id: string
+        /**
+         * 省略时用节点 goal 的前 500 字。
+         */
+        query?: string
+        limit?: number
+      }
       preferred_agent?: string
       fallback_agents?: string[]
     },
@@ -67,6 +78,17 @@ export interface MissionPlanV1 {
       yonwork?: {
         chat_send: true
         policy_sha256: string
+      }
+      /**
+       * 可选：首轮派发前从 Memross 冻结该节点的记忆快照（memory_context 输入证据）。缺省时继承 Mission 的 memory 并以节点 goal 作查询；返工轮复用首轮快照，不重新检索。
+       */
+      memory?: {
+        project_id: string
+        /**
+         * 省略时用节点 goal 的前 500 字。
+         */
+        query?: string
+        limit?: number
       }
       preferred_agent?: string
       fallback_agents?: string[]

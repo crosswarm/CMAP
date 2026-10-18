@@ -21,7 +21,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["project_id"],
-      "description": "可选：派发前从 Memross 共享记忆检索并冻结上下文快照，作为首个任务的 memory_context 输入证据交付（仅 inspect/v1，不能与 plan 同时出现）。检索主体与授权由控制面配置的 Memross 凭据在服务端判定，调用方只能缩小范围。Memross 不可用时该 Mission 失败关闭，不静默降级。",
+      "description": "可选：派发前从 Memross 共享记忆检索并冻结上下文快照，作为首个任务的 memory_context 输入证据交付；与 plan 同时出现时作为各节点的缺省记忆（以节点 goal 作查询，节点可用自己的 memory 覆盖）。返工轮复用首轮快照，不重新检索。检索主体与授权由控制面配置的 Memross 凭据在服务端判定，调用方只能缩小范围。Memross 不可用时该 Mission 失败关闭，不静默降级。",
       "properties": {
         "project_id": { "type": "string", "pattern": "^prj_[a-z0-9_]{1,120}$" },
         "query": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S", "description": "省略时用 goal 的前 500 字。" },

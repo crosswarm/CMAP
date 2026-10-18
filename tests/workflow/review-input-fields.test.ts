@@ -192,7 +192,7 @@ const decision = (missionId: string, taskId: string): ReviewDecisionV1 => ({
   review_confidence: { level: 'high' },
 }) as ReviewDecisionV1
 
-test('new review applications freeze format2 inputs and pass task type, parameters and artifact refs to child envelope', async () => {
+test('new review applications freeze format3 inputs and pass task type, parameters, artifact refs and previous attempt to child envelope', async () => {
   const store = new MemoryStore()
   const m = mission('mis-review-input-fields')
   const digest = sha('data')
@@ -215,6 +215,7 @@ test('new review applications freeze format2 inputs and pass task type, paramete
     sha256: digest,
   }])
 
+  assert.equal(child.envelope.inputs?.previous_attempt?.supersedes_task_id, source.id)
   const receipts = (await store.listEvents(m.id)).filter((event) => event.event_type === 'REVIEW_APPLICATION_INTENT')
   assert.equal(receipts.length, 1)
   assert.deepEqual(receipts[0]!.payload, {
@@ -223,7 +224,7 @@ test('new review applications freeze format2 inputs and pass task type, paramete
     round: 1,
     input_sha256: receipts[0]!.payload.input_sha256,
     review_id: receipts[0]!.payload.review_id,
-    followup_format: 2,
+    followup_format: 3,
     followup_inputs: [[{
       artifact_id: 'art-report',
       source_task_id: 'producer',

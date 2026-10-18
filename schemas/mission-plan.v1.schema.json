@@ -49,6 +49,17 @@
             }
           },
           "yonwork": {"type": "object", "additionalProperties": false, "required": ["chat_send", "policy_sha256"], "properties": {"chat_send": {"const": true}, "policy_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}, "description": "YonWork permission request and immutable effective-policy pin. This is not an approval. yonwork.validate requires controlled risk, an explicit yonwork:cmap-* profile without fallback, and the yonwork:host lock."},
+          "memory": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["project_id"],
+            "description": "可选：首轮派发前从 Memross 冻结该节点的记忆快照（memory_context 输入证据）。缺省时继承 Mission 的 memory 并以节点 goal 作查询；返工轮复用首轮快照，不重新检索。",
+            "properties": {
+              "project_id": { "type": "string", "pattern": "^prj_[a-z0-9_]{1,120}$" },
+              "query": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "\\S", "description": "省略时用节点 goal 的前 500 字。" },
+              "limit": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 }
+            }
+          },
           "preferred_agent": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
           "fallback_agents": {
             "type": "array",

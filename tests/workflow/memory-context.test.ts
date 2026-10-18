@@ -50,7 +50,7 @@ async function fixture(constraints:Record<string,unknown>){
   return {store,workRoot}
 }
 
-test('mission-create 的 memory 进入 Mission 约束，并拒绝与 plan 同时出现', () => {
+test('mission-create 的 memory 进入 Mission 约束；与 plan 同时出现时作为节点缺省记忆', () => {
   const base={request_id:'synthetic-request',goal:'Count files',risk_level:'read-meta',
     acceptance:[{criterion_id:'files',metric:'count',operator:'eq',expected:3}]}
   const m=missionFromRequest({...base,memory:{project_id:'prj_a'}},'t','o')
@@ -58,7 +58,7 @@ test('mission-create 的 memory 进入 Mission 约束，并拒绝与 plan 同时
   assert.equal(missionFromRequest(base,'t','o').constraints['memory'],undefined)
   const plan={schema:'cmap/mission-plan/v1',nodes:[{node_id:'A',goal:'Collect A',capability:'code.inspect',deps:[],criterion_ids:['files'],risk_level:'read-meta'}]}
   assert.ok(missionFromRequest({...base,plan},'t','o').constraints['plan'],'对照：同一 plan 单独提交合法')
-  assert.throws(()=>missionFromRequest({...base,plan,memory:{project_id:'prj_a'}},'t','o'),/memory/)
+  assert.deepEqual(missionFromRequest({...base,plan,memory:{project_id:'prj_a'}},'t','o').constraints['memory'],{project_id:'prj_a',limit:3})
 })
 
 test('快照逐块读取并核对散列，正文标注为数据，不含凭据', async () => {

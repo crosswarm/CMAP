@@ -222,6 +222,18 @@ describe('上下文寻址：跨主机可复现', () => {
   })
 })
 
+describe('返工上下文 previous_attempt', () => {
+  const failed = { criterion_id: 'C', expected: 'value eq 3', actual: 'value = 2', reason: '实测未达标' }
+  test('上一轮失败标准与 focus 合法', () => {
+    const ok = mutate(validEnvelope, (e) => { e.inputs.previous_attempt = { supersedes_task_id: 'tsk_prev', review_round: 1, failed_criteria: [failed], focus: ['C'] } })
+    assert.ok(validateEnvelope(ok), JSON.stringify(validateEnvelope.errors, null, 2))
+  })
+  test('缺失败标准或夹带额外字段时拒绝', () => {
+    assert.equal(validateEnvelope(mutate(validEnvelope, (e) => { e.inputs.previous_attempt = { supersedes_task_id: 'tsk_prev', failed_criteria: [] } })), false)
+    assert.equal(validateEnvelope(mutate(validEnvelope, (e) => { e.inputs.previous_attempt = { supersedes_task_id: 'tsk_prev', failed_criteria: [{ ...failed, evidence: ['x'] }] } })), false)
+  })
+})
+
 // ------------------------------------------------------------ 凭据约束
 
 describe('凭据不得内联', () => {

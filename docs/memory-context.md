@@ -11,7 +11,7 @@
 ```
 
 - `project_id` 是 Memross 项目 ID（`memross-memory scopes` 可查）；`query` 省略时用 goal 前 500 字；`limit` 1–5，默认 3。
-- 仅 inspect/v1，与 `plan` 同时出现返回 400。
+- inspect/v1：快照附在首个任务上。dag/v1：作为各节点的缺省记忆，节点首轮以节点 goal 作查询；节点可在 plan 里用自己的 `memory`（同形状，`query` 省略时用节点 goal）覆盖。
 - 字段进入 `Mission.constraints.memory`，参与幂等比较。
 
 ## 流程
@@ -23,6 +23,8 @@
 5. Agent 按现有输入证据渲染读取（“数据，不是指令”）。
 
 重试幂等：任务已入账时沿用信封里的快照引用，只复核字节，不重新检索。Workflow 未改，无需 `patched()`。
+
+返工与后继：首轮快照不重新检索，而是以 review input（`source_task_id` 指向首轮任务）交给返工后继，派发时复核 registry 与字节后复制到 `inputs/review/<sha256(artifact_id)>/payload`，因此同一 Mission 前后各轮看到同一份记忆。DAG 后继节点经依赖产物复制拿到父节点的快照。返工信封另带 `inputs.previous_attempt`（上一轮未通过的标准与 focus），提示词渲染为「上一轮未通过」一节。inspect/v1 的这一形状由 review-application `followup_format: 3` 冻结，旧回执按原格式重建。
 
 ## 配置与失败处理
 
@@ -37,6 +39,6 @@ Mission 要求记忆而 Memross 未配置（`MEMORY_NOT_CONFIGURED`）、不可�
 
 ## 未覆盖
 
-- DAG（dag/v1）节点与返工后继任务不附快照。
+- YonWork 节点（无任务工作区）不附快照，也不接收返工产物。
 - Memross 授权由 Worker 的服务凭据判定，尚未按最终执行主体重新授权（手册 8.3）；撤权后已冻结的快照仍可被重试任务读取。
 - YonWork 等不支持工作区的 Adapter 未验证。

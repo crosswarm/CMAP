@@ -81,6 +81,28 @@ const resultArtifactMatches = (task: TaskRecord, artifact: Artifact): boolean =>
   return match.role === artifact.role && lowerSha(match.sha256) === lowerSha(artifact.sha256)
 }
 
+/** 控制面派发前冻结给本任务的输入（记忆快照、续作证据）：不在 Agent 结果里，以信封引用为证。 */
+export const FROZEN_INPUT_PRODUCERS = ['memross', 'cmap-continuation'] as const
+
+const frozenInputMatches = (task: TaskRecord, artifact: Artifact): boolean =>
+  artifact.task_id === task.id &&
+  (FROZEN_INPUT_PRODUCERS as readonly string[]).includes(artifact.producer.agent_id) &&
+  (task.envelope.inputs?.artifact_refs ?? []).filter((ref) =>
+    !Object.hasOwn(ref, 'source_task_id') &&
+    ref.artifact_id === artifact.artifact_id &&
+    ref.role === artifact.role &&
+    typeof ref.sha256 === 'string' && lowerSha(ref.sha256) === lowerSha(artifact.sha256)
+  ).length === 1
+
+const FROZEN_INPUT_ROLES = ['memory_context', 'continuation_input', 'handoff']
+
+/** 本任务收到的冻结输入（自己的或经 review input 继承的），返工后继原样继承，保证前后看到同一份记忆。 */
+export const frozenInputArtifactIds = (task: TaskRecord): string[] => [...new Set(
+  (task.envelope.inputs?.artifact_refs ?? [])
+    .filter((ref) => FROZEN_INPUT_ROLES.includes(ref.role))
+    .map((ref) => ref.artifact_id),
+)]
+
 const matchingArtifacts = async (
   store: Store,
   missionId: string,
@@ -111,7 +133,7 @@ const resolveArtifact = async (
   if (!task) throw inputInvalid('review input source task missing')
   assertTaskScope(mission, task)
   if (artifact.task_id !== task.id || artifact.mission_id !== mission.id) throw inputInvalid('review input artifact scope mismatch')
-  if (!resultArtifactMatches(task, artifact)) throw inputInvalid('review input result proof mismatch')
+  if (!resultArtifactMatches(task, artifact) && !frozenInputMatches(task, artifact)) throw inputInvalid('review input result proof mismatch')
   return { task, artifact }
 }
 
@@ -122,6 +144,12 @@ const descriptorFrom = (task: TaskRecord, artifact: Artifact): ReviewInputRef =>
   sha256: lowerSha(artifact.sha256),
   uri: reviewArtifactUri(artifact.artifact_id),
 })
+
+/** 单个同 Mission 产物的 review input 描述；不可共享或证明不符时抛 INPUT_INVALID。 */
+export const resolveReviewInputRef = async (store: Store, missionId: string, artifactId: string): Promise<ReviewInputRef> => {
+  const { task, artifact } = await resolveArtifact(store, missionId, artifactId)
+  return descriptorFrom(task, artifact)
+}
 
 export const resolveReviewInputs = async (
   store: Store,

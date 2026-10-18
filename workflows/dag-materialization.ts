@@ -20,8 +20,13 @@ import { preflightTaskAdmission, type AdmissionDenial } from './runner-admission
 import type { TaskEnvelopeV1 } from '#domain-model'
 import type { MissionPlanV1 } from '../packages/domain-model/src/generated/mission-plan.ts'
 import { INPUT_PAYLOAD, safeChildDir, safeMkdir, publishInput, verifiedArtifactBytes } from './artifact-files.ts'
+import { MEMORY_ROLE, freezeMemoryInput, registerMemoryArtifact, type FrozenInputRef, type MemoryDeps } from './memory-context.ts'
+import { resolveReviewInputRef } from './review-inputs.ts'
+import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 
 type DagNode = MissionPlanV1['nodes'][number]
+type ArtifactRefs = NonNullable<NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs']>
+type PreviousAttempt = NonNullable<NonNullable<TaskEnvelopeV1['inputs']>['previous_attempt']>
 
 const ACTOR = { type: 'system', id: 'dag-materializer' } as const
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
@@ -289,6 +294,7 @@ const buildEnvelope = (
   deps: readonly string[],
   artifactRefs: NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs'],
   supersedesTaskId?: string,
+  previousAttempt?: PreviousAttempt,
 ): TaskEnvelopeV1 => ({
   schema: 'cmap/task-envelope/v1',
   identity: {
@@ -313,6 +319,7 @@ const buildEnvelope = (
   inputs: {
     ...(artifactRefs && artifactRefs.length > 0 ? { artifact_refs: artifactRefs } : {}),
     parameters: { dependency_task_ids: deps, ...(node.yonwork ? { yonwork_policy_sha256: node.yonwork.policy_sha256 } : {}) },
+    ...(previousAttempt ? { previous_attempt: previousAttempt } : {}),
   },
   environment: { tenant: mission.tenant },
   execution_policy: {
@@ -336,6 +343,7 @@ const createDagTask = async (
   deps: readonly string[],
   artifactRefs: NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs'],
   supersedesTaskId?: string,
+  previousAttempt?: PreviousAttempt,
 ): Promise<void> => {
   const now = new Date().toISOString()
   await store.createTask({
@@ -350,7 +358,7 @@ const createDagTask = async (
       attempt,
       max_attempts: 1,
       lamport: 0,
-      envelope: buildEnvelope(mission, node, taskId, attempt, deps, artifactRefs, supersedesTaskId),
+      envelope: buildEnvelope(mission, node, taskId, attempt, deps, artifactRefs, supersedesTaskId, previousAttempt),
       result: null,
       binding: null,
       deps,
@@ -361,8 +369,67 @@ const createDagTask = async (
   })
 }
 
+/** YonWork 等无任务工作区的 Adapter 收不到工作区文件，不附记忆快照与返工产物。 */
+const usesWorkspace = (node: DagNode): boolean => node.capability !== 'yonwork.validate'
+
+/**
+ * 节点首轮记忆快照：节点 memory 优先，缺省继承 Mission 的 memory 并以节点 goal 作查询。
+ * 只在首轮检索；重试沿用已入账信封里的冻结引用，只复核字节。返工轮经 review input 继承首轮快照。
+ */
+const nodeMemoryInput = async (
+  deps: { workRoot: string; memory?: MemoryDeps },
+  mission: Mission,
+  node: DagNode,
+  taskId: string,
+  attempt: number,
+  existing: TaskRecord | null,
+): Promise<{ ref: FrozenInputRef; projectId: string; sizeBytes: number } | undefined> => {
+  if (attempt !== 1 || !usesWorkspace(node)) return undefined
+  const inherited = mission.constraints['memory'] as { project_id: string; limit?: number } | undefined
+  const config = node.memory ?? (inherited ? { project_id: inherited.project_id, ...(inherited.limit ? { limit: inherited.limit } : {}) } : undefined)
+  if (!config) return undefined
+  const { child } = await safeChildDir(deps.workRoot, taskId)
+  let ref = existing?.envelope.inputs?.artifact_refs?.find((r) => r.role === MEMORY_ROLE && !Object.hasOwn(r, 'source_task_id')) as FrozenInputRef | undefined
+  ref ??= await freezeMemoryInput(deps.memory, child, {
+    projectId: config.project_id, query: (config.query ?? node.goal).slice(0, 500), limit: config.limit ?? 3,
+  }, (digest) => `art_mem_${hash(JSON.stringify([taskId, digest])).slice(0, 32)}`)
+  const verified = await readVerifiedArtifact(child, { uri: ref.uri, role: ref.role, sha256: ref.sha256 })
+  return { ref, projectId: config.project_id, sizeBytes: verified.bytes.length }
+}
+
+/** 返工轮输入：上一轮未通过的标准与 focus，上一轮产物与冻结输入经 review input 交付（不可共享的跳过）。 */
+const reworkInputs = async (
+  store: Store,
+  mission: Mission,
+  node: DagNode,
+  priorTaskId: string,
+): Promise<{ refs: ArtifactRefs; previousAttempt?: PreviousAttempt }> => {
+  const review = (await store.listReviews(mission.id)).find((r) => exactReview('rework', mission.id, priorTaskId, r))
+  if (!review) throw new Error(`DAG prior attempt must be a completed rework: ${priorTaskId}`)
+  const decision = review.decision
+  const followup = decision.required_followups?.[0]
+  const failed = decision.failed_criteria ?? []
+  const refs: ArtifactRefs = []
+  if (usesWorkspace(node)) {
+    for (const artifactId of followup?.inputs?.artifact_refs ?? []) {
+      try { refs.push(await resolveReviewInputRef(store, mission.id, artifactId)) }
+      catch (error) { if (!(error instanceof RunnerAdmissionError)) throw error }
+    }
+  }
+  const [firstFailed, ...restFailed] = failed.map(({ criterion_id, expected, actual, reason }) => ({ criterion_id, expected, actual, reason }))
+  return {
+    refs,
+    ...(firstFailed ? { previousAttempt: {
+      supersedes_task_id: priorTaskId,
+      review_round: decision.review_round ?? review.round + 1,
+      failed_criteria: [firstFailed, ...restFailed],
+      ...(followup?.focus?.length ? { focus: [...followup.focus] } : {}),
+    } } : {}),
+  }
+}
+
 export const materializeDagNode = async (
-  deps: { store: Store; workRoot: string; runner: RunnerDescriptor },
+  deps: { store: Store; workRoot: string; runner: RunnerDescriptor; memory?: MemoryDeps },
   input: {
     missionId: string
     nodeId: string
@@ -398,6 +465,8 @@ export const materializeDagNode = async (
     input.acceptedDeps,
     node.deps,
   )
+  const memory = await nodeMemoryInput(deps, mission, node, taskId, input.attempt, existing)
+  const rework = input.attempt > 1 ? await reworkInputs(deps.store, mission, node, input.supersedesTaskId!) : undefined
   await createDagTask(
     deps.store,
     mission,
@@ -405,8 +474,10 @@ export const materializeDagNode = async (
     taskId,
     input.attempt,
     acceptedTaskIds,
-    artifactRefs,
+    [...(artifactRefs ?? []), ...(memory ? [memory.ref] : []), ...(rework?.refs ?? [])],
     input.supersedesTaskId,
+    rework?.previousAttempt,
   )
+  if (memory) await registerMemoryArtifact(deps.store, { missionId: mission.id, taskId, ref: memory.ref, projectId: memory.projectId, sizeBytes: memory.sizeBytes })
   return { taskId }
 }

@@ -21,6 +21,8 @@ export interface CreateTaskInput {
   readonly taskType?:string
   readonly parameters?:Record<string,unknown>
   readonly artifactRefs?:readonly NonNullable<NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs']>[number][]
+  /** 返工时上一轮未通过的事实，进信封 inputs.previous_attempt。 */
+  readonly previousAttempt?:NonNullable<NonNullable<TaskEnvelopeV1['inputs']>['previous_attempt']>
 }
 export interface CreateTaskOutput { readonly taskId:string }
 
@@ -48,6 +50,7 @@ const snapshot=(input:CreateTaskInput):CreateTaskInput=>{
       ...(input.taskType!==undefined?{taskType:input.taskType}:{}),
       ...(input.parameters!==undefined?{parameters:snapshotTaskParameters(input.parameters)}:{}),
       ...(input.artifactRefs!==undefined?{artifactRefs:structuredClone(input.artifactRefs)}:{}),
+      ...(input.previousAttempt!==undefined?{previousAttempt:structuredClone(input.previousAttempt)}:{}),
     }
   } catch { throw new Error('TASK_CREATION_INPUT_INVALID') }
 }
@@ -129,9 +132,10 @@ async function buildTask(store:Store,input:CreateTaskInput,taskId:string):Promis
       statement: input.goal ?? m.goal,
       success_definition: [firstCriterion, ...restCriteria],
     },
-    ...(input.parameters!==undefined || input.artifactRefs!==undefined ? {inputs:{
+    ...(input.parameters!==undefined || input.artifactRefs!==undefined || input.previousAttempt!==undefined ? {inputs:{
       ...(input.parameters!==undefined?{parameters:input.parameters}:{}),
       ...(input.artifactRefs!==undefined?{artifact_refs:[...input.artifactRefs]}:{}),
+      ...(input.previousAttempt!==undefined?{previous_attempt:input.previousAttempt}:{}),
     }} : {}),
     // 工作目录不进信封：本机绝对路径会让同一任务无法在别的机器上执行。
     environment: { tenant: m.tenant },

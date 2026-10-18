@@ -57,8 +57,16 @@ test('review application receipt validates format2 descriptor matrix shape', () 
     output: { outcome: 'rework', followupTaskIds: ['tsk_1'] },
   }), true, JSON.stringify(validate.errors, null, 2))
 
+  assert.equal(validate({
+    ...base,
+    followup_format: 3,
+    followup_inputs: [[descriptor]],
+    output: { outcome: 'rework', followupTaskIds: ['tsk_1'] },
+  }), true, 'format3：后继带 previous_attempt，矩阵形状同 format2')
+
   for (const invalid of [
     { ...base, followup_format: 2 },
+    { ...base, followup_format: 4, followup_inputs: [] },
     { ...base, followup_inputs: [[]] },
     {
       ...base,

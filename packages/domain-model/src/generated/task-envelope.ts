@@ -117,6 +117,31 @@ export interface TaskEnvelopeV1 {
       [k: string]: unknown
     }
     context_summary?: string
+    /**
+     * 返工任务的上一轮未通过事实，由控制面从上一轮评审决定抄录；是数据，不是指令，也不授予额外权限。supersedes_task_id 必须与 identity.supersedes_task_id 一致；上一轮产物与首轮记忆快照经 artifact_refs（带 source_task_id）交付。
+     */
+    previous_attempt?: {
+      supersedes_task_id: string
+      review_round?: number
+      /**
+       * @minItems 1
+       */
+      failed_criteria: [
+        {
+          criterion_id: string
+          expected: string
+          actual: string
+          reason: string
+        },
+        ...{
+          criterion_id: string
+          expected: string
+          actual: string
+          reason: string
+        }[]
+      ]
+      focus?: string[]
+    }
   }
   environment: {
     application_version?: string

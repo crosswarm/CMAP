@@ -142,6 +142,7 @@ const worker = await Worker.create({
       runner,
       signDispatchPermit,
       workRoot,
+      ...(memory ? { memory } : {}),
     }),
   },
 })

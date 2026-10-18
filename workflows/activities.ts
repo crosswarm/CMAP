@@ -36,12 +36,12 @@ import { AdapterError, type AgentAdapter, type DispatchContext, type DispatchPer
 import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
 
 import {createLedgerTask, taskCreationId, MISSION_ACTOR as ACTOR, type CreateTaskInput, type CreateTaskOutput} from './task-creation.ts'
-import { MEMORY_ROLE, fetchMemorySnapshot, type MemoryDeps } from './memory-context.ts'
-import { INPUT_PAYLOAD, publishInput, safeChildDir, safeMkdir } from './artifact-files.ts'
+import { MEMORY_ROLE, freezeMemoryInput, registerMemoryArtifact, type FrozenInputRef, type MemoryDeps } from './memory-context.ts'
+import { safeChildDir } from './artifact-files.ts'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import { applyReviewApplication } from './review-application.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
-import { prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
+import { frozenInputArtifactIds, prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -382,35 +382,15 @@ export const createActivities = (deps: ActivityDeps) => {
       // 重试幂等：任务已入账就沿用信封里冻结的快照引用，只复核字节，绝不重新检索——
       // 重新检索可能拿到不同内容，导致同一任务的信封前后不一致。
       const existing = await store.getTask(taskId)
-      let ref = existing?.envelope.inputs?.artifact_refs?.find((r) => r.role === MEMORY_ROLE)
+      let ref = existing?.envelope.inputs?.artifact_refs?.find((r) => r.role === MEMORY_ROLE) as FrozenInputRef | undefined
       if (existing && !ref) return createLedgerTask(store,input)
-      if (!ref) {
-        if (!deps.memory) throw new Error('MEMORY_NOT_CONFIGURED')
-        const { bytes } = await fetchMemorySnapshot(deps.memory, {
-          projectId: memory.project_id, query: (memory.query ?? mission.goal).slice(0, 500), limit: memory.limit ?? 3,
-        })
-        const digest = createHash('sha256').update(bytes).digest('hex')
-        const artifactId = `art_mem_${digest.slice(0, 32)}`
-        const bucket = createHash('sha256').update(artifactId).digest('hex')
-        await publishInput(await safeMkdir(child, ['inputs', 'memory', bucket]), bytes)
-        ref = { artifact_id: artifactId, uri: join('inputs', 'memory', bucket, INPUT_PAYLOAD), role: MEMORY_ROLE, sha256: digest }
-      }
+      ref ??= await freezeMemoryInput(deps.memory, child, {
+        projectId: memory.project_id, query: (memory.query ?? mission.goal).slice(0, 500), limit: memory.limit ?? 3,
+      }, (digest) => `art_mem_${digest.slice(0, 32)}`)
       // 与 Agent 侧同一道复核：路径不越界、散列一致、不含已知凭据模式。
-      const verified = await readVerifiedArtifact(child, { uri: ref.uri!, role: ref.role, sha256: ref.sha256! })
+      const verified = await readVerifiedArtifact(child, { uri: ref.uri, role: ref.role, sha256: ref.sha256 })
       const out = await createLedgerTask(store, { ...input, artifactRefs: [ref] })
-      if (!(await store.listArtifacts(out.taskId)).some((a) => a.artifact_id === ref.artifact_id)) {
-        const now = new Date()
-        await store.putArtifact({
-          artifact_id: ref.artifact_id, mission_id: mission.id, task_id: out.taskId, role: MEMORY_ROLE, uri: ref.uri!,
-          media_type: 'text/markdown; charset=utf-8', size_bytes: verified.bytes.length, sha256: verified.sha256, version: 1,
-          state: 'AVAILABLE',
-          producer: { agent_id: 'memross', adapter_version: 'memory-context/v1', execution_session_id: ref.artifact_id },
-          provenance: { source: 'memross', project_id: memory.project_id },
-          retention: { retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(), immutable: true },
-          security: { classification: 'internal', contains_secrets: false, contains_pii: false, allowed_roles: [] },
-          created_at: now.toISOString(),
-        })
-      }
+      await registerMemoryArtifact(store, { missionId: mission.id, taskId: out.taskId, ref, projectId: memory.project_id, sizeBytes: verified.bytes.length })
       return out
     },
 
@@ -1027,6 +1007,7 @@ export const createActivities = (deps: ActivityDeps) => {
       }
 
       const m = await store.getMission(t.mission_id)
+      const followupInputIds = [...new Set([...t.result.artifacts.map((a) => a.artifact_id), ...frozenInputArtifactIds(t)])]
       const budget = m?.constraints['max_additional_cycles']
       const maxCycles = typeof budget === 'number' ? budget : DEFAULT_MAX_CYCLES
 
@@ -1056,9 +1037,8 @@ export const createActivities = (deps: ActivityDeps) => {
                   // focus 指明这一轮该收敛哪几条，避免下一轮重复无效尝试
                   focus: [m?.goal ?? envelope.goal.statement,
                     ...failed.map((f) => `${f.criterion_id}：期望 ${f.expected}，实测 ${f.actual}`)],
-                  ...(t.result.artifacts.length > 0
-                    ? { inputs: { artifact_refs: t.result.artifacts.map((a) => a.artifact_id) } }
-                    : {}),
+                  // 上一轮产物与本任务收到的冻结输入（首轮记忆快照等）一起交给后继，前后看到同一份记忆。
+                  ...(followupInputIds.length > 0 ? { inputs: { artifact_refs: followupInputIds } } : {}),
                 },
               ],
               stop_conditions: { max_additional_cycles: maxCycles },
