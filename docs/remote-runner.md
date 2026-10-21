@@ -1,6 +1,6 @@
 # 远程 runner（单用户双主机，ADR-0006）
 
-状态：Stage 2–3（含应用层请求/响应认证）已实现；Stage 4 部分完成（2026-10-18）——lap 守护进程以 launchd `com.cmap.runner` 运行（代码 `a4fb971`，只监听 lap 的 Tailscale IPv4），`scripts/e2e-remote-runner.mjs` 真实两机实跑通过：健康探测、派发与同 runner 重放、请求受众不符/未签名/过期/重放 401、跨 runner 许可 CLAIM_MISMATCH、32 秒完成、产物在 CrossMini 复算哈希一致、lap 上运行记录 1 条。按 [ADR-0006 修订 1](adr/0006-single-user-dual-host-exception.md) 不配置 ACL。2026-10-19 经 Temporal 全链路实测（`scripts/e2e-remote-mission.mjs`，见下「Stage 4 实测」）：派发到 `codex@lap` 完成、lap 离线回落（C5）、执行中守护进程重启与 Worker 重启（inspect/v1）完成且只执行 1 次、跨主机 DAG 的 lap→CrossMini 方向通过；发现并修复（`9edbd69`，lap 尚未部署）DAG 输入下发到 lap 的契约缺口。尚未实测：CrossMini→lap 的 DAG 子节点、执行中 lap 离线（生产默认与缩短宽限两种）。同日按实测发现做了三处修正（见下「2026-10-19 修正」），lap 需部署后复测。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。全部闸口落地并验证前，lap 不接收真实任务。
+状态：Stage 2–4 已完成（2026-10-21）。lap 守护进程以 launchd `com.cmap.runner` 运行，代码 `af0cbe2`，只监听 lap 的 Tailscale IPv4；按 [ADR-0006 修订 1](adr/0006-single-user-dual-host-exception.md) 不配置 ACL。两机真实实测全部通过（见下「Stage 4 复测（2026-10-21）」）：协议层签名与防重放；经 Temporal 派发到 `codex@lap`；能力不匹配在路由层回落；跨主机 DAG 双向；lap 离线回落；执行中守护进程重启；Worker 重启（inspect/v1 与 dag/v1）；执行中 lap 失联（生产默认与缩短宽限）。闸口逐条状态见[威胁模型「单用户双主机闸口」](threat-model.md#单用户双主机闸口)。
 
 ## 形态
 
@@ -193,9 +193,22 @@ CrossMini 起真实 Worker（`apps/worker/src/main.ts`），lap 守护进程为 
 
 旧版 lap（`a4fb971`）的 health 应答没有 `admission`，新 CrossMini 会判其不可用、全部回落本地；lap 与 CrossMini 需同时更新。
 
+## Stage 4 复测（2026-10-21，lap 与 CrossMini 均为 `af0cbe2`）
+
+| 场景 | 结果 |
+|---|---|
+| `e2e-remote-runner.mjs`（两机，不经 Temporal） | ✅ 新 health 契约（含 `admission`）跨主机验签通过；受众不符、未签名、过期、重放均 401；跨 runner 许可 CLAIM_MISMATCH；20 秒完成，产物哈希一致 |
+| `capability` | ✅ ROUTING_DECIDED 依次为 `codex@lap` skipped(`capability_mismatch`)、`codex` selected，fallback=true；本地完成，lap 运行记录 0、本地 1 |
+| `dag`（C1 双向） | ✅ `lc@lap`：输入哈希在信封、父产物、CrossMini 字节、lap 落盘字节四处一致，产物 CrossMini 复算等于 lap 原件。`rp@lap → rc@CrossMini` 同样通过。子节点都在父节点 REVIEW_ACCEPTED 之后创建 |
+| `worker-restart`（dag/v1） | ✅ 执行中 SIGKILL CrossMini Worker，新 Worker 接管后 COMPLETED；ROUTING_DECIDED=1、TASK_STARTED=1，lap 运行记录 1、进程组采样 1 |
+| `grace`（`CMAP_REMOTE_OFFLINE_GRACE_SECONDS=30`） | ✅ 失联 34 秒后判 `EXECUTION_UNCERTAIN:BINDING_NOT_FOUND`。任务事件依次为 TASK_STARTED、INPUT_REQUIRED、TASK_FAILED（dag/v1 节点升级收尾时关为 FAILED_TERMINAL）。binding 保留在 lap，ROUTING_DECIDED=1，任务数 1，本地运行记录 0，lap 运行记录 1 |
+| `lap-offline`（生产默认） | ✅ 失联 152 秒后判执行不确定（宽限 = 剩余等待时间的一半，先于 300 秒任务超时）。其余判据同 `grace` |
+
+说明：dag/v1 的执行不确定先在账本记 INPUT_REQUIRED，节点升级收尾时再关为 FAILED_TERMINAL，binding 不动。是否在 lap 恢复后人工核对其运行记录与产物，属于升级处理的一部分。
+
 ## 已知边界
 
-- 所有端点已有应用层请求认证与应答签名，但 **Tailscale ACL 仍未配置**，仍是网络层缺口：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求会被读头后 401，但仍占连接）。ACL 落地并实测前，不得在 tailnet 上启动守护进程接收真实任务。
+- 所有端点已有应用层请求认证与应答签名；按 ADR-0006 修订 1 **不配置 Tailscale ACL**。残余风险已接受：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求读完头就 401，但仍占连接）。控制面 5433/7233 只监听 127.0.0.1。
 - 应用层不加密。私钥泄露即失效：CrossMini 的 `CMAP_PERMIT_KEY_FILE` 一旦泄露，攻击者既能伪造请求也能签派发许可；轮换须同时更新 lap 上的 `CMAP_PERMIT_PUBLIC_KEY_FILE`。lap 的 `CMAP_RUNNER_KEY_FILE` 泄露则可伪造应答，须同步更新 CrossMini 的 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`。
 - nonce 防重放缓存在内存，守护进程重启后窗口内（≤ 约 4 秒）理论上可重放；时钟偏差超过 2 秒的请求一律被拒，两机需要 NTP 同步。
 - 产物随结果以 base64 内联拉取，单个约 16 MiB 上限，适合报告类证据，不适合大文件。

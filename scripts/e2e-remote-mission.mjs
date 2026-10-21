@@ -416,7 +416,9 @@ const offlineDuringRun = async (scenario, graceSeconds) => {
   check(countOf(evs, 'TASK_STARTED', t.id) === 1, 'TASK_STARTED 不是 1 条')
   check((await store.queryTasks({ missionId })).length === 1, '派生了新任务（重跑）')
   check(!(await localRunRecord(t.id)), '本地出现运行记录（回落本地重跑）')
-  check(outcome.reason?.startsWith('EXECUTION_UNCERTAIN') && t.state === 'INPUT_REQUIRED', `应为执行不确定（宽限先于 300 秒任务超时）：${outcome.reason} / ${t.state}`)
+  // 执行不确定先把任务转为 INPUT_REQUIRED（账本留痕）；dag/v1 节点升级收尾时再统一关为 FAILED_TERMINAL，binding 仍保留。
+  check(outcome.reason?.startsWith('EXECUTION_UNCERTAIN') && countOf(evs, 'INPUT_REQUIRED', t.id) === 1 && ['INPUT_REQUIRED', 'FAILED_TERMINAL'].includes(t.state),
+    `应为执行不确定（宽限先于 300 秒任务超时）：${outcome.reason} / ${t.state} / INPUT_REQUIRED 事件 ${countOf(evs, 'INPUT_REQUIRED', t.id)}`)
   ok(`binding ${t.binding.adapter}@${t.binding.runner_id} 保留，ROUTING_DECIDED=1，TASK_STARTED=1，任务数 1，本地运行记录 0`)
   ok(`任务事件：${evs.filter((e) => e.task_id === t.id).map((e) => e.event_type).join(' → ')}`)
   for (let i = 0; i < 30 && typeof daemonPid() !== 'number'; i += 1) await sleep(1_000)
