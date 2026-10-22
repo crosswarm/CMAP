@@ -497,8 +497,11 @@ export const createDagActivities = (deps: ActivityDeps & {
       const byNode = new Map(receipts.map((o) => [o.nodeId, o]))
       const taskIds = tasks.map((t) => t.id).sort()
 
+      // 执行不确定的任务保持 INPUT_REQUIRED 等人决定（ADR-0006 第 7 条）；其节点已按 escalated 收尾即视为已结束。
+      const awaitingHuman = (task: TaskRecord): boolean => task.state === 'INPUT_REQUIRED' &&
+        byNode.get(task.envelope.identity.plan_node_id ?? '')?.status === 'escalated'
       for (const task of tasks) {
-        if (active(task)) throw new Error(`DAG Mission ${missionId} still has active task ${task.id}`)
+        if (active(task) && !awaitingHuman(task)) throw new Error(`DAG Mission ${missionId} still has active task ${task.id}`)
       }
 
       const outcomes: DagNodeOutcome[] = []

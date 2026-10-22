@@ -453,6 +453,22 @@ await acts.finishDagNode({ missionId: m.id, nodeId: 'rootA', taskId, status: 'fa
 
     assert.equal(out.status, 'escalated')
     assert.equal((await store.getTask(taskId))?.state, 'INPUT_REQUIRED')
+
+    // 收尾不得把等人决定的任务当成仍在执行（发布两机验收 grace 场景发现的回归）
+    const final = await acts.finalizeDagMission(m.id)
+    assert.equal(final.state, 'ESCALATED')
+    assert.equal((await store.getMission(m.id))?.state, 'ESCALATED')
+    assert.equal((await store.getTask(taskId))?.state, 'INPUT_REQUIRED')
+  })
+
+  test('收尾仍拒绝节点未升级却停在 INPUT_REQUIRED 的任务', async () => {
+    const m = mission('mis-input-required-unsettled')
+    const { store, acts } = await make(m)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+    await toRunning(store, taskId)
+    await store.transitionTask({ taskId, to: 'INPUT_REQUIRED', actor: ACTOR, eventType: 'INPUT_REQUIRED', idempotencyKey: `${taskId}:input-required` })
+
+    await assert.rejects(acts.finalizeDagMission(m.id), /still has active task/)
   })
 
   describe('Agent 回应的 criterion_results 在收结果处归一化，DAG 复核与硬门槛看到同一份数据', () => {
