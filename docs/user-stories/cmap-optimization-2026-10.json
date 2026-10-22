@@ -1,0 +1,193 @@
+[
+  {
+    "id": "S01",
+    "category": "functional",
+    "description": "新 Mission 一律走 dag/v1：不带 plan 的请求合成单节点计划，inspect/v1 只保留给旧历史重放（审计第 12 条）",
+    "steps": [
+      "POST /v1/missions 不带 plan 时生成单节点 mission-plan.v1，启动 dag/v1，行为与原 inspect/v1 的目标、验收、风险、返工预算一致",
+      "inspect/v1 Workflow 与其 Activity 保留注册，仅供已有历史跑完；新代码路径不再启动它",
+      "先写失败测试：无 plan 的创建请求断言启动的 Workflow 类型为 dag/v1",
+      "npm run check 全过；node scripts/e2e-mission.mjs 真实 Codex 跑通（脚本按需改为走 dag/v1）"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S02",
+    "category": "functional",
+    "description": "审批等待改为 Signal 唤醒加 condition 超时回读账本，不再每秒轮询（审计第 13 条）",
+    "steps": [
+      "API 写入审批决定后向 Mission Workflow 发 approvalDecided 信号（只作门铃，不带业务数据）；信号发送失败不影响审批落账",
+      "dag/v1 审批等待用 condition(门铃, 10 分钟) 唤醒后经 Activity 回读账本；patched() 区分新旧历史",
+      "先写失败测试：等待审批期间 Workflow 历史事件数在模拟的长时间内保持很小（不随秒数线性增长）；收到信号后立即继续",
+      "旧历史重放测试通过；npm run check 全过；node scripts/e2e-approval.mjs 真实通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S03",
+    "category": "functional",
+    "description": "dag/v1 执行不确定的任务保持 INPUT_REQUIRED，不被改写为 FAILED_TERMINAL（审计第 10 条）",
+    "steps": [
+      "toFailedTerminal 遇到 INPUT_REQUIRED 不改状态，节点仍记 escalated",
+      "先写失败测试：执行不确定的 DAG 节点升级后任务状态仍为 INPUT_REQUIRED",
+      "把 scripts/e2e-remote-mission.mjs 中放宽为两种终态都接受的断言改回只接受 INPUT_REQUIRED",
+      "npm run test:workflow 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S04",
+    "category": "functional",
+    "description": "criterion_results 在收结果处统一去重并拒绝未知标准，DAG 复核与硬门槛看到同一份数据（审计第 11 条）",
+    "steps": [
+      "先写失败测试：Agent 重复回一条标准时，DAG 节点按硬门槛通过而不是 NODE_EXECUTION_ERROR",
+      "未知 criterion_id 的处理与 inspect/硬门槛一致且有测试",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S05",
+    "category": "functional",
+    "description": "受限产物不进入 DAG 下游输入与 Memross 回写（审计第 9 条）",
+    "steps": [
+      "copyParentArtifacts 只复制 artifactShareable 的产物",
+      "proposeTaskKnowledge 对含不可共享产物的任务不回写",
+      "两条各有先失败后通过的测试",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S06",
+    "category": "integration",
+    "description": "SSE 事件流与 Mission 列表改为增量/有界读取（审计第 14 条）",
+    "steps": [
+      "租户事件流用一条按租户过滤的查询，不再逐 Mission 查询；不得用 lamport 最大值跳过晚提交事件",
+      "GET /v1/missions 默认返回非终态加最近 N 条，前端适配",
+      "先写失败测试：租户流查询次数不随 Mission 数线性增长；列表有上限",
+      "node scripts/e2e-events.mjs 真实通过；npm run check 全过；npm run build:web 通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S07",
+    "category": "integration",
+    "description": "Temporal 与 UI 镜像钉死版本；账本与 Temporal 库可备份可恢复（审计第 15 条）",
+    "steps": [
+      "docker-compose 默认版本钉为当前运行的 1.29.3 与对应 UI 版本，不用 latest",
+      "新增备份脚本：pg_dump cmap 与 temporal 两个库到本机目录，保留最近 N 份",
+      "实测一次备份并恢复到临时数据库，抽查行数一致",
+      "按 AGENTS.md：实际启停一次栈并用 node scripts/verify-temporal.mjs 判定就绪"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S08",
+    "category": "integration",
+    "description": "PG 专属规则进入默认检查（审计第 16 条）",
+    "steps": [
+      "npm run check 包含 test:pg",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S09",
+    "category": "edge-case",
+    "description": "删除无调用方的代码：Store 的 setTaskBinding/findReadyTasks/listUndeliveredEvents/markEventDelivered/linkArtifacts 与 activities 的 acquireTaskLock/renewTaskLock/releaseTaskLock 及其测试（审计第 17 条）",
+    "steps": [
+      "删除前全仓 grep 确认无生产调用方",
+      "同步删除只服务它们的测试与 events_undelivered_idx 索引（迁移幂等）",
+      "npm run check 与 npm run test:pg 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S10",
+    "category": "edge-case",
+    "description": "凭据检测覆盖 *_TOKEN/SECRET/KEY/PASSWORD 赋值与 URL 内嵌口令（审计第 18 条）",
+    "steps": [
+      "先写失败测试：MEMROSS_TOKEN=<32hex> 与 postgres://user:pass@host/db 被识别",
+      "不误报现有仓库内容：pre-commit 对现有文件不新增命中",
+      "npm test 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S11",
+    "category": "edge-case",
+    "description": "无进展判定按与 expected 的差距判断改善方向（审计第 19 条）",
+    "steps": [
+      "先写失败测试：gte 标准从 50 升到 75 记为有改善，从 75 降到 50 记为未改善",
+      "npm test 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S12",
+    "category": "edge-case",
+    "description": "审批决定的 decided_by 必须等于服务端配置的 owner（Must fix 第 1 条遗留）",
+    "steps": [
+      "先写失败测试：decided_by 与 owner 不符返回 403 且不落账",
+      "既有审批冲突与并发测试改用合法身份后语义不变",
+      "e2e 脚本与 WebUI 适配；npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S13",
+    "category": "edge-case",
+    "description": "无 runsDir 时 codex 结果文件也不落在工作区（Must fix 第 2 条遗留）",
+    "steps": [
+      "先写失败测试：standalone 模式下结果文件路径不在工作区内",
+      "去掉对应 shortcut 注释；npm test 全过；node scripts/e2e-single-hop.mjs 真实通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S14",
+    "category": "edge-case",
+    "description": "Agent 自报重复 artifact_id 时每份产物都入账（Must fix 第 5 条遗留）",
+    "steps": [
+      "先写失败测试：两份产物自报同一 artifact_id 时两份都入账、证据引用不丢",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S15",
+    "category": "functional",
+    "description": "ADR-0007 影子模式：审批闸口先问 Jev 并记录 jev-decision，但一律转人工；可统计一致率",
+    "steps": [
+      "按 delegation-policy.v1 从 CMAP_DELEGATION_POLICY_FILE 加载策略，校验文件权限、过期、租户与 sha256；缺失即不调用",
+      "审批闸口在 Activity 中调用 Jev（复用 jev-approval 客户端，只送可信字段），写 JEV_DECIDED 事件（jev-decision.v1，route=human），不改审批决定",
+      "WebUI 审批详情展示 Jev 决定；脚本统计 Jev 与真人决定一致率",
+      "先写失败测试；Jev 不可用时记录 jev_unavailable 且审批照常等待真人；npm run check 全过；真实 Jev 调用一次验证",
+      "ADR-0007 状态改为已接受（影子模式已实现，enforce 未开启）"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S16",
+    "category": "integration",
+    "description": "本机执行也走 runner 守护进程（stretch：时间不足可延期并如实记录）",
+    "steps": [
+      "CrossMini 本机启动 runner 守护进程，Worker 对本机 Codex 也经 remote-runner 协议派发",
+      "Worker 重启不影响本机执行中的 Agent；npm run check 全过；真实链路验证"
+    ],
+    "passes": false
+  },
+  {
+    "id": "S17",
+    "category": "integration",
+    "description": "发布：推送 main，重启 CrossMini 服务并真实验收，部署 lap 并复测两机",
+    "steps": [
+      "全量检查通过后快进合并到 main 并推送",
+      "CrossMini：按新 compose 重启栈，verify-temporal 通过，重启 API 与 Worker，node scripts/e2e-mission.mjs 与 e2e-approval.mjs 真实通过",
+      "lap：更新到新版本并重启 runner 守护进程，node scripts/e2e-remote-mission.mjs 复跑 remote、capability、dag、lap-restart、worker-restart、grace 场景",
+      "更新 docs/remote-runner.md 与架构文档的状态表"
+    ],
+    "passes": false
+  }
+]

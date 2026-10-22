@@ -38,3 +38,7 @@
 - 真实验证期间修复：多轮审批状态事件幂等键带 Task ID；Codex 子进程 TMPDIR 解析为无符号链接的物理路径。
 
 <promise>FINISHED</promise>
+
+# 优化轮（2026-10-22 起，截止 2026-10-23 14:00）
+
+范围见 `docs/user-stories/cmap-optimization-2026-10.json`（S01–S17）。主会话编排子代理逐条实现，每条由主会话核验后才标 `passes: true` 并提交；工作分支 `optimization-2026-10-22`，发布时快进合并到 main。
