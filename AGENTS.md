@@ -30,7 +30,7 @@
 2. Adapter **一律显式传沙箱档**（`-s`），绝不继承本机 codex 的 `danger-full-access` 默认值。
 3. **身份字段由控制面填充**，不取 Agent 自述；**证据哈希由控制面独立复算**，不采信 Agent 自报。
 4. `controlled` 与 `mutating` 的授权**互不蕴含**，不得合并为单一批准。Agent 不得自批，也不得把自身判断伪装成人工授权。
-   - Jev 代为决定见 [ADR-0007](docs/adr/0007-jev-delegated-decisions.md)（提议中、**未实现**）：只能在真人签发的委托策略内执行，以 `jev:` 身份记录，不算人工授权。实现并验收前，controlled/mutating 仍须真人批准。
+   - Jev 代为决定见 [ADR-0007](docs/adr/0007-jev-delegated-decisions.md)（已接受；**只实现了影子模式**，enforce 未开启）：只能在真人签发的委托策略内执行，以 `jev:` 身份记录，不算人工授权。影子模式只记录 Jev 决定、不改审批；controlled/mutating 仍须真人批准。
 5. 凭据只允许 `secretref://` 引用；日志与 Artifact 只存事件类型、时间、关联 ID、终态和内容哈希，不存提示词正文。
 
 ## Jev 审批辅助
@@ -38,7 +38,7 @@
 - 已有授权内的常规可逆操作直接推进；需要语义判断时，用 `node scripts/jev-approval.mjs`
   输入脱敏的 `approval-context`，先核实授权来源和 scope，不让模型替自己补授权。
 - CMAP 待批请求用 `node scripts/jev-approval.mjs --approval <id>` 获取独立建议。
-  建议不等于真人批准，不改 `Approval.decision`，不覆盖宿主工具拒绝。代为决定的设计在 ADR-0007，尚未实现。
+  建议不等于真人批准，不改 `Approval.decision`，不覆盖宿主工具拒绝。代为决定见 ADR-0007，目前只有影子模式（记录、不执行）。
 - 配置、契约、失败处理和两层边界见 [docs/approval-advisor.md](docs/approval-advisor.md)。
 
 ## 按任务执行与验证

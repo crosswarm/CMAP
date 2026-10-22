@@ -52,7 +52,7 @@ CMAP_API_PORT=8787 node scripts/jev-approval.mjs --approval <approval-id>
 当前接口还不能验证真人身份，不能把模型置信度当作这个缺口的替代品。
 
 这份契约已在 [ADR-0007](adr/0007-jev-delegated-decisions.md) 中提出（`delegation-policy.v1`、
-`jev-decision.v1`），**尚未实现**。实现前本 CLI 仍只给建议，`can_continue` 对
+`jev-decision.v1`），目前**只实现了影子模式**：审批闸口记录 Jev 决定，不改审批，enforce 未开启。本 CLI 仍只给建议，`can_continue` 对
 controlled/mutating 恒为 false；实现后它也不变，代为决定只走新契约。
 
 业务审批已另行补齐确定性保护：终态不可改写、同身份同决定幂等、过期不能批准、
