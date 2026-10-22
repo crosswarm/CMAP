@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 import type { TaskEnvelopeV1 } from "#domain-model";
 import { AdapterError } from "#adapter-sdk";
+import { hasKnownSecret } from "../../packages/adapter-sdk/src/secret-patterns.ts";
 import { normalizeAgentOutput, readVerifiedArtifact, renderTaskPrompt } from "../../packages/adapter-sdk/src/structured-output.ts";
 
 const envelope: TaskEnvelopeV1 = {
@@ -268,6 +269,31 @@ test('known credentials in result metadata are rejected before schema diagnostic
     await assert.rejects(normalizeAgentOutput(raw, envelope, '/unused'), secretError('RESULT_SECRET_DETECTED'));
   }
   await assert.rejects(normalizeAgentOutput(safeOutput(), envelope, '/unused', syntheticSecret), secretError('RESULT_SECRET_DETECTED'));
+});
+
+test('凭据检测覆盖 *_TOKEN/SECRET/KEY/PASSWORD 赋值与 URL 内嵌口令', () => {
+  // 运行时拼接，避免测试源码本身命中 pre-commit 扫描
+  const hex32 = 'a1b2c3d4'.repeat(4);
+  for (const text of [
+    `MEMROSS_TOKEN=${hex32}`,
+    `export DB_PASSWORD="${hex32}"`,
+    `STRIPE_SECRET: ${hex32}`,
+    `OPENAI_KEY=${hex32}`,
+    'postgres://' + 'user:' + 'hunter2pass' + '@db.internal/cmap',
+    'redis://' + ':' + 'hunter2pass' + '@10.0.0.5:6379',
+  ]) {
+    assert.equal(hasKnownSecret(text), true, text);
+  }
+  for (const text of [
+    'MEMROSS_TOKEN=',
+    'TOKEN_LIMIT=4096',
+    'KEY=short',
+    'postgres://user@host/db',
+    'https://example.com/a:b/c',
+    'see http://host:8080/path',
+  ]) {
+    assert.equal(hasKnownSecret(text), false, text);
+  }
 });
 
 test('verified artifact rejects synthetic credentials with correct hashes and no git exemptions', async t => {
