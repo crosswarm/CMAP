@@ -88,3 +88,10 @@
 ## S07（通过）
 
 - 发布前先 `node scripts/backup-db.mjs` 备份（cmap 1.4 MB、temporal 3.7 MB），再按钉死的 compose `up -d` 重建 cmap-temporal 与 cmap-temporal-ui；`node scripts/verify-temporal.mjs` 通过，服务端 1.29.3。
+
+## S16（通过）与 S17 进行中
+
+- S17 已完成：快进合并并推送 main `a52251e`；CrossMini 栈按钉死镜像重启；lap 部署 `a52251e`（`~/.local/share/cmap-runner/a52251e`，复用 a4fb971 的 node_modules，锁文件未变）并 kickstart，守护进程就绪。
+- CrossMini 真实验收（独立 schema，进程内 Codex）：`e2e-mission` 默认模式 22.2 秒完成；`e2e-approval` 29 秒通过，决定后 794 毫秒派发，两条 JEV_DECIDED（jev-1.14.0，shadow）。
+- S16 真实验收：后台进程方式在 127.0.0.1:8791 起本机 runner（测试专用许可密钥，不复用 lap 的），`e2e-mission` 28.2 秒完成，binding 为 remote-runner-adapter@crossmini-runner，守护进程原件与控制面副本哈希一致；执行中 SIGKILL Worker 后 Codex 进程组存活，新 Worker 拉起后完成，TASK_STARTED 恰 1 条、运行记录 1 条。
+- 未做：本机 runner 未安装为 launchd 常驻；`e2e-mission.mjs --restart-worker` 在本机 runner 模式下读不到运行记录（记录在守护进程工作区），本次手工编排同等流程。

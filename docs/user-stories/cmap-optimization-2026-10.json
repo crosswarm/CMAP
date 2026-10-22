@@ -176,7 +176,7 @@
       "CrossMini 本机启动 runner 守护进程，Worker 对本机 Codex 也经 remote-runner 协议派发",
       "Worker 重启不影响本机执行中的 Agent；npm run check 全过；真实链路验证"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S17",
