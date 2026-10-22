@@ -188,6 +188,6 @@
       "lap：更新到新版本并重启 runner 守护进程，node scripts/e2e-remote-mission.mjs 复跑 remote、capability、dag、lap-restart、worker-restart、grace 场景",
       "更新 docs/remote-runner.md 与架构文档的状态表"
     ],
-    "passes": false
+    "passes": true
   }
 ]

@@ -85,7 +85,7 @@ Worker 新增变量（不设 `CMAP_LOCAL_RUNNER_URL` 则行为不变，仍是进
 - 本机 Codex 从此以 `-m $CMAP_CODEX_MODEL` 显式指定模型（守护进程必填），不再依赖 CrossMini `~/.codex` 默认模型。
 - 本机任务的 `binding.runner_id` 与产物 provenance 由 Worker 的 `RUNNER_ID` 变为本机守护进程的 `RUNNER_ID`；切换前已绑定、尚未结束的进程内任务（`codex-adapter`）在切换后的 Worker 上找不到 Adapter，切换前应等其收尾。
 - 这不是第二台机器：守护进程与控制面同机，只经回环访问，不扩大 ADR-0006 的范围。
-- 验证：`tests/workflow/local-runner.test.ts`（两台守护进程同时注册：各自执行 1 次、binding/provenance 按 runner 区分、Worker 重启按 runner 找回 lap、取消落到所属 runner、重复注册拒绝）；CrossMini 真实部署与 Worker 重启实测 ⬜ 未做。
+- 验证：`tests/workflow/local-runner.test.ts`（两台守护进程同时注册：各自执行 1 次、binding/provenance 按 runner 区分、Worker 重启按 runner 找回 lap、取消落到所属 runner、重复注册拒绝）；2026-10-22 CrossMini 真实实测通过：守护进程以后台进程运行于 127.0.0.1:8791，`e2e-mission` 完成且 binding 为 `remote-runner-adapter@crossmini-runner`；执行中 SIGKILL Worker 后 Codex 进程组存活，新 Worker 拉起后完成，TASK_STARTED 与运行记录各 1 条。尚未安装为 launchd 常驻；`e2e-mission.mjs --restart-worker` 在此模式下读不到守护进程工作区的运行记录，需手工编排。
 
 ## lap（runner 守护进程）配置
 
@@ -232,6 +232,20 @@ CrossMini 起真实 Worker（`apps/worker/src/main.ts`），lap 守护进程为 
 | `lap-offline`（生产默认） | ✅ 失联 152 秒后判执行不确定（宽限 = 剩余等待时间的一半，先于 300 秒任务超时）。其余判据同 `grace` |
 
 说明：dag/v1 的执行不确定先在账本记 INPUT_REQUIRED，节点升级收尾时再关为 FAILED_TERMINAL，binding 不动。是否在 lap 恢复后人工核对其运行记录与产物，属于升级处理的一部分。
+
+## 发布复测（2026-10-22）
+
+CrossMini 与 lap 均为 `a52251e`（之后 CrossMini 侧补 `2a97549` 修复收尾回归，lap runner 无需更新）。判据同上。
+
+| 场景 | 结果 |
+|---|---|
+| `remote` | ✅ 33 秒；binding `remote-runner-adapter@lap`，ROUTING_DECIDED 选 `codex@lap`、fallback=false，TASK_STARTED=1，产物两端哈希一致，lap 运行记录 1、本地 0 |
+| `capability` | ✅ 30 秒；`codex@lap` skipped(`capability_mismatch`) → `codex`、fallback=true，lap 0 次 |
+| `dag` 两个方向 | ✅ 59 秒；CrossMini→lap 与 lap→CrossMini 子节点输入信封、父产物、两端落盘字节哈希一致（上次未测的方向已补） |
+| `lap-restart` | ✅ 92 秒；守护进程 pid 变化、Codex 进程组存活，TASK_STARTED=1、运行记录 1 |
+| `worker-restart`（dag/v1） | ✅ 134 秒；SIGKILL Worker 后按既有 binding 恢复完成，无 INPUT_REQUIRED、无重跑 |
+| `grace`（宽限 30 秒） | ✅ 41 秒；Mission ESCALATED，任务 INPUT_REQUIRED（`EXECUTION_UNCERTAIN:BINDING_NOT_FOUND`），binding 保留，不改派、不重跑。首轮在 `a52251e` 上失败：S03 让任务保持 INPUT_REQUIRED 后，`finalizeDagMission` 仍视其为活跃任务抛错，Workflow 失败、Mission 停在 RUNNING；`2a97549` 修复后通过 |
+| `lap-offline`（生产默认宽限） | ✅ 158 秒；离线 152 秒即判执行不确定（取剩余等待时间的一半，先于 300 秒任务超时），结果同 grace |
 
 ## 已知边界
 

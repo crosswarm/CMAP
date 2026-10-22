@@ -95,3 +95,12 @@
 - CrossMini 真实验收（独立 schema，进程内 Codex）：`e2e-mission` 默认模式 22.2 秒完成；`e2e-approval` 29 秒通过，决定后 794 毫秒派发，两条 JEV_DECIDED（jev-1.14.0，shadow）。
 - S16 真实验收：后台进程方式在 127.0.0.1:8791 起本机 runner（测试专用许可密钥，不复用 lap 的），`e2e-mission` 28.2 秒完成，binding 为 remote-runner-adapter@crossmini-runner，守护进程原件与控制面副本哈希一致；执行中 SIGKILL Worker 后 Codex 进程组存活，新 Worker 拉起后完成，TASK_STARTED 恰 1 条、运行记录 1 条。
 - 未做：本机 runner 未安装为 launchd 常驻；`e2e-mission.mjs --restart-worker` 在本机 runner 模式下读不到运行记录（记录在守护进程工作区），本次手工编排同等流程。
+
+## S17（通过）— 优化轮完成
+
+- 两机复测：remote、capability、dag 两个方向、lap-restart、worker-restart、grace、lap-offline 共 7 个场景通过（详见 `docs/remote-runner.md`「发布复测（2026-10-22）」）。
+- 复测发现并修复一个回归：`2a97549` 收尾时把节点已 escalated 的 INPUT_REQUIRED 任务视为等人决定，Mission 落 ESCALATED；修复前 grace 场景 Workflow 失败、Mission 停在 RUNNING。修复后 `npm run check` 全过（test 453、api 71、pg 86、workflow 324）。
+- lap 运行 `a52251e`；其后的提交只涉及 CrossMini 侧 Workflow/Activity 与文档，runner 无需更新。
+- 遗留：S06 侧栏看不到未选中 Mission 的 INPUT_REQUIRED 等状态；S13 standalone 结果目录仍在 TMPDIR；本机 runner 未常驻；Jev 影子模式待积累一致率数据后再评估 enforce；P4 网关与 OIDC 未在本轮范围。
+
+<promise>FINISHED</promise>

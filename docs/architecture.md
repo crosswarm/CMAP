@@ -209,7 +209,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | WebUI 原型（3 方案 × 2 轮迭代） | ✅ P2，原型已有；双 scope 同时 pending 已用合成数据验证实际 UI |
 | Web UI 前端实现（Mission/审批/证据/返工追踪） | ✅ 本机 P2；真实创建与重试验证，见 [交付记录](verification-webui-2026-09-21.md) |
 | SSE 实时推送 | ✅ P2，租户级与 Mission 级事件流，租户隔离、历史回放、实时追加、重连去重与断开清理；真实 PostgreSQL/HTTP 验证通过 |
-| Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；审批详情已接入建议展示，见 [说明](approval-advisor.md) |
+| Jev 工具/审批辅助 | ✅ 控制面外 CLI，真实服务已验证；只建议，不写业务批准；审批详情已接入建议展示，见 [说明](approval-advisor.md)。ADR-0007 影子模式已实现：审批闸口记录 Jev 决定（route=human），不改审批，enforce 未开启 |
 | 能力路由 | 🟡 P3，启动前按能力/风险/健康及显式首选替补选择；已绑定任务按原 Adapter 收取，不自动二次派发，见 [验证](verification-p3-routing-2026-09-21.md) |
 | runner 主机准入 | ✅ 本机默认拒绝、复制/加锁/派发前检查及拒绝恢复已通过真实允许/拒绝验收；不是远程认证，见 [配置](runner-admission.md) 与 [验证](verification-runner-admission-2026-09-22.md) |
 | kimi-adapter | ✅ 本机 macOS P3；真实单跳与 Temporal → Kimi 完成，见 [运行说明](kimi-adapter.md) 与 [验证](verification-kimi-2026-09-21.md) |
@@ -219,7 +219,7 @@ Temporal（见 [ADR-0001](adr/0001-temporal-as-orchestration-engine.md)）。难
 | 语义 Reviewer / Judge | ⬜ 尚未接入；当前为确定性硬门槛判定，多分支测试中的 Reviewer 决定为合成夹具；不同于 Planner 的认证阻断 |
 | yonwork-adapter | 🟡 P3；受控派发、预写意图、相关终态与报告捕获已通过本地合成集成回归；真实专用 profile 闭环尚未验收，见 [运行说明](yonwork-adapter.md) 与 [验证](verification-yonwork-core-2026-09-22.md) |
 | Codex/Kimi 启动前持久意图 | ✅ 本机；未知运行状态保留绑定并升级，不能自动重接管，见 [验证](verification-cli-dispatch-intent-2026-09-22.md) |
-| 单用户双主机远程 runner（ADR-0006） | 🟡 Stage 2–3：`remote-runner.v1` 薄协议、持久化许可密钥与 lap 固定公钥、`RemoteRunnerAdapter` 与 `apps/runner` 守护进程已实现，本机双端口模拟验证；lap 部署与 Tailscale ACL（Stage 4）未做，见 [远程 runner](remote-runner.md) |
+| 单用户双主机远程 runner（ADR-0006） | ✅ Stage 4：lap 以 launchd 部署 runner 守护进程，2026-10-22 两机 7 个场景（含双向 DAG、守护进程与 Worker 重启、执行中失联）复测通过；按 ADR-0006 修订 1 不配置 Tailscale ACL。本机 runner（S16）已实测，未常驻。见 [远程 runner](remote-runner.md#发布复测2026-10-22) |
 | 多人多机远程 runner、多租户、mTLS、审计流 | ⬜ P4 |
 
 P2 后端出口验证记录在 `scripts/e2e-mission.mjs`（不代表 WebUI 或整个 P2 完成）：建 Mission → Workflow 派发 →
