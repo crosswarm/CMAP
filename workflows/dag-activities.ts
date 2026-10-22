@@ -195,6 +195,8 @@ const toFailedTerminal = async (store: Store, taskId: string, reason: string): P
   let task = await store.getTask(taskId)
   if (!task || task.state === 'FAILED_TERMINAL') return
   if (isTerminal(task.state)) return
+  // 执行不确定：保持 INPUT_REQUIRED，由人决定是否重做（ADR-0006 第 7 条）。
+  if (task.state === 'INPUT_REQUIRED') return
   if (task.state === 'VERIFYING' || task.state === 'REVIEWING') {
     await store.transitionTask({
       taskId,

@@ -430,6 +430,31 @@ await acts.finishDagNode({ missionId: m.id, nodeId: 'rootA', taskId, status: 'fa
     })
   })
 
+  test('执行不确定（INPUT_REQUIRED）的节点升级后任务保持 INPUT_REQUIRED，由人决定是否重做', async () => {
+    const m = mission('mis-uncertain-keeps-input-required')
+    const { store, acts } = await make(m)
+    const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+    await toRunning(store, taskId)
+    await store.transitionTask({
+      taskId,
+      to: 'INPUT_REQUIRED',
+      actor: ACTOR,
+      eventType: 'INPUT_REQUIRED',
+      idempotencyKey: `${taskId}:input-required`,
+    })
+
+    const out = await acts.finishDagNode({
+      missionId: m.id,
+      nodeId: 'rootA',
+      taskId,
+      status: 'escalated',
+      reason: 'EXECUTION_UNCERTAIN:BINDING_NOT_FOUND',
+    })
+
+    assert.equal(out.status, 'escalated')
+    assert.equal((await store.getTask(taskId))?.state, 'INPUT_REQUIRED')
+  })
+
   test('pending approval check returns immediately and stopped pending approval expires without grant', async (t) => {
     // This fixture has a 1ms approval lifetime; freeze time to test explicit stop, not scheduler timing.
     t.mock.timers.enable({apis:['Date'],now:Date.now()})
