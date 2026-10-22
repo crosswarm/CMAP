@@ -66,6 +66,11 @@ const server = await createControlPlane({
     const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
     await connection.withDeadline(Date.now() + 15_000, () => client.workflow.getHandle(workflowId).signal('cancelMission', { reason }))
   },
+  notifyApprovalDecided: async (_missionId, workflowId) => {
+    const connection = await getTemporal()
+    const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
+    await connection.withDeadline(Date.now() + 15_000, () => client.workflow.getHandle(workflowId).signal('approvalDecided'))
+  },
 })
 await server.listen(port)
 

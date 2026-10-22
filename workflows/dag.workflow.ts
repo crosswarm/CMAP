@@ -1,4 +1,4 @@
-import { continueAsNew, defineSignal, isCancellation, patched, proxyActivities, setHandler, sleep, workflowInfo } from '@temporalio/workflow'
+import { condition, continueAsNew, defineSignal, isCancellation, patched, proxyActivities, setHandler, sleep, workflowInfo } from '@temporalio/workflow'
 import type { ProgressSnapshot } from '#domain-model'
 import type { Activities } from './activities.ts'
 import type { DagActivities, DagNodeOutcome } from './dag-activities.ts'
@@ -19,6 +19,12 @@ const HANDOFF_PATCH='dag-escalation-handoff-v1'
 /** S5 续接：与 missionWorkflow 同名的取消信号；旧历史重放时 patched() 为 false，照旧忽略。 */
 const CANCEL_PATCH='dag-cancel-v1'
 export const cancelMissionSignal=defineSignal<[{readonly reason:string}]>('cancelMission')
+/**
+ * S02 审批门铃：API 落账审批决定后发送，只提醒回读账本，不带业务数据。
+ * 旧历史重放时 patched() 为 false，照旧每秒轮询；超时也回读，信号丢失最多延迟一个周期。
+ */
+const APPROVAL_SIGNAL_PATCH='dag-approval-signal-v1'
+export const approvalDecidedSignal=defineSignal('approvalDecided')
 // 旁路回写：失败不改变节点或 Mission 结果。
 const sideEffect=async (run:()=>Promise<void>):Promise<void>=>{
   try{await run()}catch(error){if(isCancellation(error))throw error}
@@ -74,6 +80,8 @@ export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWo
   const running=new Map<string,Promise<void>>()
   let stopping=false
   let draining=false
+  let approvalBell=0
+  setHandler(approvalDecidedSignal,()=>{approvalBell++})
   setHandler(cancelMissionSignal,(signal)=>{
     if(cancelReason!==undefined||!patched(CANCEL_PATCH))return
     cancelReason=typeof signal?.reason==='string'&&signal.reason.trim()?signal.reason.slice(0,500):'MISSION_CANCELED'
@@ -122,11 +130,14 @@ export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWo
         if(phase==='approval') {
           for(;;) {
             if(stopping) return stopped()
+            // 回读前记下门铃：回读期间到达的信号也能唤醒下一轮等待。
+            const bell=approvalBell
             const approval=await acts.checkDagApproval(current)
             if(approval.decision==='rejected')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'failed',reason:'APPROVAL_REJECTED'})
             if(approval.decision==='approved')break
             if(shouldPark())return park('approval')
-            await sleep('1 second')
+            if(patched(APPROVAL_SIGNAL_PATCH))await condition(()=>approvalBell!==bell||stopping||draining,'10 minutes')
+            else await sleep('1 second')
           }
           phase='attempt'
         }

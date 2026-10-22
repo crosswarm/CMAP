@@ -63,12 +63,18 @@ before(async()=>{
   }})
   running=worker.run()
 })
+/** S02：审批等待靠 approvalDecided 门铃唤醒回读；这里持续按门铃，模拟审批状态被反复改动。 */
+async function withBell<T>(id:string,pending:Promise<T>):Promise<T>{
+  let done=false
+  const bell=(async()=>{while(!done){await client.workflow.getHandle(id).signal('approvalDecided').catch(()=>{});await new Promise(r=>setTimeout(r,200))}})()
+  try{return await pending}finally{done=true;await bell}
+}
 after(async()=>{worker?.shutdown();await running;await connection?.close();await native?.close()})
 
 test('等审批与等资源锁超过历史阈值时 continueAsNew：节点状态带入新 run，不重复物化，每段历史可重放', async()=>{
   const id=`${queue}-long`,state=harness(id,30);runs.set(id,state)
   const handle=await client.workflow.start('dagMissionWorkflow',{workflowId:id,taskQueue:queue,args:[{missionId:id,maxHistoryLength:60}]})
-  const result=await handle.result() as DagWorkflowResult
+  const result=await withBell(id,handle.result()) as DagWorkflowResult
   assert.equal(result.state,'COMPLETED')
   assert.ok(state.loads>1,`应至少 continueAsNew 一次，实际 run 数 ${state.loads}`)
   assert.deepEqual([...state.materialized].sort(),['a:1','b:1','join:1'],'续跑沿用已物化的任务，不重新物化')
@@ -90,7 +96,8 @@ test('等审批与等资源锁超过历史阈值时 continueAsNew：节点状态
 
 test('未触发阈值时行为不变：单个 run 完成', async()=>{
   const id=`${queue}-short`,state=harness(id,2);runs.set(id,state)
-  const result=await client.workflow.execute('dagMissionWorkflow',{workflowId:id,taskQueue:queue,args:[{missionId:id}]}) as DagWorkflowResult
+  const handle=await client.workflow.start('dagMissionWorkflow',{workflowId:id,taskQueue:queue,args:[{missionId:id}]})
+  const result=await withBell(id,handle.result()) as DagWorkflowResult
   assert.equal(result.state,'COMPLETED')
   assert.equal(state.loads,1)
 })

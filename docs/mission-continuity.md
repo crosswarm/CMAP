@@ -20,7 +20,9 @@
 
 ## DAG 长等待换历史（continueAsNew）
 
-dag/v1 节点等审批（`checkDagApproval` 返回 pending）或等资源锁（`runDagAttempt` 返回 waiting_resource）时每秒轮询一次，每轮都写入 Activity 与 Timer 事件；等上数天会逼近 Temporal 单历史上限。
+dag/v1 节点等资源锁（`runDagAttempt` 返回 waiting_resource）时每秒轮询一次，每轮都写入 Activity 与 Timer 事件；等上数天会逼近 Temporal 单历史上限。
+
+等审批（`checkDagApproval` 返回 pending）不再轮询：API 在 `POST /v1/approvals/:id/decision` 落账后向 `mission-<id>` 发 `approvalDecided` 信号（只作门铃，不带业务数据，发送失败只记日志），Workflow 用 `condition` 等门铃、停止或收拢，最长 10 分钟后也回读账本，历史不随等待时间线性增长。由 `patched('dag-approval-signal-v1')` 守卫，旧历史照旧每秒轮询并可重放（`tests/workflow/dag-approval-signal.test.ts`）。
 
 - 历史事件数达到 `maxHistoryLength`（Workflow 输入，默认 8000）或服务端 `continueAsNewSuggested` 时开始收拢：不再派生新节点，各节点在下一个等待点停下（记下 task、轮次、上一轮进度与所处阶段），仍在执行 Activity 的节点照常跑完。
 - 所有节点都停下或结束后 `continueAsNew`，把已终结节点的结论与停下的节点交给新 run；新 run 从等待点继续，不重新物化任务，账本是唯一事实来源。

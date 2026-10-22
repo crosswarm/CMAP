@@ -41,6 +41,8 @@ export interface ControlPlaneOptions {
   readonly startMission?: (missionId: string, workflowId: string) => Promise<void>
   /** 向运行中的 Mission Workflow 发送 cancelMission 信号；重复发送由 Workflow 去重。 */
   readonly cancelMission?: (missionId: string, workflowId: string, reason: string) => Promise<void>
+  /** 审批决定落账后向 Mission Workflow 发 approvalDecided 门铃；不带业务数据，Workflow 醒来回读账本。 */
+  readonly notifyApprovalDecided?: (missionId: string, workflowId: string) => Promise<void>
 }
 
 interface Ctx {
@@ -700,6 +702,9 @@ const routes: readonly Route[] = [
         const updated = await ctx.store.decideApproval(
           id, decision, decidedBy, new Date().toISOString(),
         )
+        // 决定已落账：门铃丢了 Workflow 也会在等待超时后回读，所以失败只记录。
+        try { await ctx.config.notifyApprovalDecided?.(updated.mission_id, missionSubmission(updated.mission_id).workflow_id) }
+        catch (error) { console.warn(`approvalDecided 信号未送达 mission=${updated.mission_id}: ${error instanceof Error ? error.message : String(error)}`) }
         json(ctx.res, 200, updated)
       } catch (e) {
         if (e instanceof NotFoundError) return fail(ctx.res, 404, e.message)
