@@ -162,3 +162,26 @@ test('租户级 SSE Last-Event-ID 必须属于当前租户，且重连仍完整�
     assert.equal(res.status, 400)
   }
 })
+
+test('租户级 SSE 对 Store 的调用次数不随 Mission 数增长', { timeout: 6000 }, async (t) => {
+  const callsFor = async (missions: number) => {
+    const store = new MemoryStore()
+    for (let i = 0; i < missions; i++) await store.createMission({ mission: mission(`m-${i}`), actor })
+    let calls = 0
+    const counted = new Proxy(store, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target)
+        if (typeof value !== 'function') return value
+        return (...args: unknown[]) => { calls++; return value.apply(target, args) }
+      },
+    })
+    const server = await createControlPlane({ store: counted, tenant: 'local' })
+    await server.listen(0)
+    t.after(() => server.close())
+    const stream = await connect(`http://127.0.0.1:${(server.address() as AddressInfo).port}`, undefined, '/v1/events')
+    await stream.next()
+    stream.close()
+    return calls
+  }
+  assert.equal(await callsFor(12), await callsFor(2))
+})

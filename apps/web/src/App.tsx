@@ -131,19 +131,9 @@ export default function App() {
         request<{ items: ResourceLock[] }>('/v1/locks', options),
         loadDetail(),
       ])
+      // 只有选中的 Mission 拉任务；其余 RUNNING Mission 的侧栏状态由待批审批推断。
       const summaries: Record<string, TaskRecord[]> = {}
       if (selected) summaries[selected.mission.id] = selected.tasks
-      await Promise.all(
-        list.items
-          .filter((m) => m.state === 'RUNNING' && m.id !== selected?.mission.id)
-          .map(async (mission) => {
-            const result = await request<{ items: TaskRecord[] }>(
-              `/v1/missions/${encodeURIComponent(mission.id)}/tasks`,
-              options,
-            )
-            summaries[mission.id] = result.items
-          }),
-      )
       if (current !== generation.current) return
       setContext(ctx)
       setMissions(
@@ -210,7 +200,11 @@ export default function App() {
       .includes(query.toLowerCase()),
   )
   const displayState = (mission: Mission) =>
-    missionDisplayState(mission, taskSummaries[mission.id] ?? [])
+    mission.state === 'RUNNING' &&
+    !taskSummaries[mission.id] &&
+    approvals.some((a) => a.mission_id === mission.id)
+      ? 'APPROVAL_REQUIRED'
+      : missionDisplayState(mission, taskSummaries[mission.id] ?? [])
   const groups = [
     {
       label: '需要你处理',

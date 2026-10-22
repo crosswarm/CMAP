@@ -96,6 +96,7 @@ class ThrowAfterCommitStore implements Store {
 
   async appendEvent(input: Parameters<Store['appendEvent']>[0]) { return this.inner.appendEvent(input) }
   async listEvents(missionId: string) { return this.inner.listEvents(missionId) }
+  async listTenantEvents(tenant: string) { return this.inner.listTenantEvents(tenant) }
 
   async putArtifact(a: Artifact) { return this.inner.putArtifact(a) }
   async listArtifacts(taskId: string) { return this.inner.listArtifacts(taskId) }

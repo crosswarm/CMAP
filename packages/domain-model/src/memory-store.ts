@@ -13,7 +13,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 import type { TaskResultV1 } from './generated/task-result.ts'
 import { assertTransition, IllegalTransitionError } from './task-state.ts'
-import { assertMissionStateChange } from './entities.ts'
+import { assertMissionStateChange, TERMINAL_MISSION_STATES } from './entities.ts'
 import type {
   Mission,
   MissionState,
@@ -151,13 +151,17 @@ export class MemoryStore implements Store {
   }
 
   async queryMissions(q: MissionQuery): Promise<readonly Mission[]> {
-    return [...this.#missions.values()]
+    const sorted = [...this.#missions.values()]
       .filter((m) => m.tenant === q.tenant)
       .sort((a, b) => {
         const byCreatedAt = Date.parse(a.created_at) - Date.parse(b.created_at)
         if (byCreatedAt !== 0) return byCreatedAt
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
       })
+    if (q.terminal_limit === undefined) return sorted
+    const terminal = sorted.filter((m) => TERMINAL_MISSION_STATES.has(m.state))
+    const keep = new Set(terminal.slice(Math.max(0, terminal.length - q.terminal_limit)))
+    return sorted.filter((m) => !TERMINAL_MISSION_STATES.has(m.state) || keep.has(m))
   }
 
   async setMissionState(
@@ -343,6 +347,14 @@ export class MemoryStore implements Store {
     return this.#events
       .filter((e) => e.mission_id === missionId)
       .sort((a, b) => a.lamport - b.lamport)
+      .map(cloneEvent)
+  }
+
+  async listTenantEvents(tenant: string): Promise<readonly TaskEvent[]> {
+    const ids = new Set([...this.#missions.values()].filter((m) => m.tenant === tenant).map((m) => m.id))
+    return this.#events
+      .filter((e) => ids.has(e.mission_id))
+      .sort((a, b) => a.lamport - b.lamport || (a.event_id < b.event_id ? -1 : a.event_id > b.event_id ? 1 : 0))
       .map(cloneEvent)
   }
 

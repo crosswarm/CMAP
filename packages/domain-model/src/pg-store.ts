@@ -25,7 +25,7 @@ import pg from 'pg'
 import type { TaskResultV1 } from './generated/task-result.ts'
 import { assertTransition, IllegalTransitionError } from './task-state.ts'
 import type { TaskState } from './task-state.ts'
-import { assertMissionStateChange } from './entities.ts'
+import { assertMissionStateChange, TERMINAL_MISSION_STATES } from './entities.ts'
 import type {
   Mission,
   MissionState,
@@ -357,10 +357,21 @@ export class PgStore implements Store {
   }
 
   async queryMissions(q: MissionQuery): Promise<readonly Mission[]> {
-    const { rows } = await this.#pool.query(
-      'SELECT * FROM missions WHERE tenant = $1 ORDER BY created_at, id COLLATE "C"',
-      [q.tenant],
-    )
+    const { rows } = q.terminal_limit === undefined
+      ? await this.#pool.query(
+        'SELECT * FROM missions WHERE tenant = $1 ORDER BY created_at, id COLLATE "C"',
+        [q.tenant],
+      )
+      : await this.#pool.query(
+        `SELECT * FROM missions WHERE tenant = $1 AND (
+           NOT state = ANY($2)
+           OR id IN (
+             SELECT id FROM missions WHERE tenant = $1 AND state = ANY($2)
+             ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT $3
+           )
+         ) ORDER BY created_at, id COLLATE "C"`,
+        [q.tenant, [...TERMINAL_MISSION_STATES], q.terminal_limit],
+      )
     return rows.map((r) => toMission(r as Record<string, unknown>))
   }
 
@@ -614,6 +625,15 @@ export class PgStore implements Store {
     const { rows } = await this.#pool.query(
       'SELECT * FROM events WHERE mission_id = $1 ORDER BY lamport',
       [missionId],
+    )
+    return rows.map((r) => toEvent(r as Record<string, unknown>))
+  }
+
+  async listTenantEvents(tenant: string): Promise<readonly TaskEvent[]> {
+    const { rows } = await this.#pool.query(
+      `SELECT e.* FROM events e JOIN missions m ON m.id = e.mission_id
+       WHERE m.tenant = $1 ORDER BY e.lamport, e.event_id COLLATE "C"`,
+      [tenant],
     )
     return rows.map((r) => toEvent(r as Record<string, unknown>))
   }

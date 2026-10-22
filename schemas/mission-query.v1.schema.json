@@ -9,6 +9,12 @@
     "tenant": {
       "type": "string",
       "minLength": 1
+    },
+    "terminal_limit": {
+      "description": "省略表示不限；给出时返回全部非终态 Mission，加最近创建的至多 N 条终态 Mission（COMPLETED/ESCALATED/FAILED/CANCELED）。",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
     }
   }
 }

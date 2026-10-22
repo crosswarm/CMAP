@@ -6,4 +6,8 @@
 
 export interface MissionQueryV1 {
   tenant: string
+  /**
+   * 省略表示不限；给出时返回全部非终态 Mission，加最近创建的至多 N 条终态 Mission（COMPLETED/ESCALATED/FAILED/CANCELED）。
+   */
+  terminal_limit?: number
 }

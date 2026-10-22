@@ -401,6 +401,47 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         const got = await s.queryMissions({ tenant: 'team-ycc' })
         assert.deepEqual(got.map((m) => m.id), ['mis-a', 'mis-b', 'mis-c', 'mis-d'])
       })
+
+      test('terminal_limit 保留全部非终态 Mission 与最近创建的 N 条终态，结果仍按创建时刻升序', async () => {
+        const s = await createStore()
+        const at = (n: number) => `2026-08-03T00:00:0${n}.000Z`
+        const seed: Array<[string, Mission['state'], number]> = [
+          ['mis-done-1', 'COMPLETED', 0],
+          ['mis-live-1', 'RUNNING', 1],
+          ['mis-done-2', 'FAILED', 2],
+          ['mis-draft', 'DRAFT', 3],
+          ['mis-done-3', 'CANCELED', 4],
+          ['mis-esc', 'ESCALATED', 5],
+        ]
+        for (const [id, state, n] of seed) {
+          await s.createMission({ mission: { ...mission(id), state, created_at: at(n) }, actor: ACTOR })
+        }
+
+        const ids = async (terminal_limit?: number) =>
+          (await s.queryMissions({ tenant: 'team-ycc', ...(terminal_limit === undefined ? {} : { terminal_limit }) }))
+            .map((m) => m.id)
+        assert.deepEqual(await ids(2), ['mis-live-1', 'mis-draft', 'mis-done-3', 'mis-esc'])
+        assert.deepEqual(await ids(0), ['mis-live-1', 'mis-draft'])
+        assert.equal((await ids(100)).length, 6)
+        assert.equal((await ids()).length, 6, '省略 terminal_limit 表示不限')
+      })
+
+      test('listTenantEvents 一次返回本租户全部 Mission 的事件，按 lamport 升序且不含其他租户', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-t1'), actor: ACTOR })
+        await s.createMission({ mission: mission('mis-t2'), actor: ACTOR })
+        await s.createMission({ mission: { ...mission('mis-x'), tenant: 'team-other' }, actor: ACTOR })
+        await s.setMissionState('mis-t2', 'RUNNING', ACTOR)
+        await s.setMissionState('mis-t1', 'RUNNING', ACTOR)
+
+        const got = await s.listTenantEvents('team-ycc')
+        const expected = [...(await s.listEvents('mis-t1')), ...(await s.listEvents('mis-t2'))]
+          .sort((a, b) => a.lamport - b.lamport)
+        assert.deepEqual(got.map((e) => e.event_id), expected.map((e) => e.event_id))
+        assert.equal(got.length, 4)
+        assert.ok(got.every((e) => e.mission_id !== 'mis-x'))
+        assert.deepEqual(await s.listTenantEvents('team-empty'), [])
+      })
     })
 
     describe('Task 状态迁移', () => {

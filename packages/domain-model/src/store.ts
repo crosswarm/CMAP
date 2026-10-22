@@ -272,6 +272,8 @@ export interface Store {
   appendEvent(input: AppendEventInput): Promise<TaskEvent>
   /** 按 lamport 升序返回，保证跨主机可复现的顺序。 */
   listEvents(missionId: string): Promise<readonly TaskEvent[]>
+  /** 本租户全部 Mission 的事件，一次查询；按 lamport、event_id 升序。租户事件流用，避免按 Mission 逐个查。 */
+  listTenantEvents(tenant: string): Promise<readonly TaskEvent[]>
 
   // Artifact
   putArtifact(a: Artifact): Promise<Artifact>

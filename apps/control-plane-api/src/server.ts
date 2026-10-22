@@ -82,6 +82,7 @@ class FileTooLargeError extends Error {}
 class HashMismatchError extends Error {}
 
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+const DEFAULT_TERMINAL_LIMIT = 50
 
 const readBody = (req: IncomingMessage): Promise<unknown> => new Promise((resolve, reject) => {
   let chunks: Buffer[] | null = []
@@ -146,12 +147,6 @@ const eventData = (event: TaskEvent): MissionEventV1 => ({
   occurred_at: event.occurred_at, mission_id: event.mission_id,
   task_id: event.task_id, lamport: event.lamport,
 })
-
-const listTenantEvents = async (ctx: Ctx): Promise<readonly TaskEvent[]> => {
-  const missions = await ctx.store.queryMissions({ tenant: ctx.tenant })
-  const nested = await Promise.all(missions.map((m) => ctx.store.listEvents(m.id)))
-  return nested.flat().sort((a, b) => a.lamport - b.lamport || a.event_id.localeCompare(b.event_id))
-}
 
 const pendingApprovalsInTenant = async (ctx: Ctx): Promise<readonly Approval[]> => {
   const pending = await ctx.store.listPendingApprovals()
@@ -251,7 +246,7 @@ const streamMissionEvents: Handler = async (ctx) => {
 }
 
 const streamTenantEvents: Handler = async (ctx) => {
-  await streamEvents(ctx, () => listTenantEvents(ctx))
+  await streamEvents(ctx, () => ctx.store.listTenantEvents(ctx.tenant))
 }
 
 const isSingleSegment = (v: string): boolean =>
@@ -565,8 +560,13 @@ const routes: readonly Route[] = [
   {
     method: 'GET',
     pattern: '/v1/missions',
-    handler: async ({ res, store, tenant }) => {
-      json(res, 200, { items: await store.queryMissions({ tenant }) })
+    handler: async ({ req, res, store, tenant }) => {
+      const raw = new URL(req.url ?? '/', 'http://localhost').searchParams.get('terminal_limit')
+      const terminalLimit = raw === null ? DEFAULT_TERMINAL_LIMIT : Number(raw)
+      if (raw === '' || !Number.isInteger(terminalLimit) || terminalLimit < 0 || terminalLimit > 500) {
+        return fail(res, 400, 'terminal_limit 必须是 0 到 500 的整数')
+      }
+      json(res, 200, { items: await store.queryMissions({ tenant, terminal_limit: terminalLimit }) })
     },
   },
 

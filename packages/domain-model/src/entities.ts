@@ -36,7 +36,7 @@ export const MISSION_STATES = [
 ] as const
 export type MissionState = (typeof MISSION_STATES)[number]
 
-const TERMINAL_MISSION_STATES: ReadonlySet<MissionState> = new Set(['COMPLETED', 'ESCALATED', 'FAILED', 'CANCELED'])
+export const TERMINAL_MISSION_STATES: ReadonlySet<MissionState> = new Set(['COMPLETED', 'ESCALATED', 'FAILED', 'CANCELED'])
 
 /** 终态之间仍可改写（沿用原语义），但不得回到非终态：取消后迟到的 RUNNING 会让任务照常派发。 */
 export const assertMissionStateChange = (id: string, from: MissionState, to: MissionState): void => {
