@@ -143,7 +143,7 @@
       "先写失败测试：standalone 模式下结果文件路径不在工作区内",
       "去掉对应 shortcut 注释；npm test 全过；node scripts/e2e-single-hop.mjs 真实通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S14",

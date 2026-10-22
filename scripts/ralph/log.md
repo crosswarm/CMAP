@@ -58,3 +58,5 @@
 
 - `7d3ef1c` standalone（无 runsDir）时结果文件放进 `mkdtemp` 的独占临时目录。残余：codex workspace-write 沙箱通常可写 TMPDIR，Agent 运行中仍可能找到该目录预置符号链接；生产 Worker 与 lap runner 都配置 runsDir，不走此路径。
 - `20a0cef` 自报重复 artifact_id 的产物按下标各自入账，证据引用指向全部同名产物。
+
+- S13 验收：`node scripts/e2e-single-hop.mjs`（standalone，无 runsDir）真实 Codex 通过，退出 0。
