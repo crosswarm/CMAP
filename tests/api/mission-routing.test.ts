@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { MemoryStore } from '#domain-model'
 import type { Mission } from '#domain-model'
 import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
+import { missionFromRequest } from '../../apps/control-plane-api/src/mission-submission.ts'
 import { workflowTypeForTemplate } from '../../apps/control-plane-api/src/workflow-routing.ts'
 
 const legacyInput = {
@@ -63,12 +64,6 @@ const setup = async (t: TestContext) => {
   await server.listen(0)
   t.after(() => server.close())
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-  return { store, starts, base }
-}
-
-test('stored workflow_template routes create and DRAFT resume to the matching Workflow type', async (t) => {
-  const { store, starts, base } = await setup(t)
-
   const post = async (body: unknown, path = '/v1/missions') => {
     const response = await fetch(`${base}${path}`, {
       method: 'POST',
@@ -77,10 +72,53 @@ test('stored workflow_template routes create and DRAFT resume to the matching Wo
     })
     return { status: response.status, body: await response.json() as Record<string, unknown> }
   }
+  return { store, starts, post }
+}
+
+test('不带 plan 的创建合成单节点 mission-plan 并启动 dag/v1', async (t) => {
+  const { store, starts, post } = await setup(t)
+  const created = await post({ ...legacyInput, request_id: 'route-synth', max_additional_cycles: 1, memory: { project_id: 'prj_a', query: '刷新写回' } })
+  assert.equal(created.status, 202)
+  const id = created.body['mission_id'] as string
+  assert.deepEqual(starts.at(-1), { missionId: id, workflowType: 'dagMissionWorkflow' })
+  const saved = (await store.getMission(id))!
+  assert.equal(saved.workflow_template, 'dag/v1')
+  assert.equal(saved.type, 'inspect')
+  assert.deepEqual(saved.constraints, {
+    risk_level: 'read-meta',
+    max_additional_cycles: 1,
+    plan: {
+      schema: 'cmap/mission-plan/v1',
+      concurrency: 2,
+      nodes: [{
+        node_id: 'main', goal: legacyInput.goal, capability: 'code.analyze', deps: [], criterion_ids: ['files'],
+        risk_level: 'read-meta', memory: { project_id: 'prj_a', query: '刷新写回', limit: 3 }, required_resource_locks: [],
+      }],
+    },
+    memory: { project_id: 'prj_a', query: '刷新写回', limit: 3 },
+  })
+})
+
+test('S01 之前存为 inspect/v1 的不带 plan 请求：原键重试沿用旧记录与旧 Workflow 类型，改语义仍 409', async (t) => {
+  const { store, starts, post } = await setup(t)
+  const current = missionFromRequest(legacyInput, 'local', 'configured-owner')
+  const { plan: _plan, ...constraints } = current.constraints
+  await store.createMission({ mission: { ...current, constraints, workflow_template: 'inspect/v1' }, actor: { type: 'system', id: 'test' } })
+  const replay = await post(legacyInput)
+  assert.equal(replay.status, 202)
+  assert.deepEqual(starts.at(-1), { missionId: current.id, workflowType: 'missionWorkflow' })
+  assert.equal((await store.getMission(current.id))!.workflow_template, 'inspect/v1')
+  assert.equal((await post({ ...legacyInput, goal: 'changed goal' })).status, 409)
+  assert.equal((await post({ ...legacyInput, plan: dagInput.plan })).status, 409)
+  assert.equal(starts.length, 1)
+})
+
+test('stored workflow_template routes create and DRAFT resume to the matching Workflow type', async (t) => {
+  const { store, starts, post } = await setup(t)
 
   const legacy = await post(legacyInput)
   assert.equal(legacy.status, 202)
-  assert.equal(starts.at(-1)?.workflowType, 'missionWorkflow')
+  assert.equal(starts.at(-1)?.workflowType, 'dagMissionWorkflow')
 
   const dag = await post(dagInput)
   assert.equal(dag.status, 202)
@@ -90,4 +128,9 @@ test('stored workflow_template routes create and DRAFT resume to the matching Wo
   const resumed = await post({}, '/v1/missions/draft-dag/start')
   assert.equal(resumed.status, 202)
   assert.deepEqual(starts.at(-1), { missionId: 'draft-dag', workflowType: 'dagMissionWorkflow' })
+
+  // 已入账的 inspect/v1 历史记录仍按其模板启动，不改道。
+  await store.createMission({ mission: mission('draft-inspect', 'inspect/v1'), actor: { type: 'system', id: 'test' } })
+  assert.equal((await post({}, '/v1/missions/draft-inspect/start')).status, 202)
+  assert.deepEqual(starts.at(-1), { missionId: 'draft-inspect', workflowType: 'missionWorkflow' })
 })

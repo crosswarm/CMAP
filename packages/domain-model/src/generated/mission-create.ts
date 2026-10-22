@@ -5,7 +5,7 @@
  */
 
 /**
- * 本机 POST /v1/missions 请求。request_id 为客户端重试键；控制面按 tenant/owner/request_id 派生 Mission ID。相同键和语义输入幂等，修改目标/约束返回 409。先入账本再启动 Workflow；启动失败返回 503，客户端使用原键重试恢复，不能更换键重建。只接受 JSON（最多 64KiB），跨来源浏览器写入拒绝。tenant/owner/state/id 不接受调用方自述。不含 plan 时启动 inspect/v1 单任务返工流程；显式 plan 通过图、风险上限及验收覆盖校验后启动 dag/v1。此接口不生成自然语言计划。外部 Planner 复用本契约，只补充经校验的 plan，不改变调用方的目标、验收、风险上限、预算或 request_id。
+ * 本机 POST /v1/missions 请求。request_id 为客户端重试键；控制面按 tenant/owner/request_id 派生 Mission ID。相同键和语义输入幂等，修改目标/约束返回 409。先入账本再启动 Workflow；启动失败返回 503，客户端使用原键重试恢复，不能更换键重建。只接受 JSON（最多 64KiB），跨来源浏览器写入拒绝。tenant/owner/state/id 不接受调用方自述。一律启动 dag/v1：不含 plan 时控制面合成单节点计划（节点 main，capability code.analyze，承载 goal、全部验收、risk_level 与 memory），返工预算仍为 max_additional_cycles；显式 plan 通过图、风险上限及验收覆盖校验后使用。inspect/v1 只保留给已入账的历史 Mission。此接口不生成自然语言计划。外部 Planner 复用本契约，只补充经校验的 plan，不改变调用方的目标、验收、风险上限、预算或 request_id。
  */
 export interface MissionCreateV1 {
   request_id: string
@@ -21,7 +21,7 @@ export interface MissionCreateV1 {
   max_additional_cycles?: number
   plan?: MissionPlanV1
   /**
-   * 可选：续作上一个 Mission（仅 inspect/v1，不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结（COMPLETED/FAILED/ESCALATED/CANCELED），否则 400。新 Mission 首个任务收到来源已验收通过的产物（continuation_input）、来源的记忆快照（continuation_memory）与从账本推出的交接内容（handoff），作为冻结输入证据；不恢复 Agent 会话。
+   * 可选：续作上一个 Mission（仅限不含 plan 的请求，不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结（COMPLETED/FAILED/ESCALATED/CANCELED），否则 400。新 Mission 合成节点的首轮任务收到来源已验收通过的产物（continuation_input）、来源的记忆快照（continuation_memory）与从账本推出的交接内容（handoff），作为冻结输入证据；不恢复 Agent 会话。
    */
   continues_mission_id?: string
   /**

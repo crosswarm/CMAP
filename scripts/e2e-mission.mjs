@@ -1,6 +1,8 @@
 /**
  * P2 出口验证：一次 Mission 无人值守跑完，Agent 真的干活。
  *
+ * Mission 走与 POST /v1/missions 相同的提交逻辑（missionFromRequest）：不带 plan → 合成单节点计划 → dag/v1。
+ *
  * 与 e2e-single-hop.mjs 的区别：那个直接调 Adapter，证明「能调起 codex」；
  * 这个走完整控制面——Temporal Workflow 派发 → Agent 真实执行 → 收结果 →
  * 落账本 → 逐条验收，证明「调度系统真的会去调注册的 Agent」。两头都在不等于线接上了。
@@ -36,6 +38,8 @@ process.env['grpc_proxy'] = ''
 
 const { PgStore } = await import('#domain-model')
 const { Client, Connection } = await import('@temporalio/client')
+const { missionFromRequest } = await import('../apps/control-plane-api/src/mission-submission.ts')
+const { workflowTypeForTemplate } = await import('../apps/control-plane-api/src/workflow-routing.ts')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '..')
@@ -114,42 +118,32 @@ step(1, '在账本里建一个 Mission')
 const store = new PgStore({ connectionString, schema })
 await store.migrate()
 
-const missionId = `mis-e2e-${Date.now().toString(36)}`
-const now = new Date().toISOString()
-
-await store.createMission({
-  mission: {
-    id: missionId,
-    tenant: 'team-ycc',
-    owner: 'crosswarm',
-    type: 'inspect',
-    goal:
-      '在当前工作目录下新建 sample/ 子目录，并在其中写入 3 个文本文件；' +
-      '随后统计 sample/ 下的文件数量，把统计结果写入 evidence/report.json。' +
-      (memoryProject
-        ? '另外：输入证据里有 role=memory_context 的 Memross 记忆快照（Markdown，顶部有 JSON 清单）。' +
-          '读取它，把清单 items 中第一条的 block_id 原样写入 evidence/report.json 的 memory_block_id 字段；没有条目则写 null。'
-        : ''),
-    constraints: reworkMode ? { max_additional_cycles: 1 }
-      : memoryProject ? { memory: { project_id: memoryProject, ...(memoryQuery ? { query: memoryQuery } : {}), limit: 2 } } : {},
-    // 机读验收标准：由确定性程序比对，不看 Agent 的措辞
-    acceptance: [
-      {
-        criterion_id: 'FILE-COUNT',
-        metric: 'sample_file_count',
-        operator: reworkMode ? 'lt' : 'eq',
-        expected: reworkMode ? -Number.MAX_VALUE : 3,
-        hard_gate: true,
-      },
-    ],
-    workflow_template: 'inspect/v1',
-    state: 'DRAFT',
-    revision: 1,
-    created_at: now,
-    updated_at: now,
-  },
-  actor: { type: 'system', id: 'e2e-mission' },
-})
+// 与 API 同一提交逻辑：不带 plan，控制面合成单节点计划并选 dag/v1。
+const created = missionFromRequest({
+  request_id: `e2e-${Date.now().toString(36)}`,
+  goal:
+    '在当前工作目录下新建 sample/ 子目录，并在其中写入 3 个文本文件；' +
+    '随后统计 sample/ 下的文件数量，把统计结果写入 evidence/report.json。' +
+    (memoryProject
+      ? '另外：输入证据里有 role=memory_context 的 Memross 记忆快照（Markdown，顶部有 JSON 清单）。' +
+        '读取它，把清单 items 中第一条的 block_id 原样写入 evidence/report.json 的 memory_block_id 字段；没有条目则写 null。'
+      : ''),
+  risk_level: 'read-meta',
+  ...(reworkMode ? { max_additional_cycles: 1 } : {}),
+  ...(memoryProject ? { memory: { project_id: memoryProject, ...(memoryQuery ? { query: memoryQuery } : {}), limit: 2 } } : {}),
+  // 机读验收标准：由确定性程序比对，不看 Agent 的措辞
+  acceptance: [
+    {
+      criterion_id: 'FILE-COUNT',
+      metric: 'sample_file_count',
+      operator: reworkMode ? 'lt' : 'eq',
+      expected: reworkMode ? -Number.MAX_VALUE : 3,
+    },
+  ],
+}, 'team-ycc', 'crosswarm')
+if (created.workflow_template !== 'dag/v1') fail(`不带 plan 的 Mission 应走 dag/v1，实际 ${created.workflow_template}`)
+const missionId = created.id
+await store.createMission({ mission: created, actor: { type: 'system', id: 'e2e-mission' } })
 ok(`Mission ${missionId} 已入账本（schema=${schema}）`)
 
 // -------------------------------------------- 2. 交给控制面无人值守跑
@@ -169,7 +163,7 @@ try {
     workers.length = 0
     await startWorker()
   }
-  const handle = await client.workflow.start('missionWorkflow', {
+  const handle = await client.workflow.start(workflowTypeForTemplate(created.workflow_template), {
     taskQueue,
     workflowId: `e2e-${missionId}`,
     args: [{ missionId }],
@@ -209,23 +203,27 @@ try {
   )
 }
 const elapsed = ((Date.now() - started) / 1000).toFixed(1)
+// dag/v1 的 taskIds 按 ID 排序；按尝试序号还原轮次顺序。
+const orderedTasks = (await Promise.all(result.taskIds.map((id) => store.getTask(id)))).toSorted((a, b) => a.attempt - b.attempt)
+const rounds = orderedTasks.length - 1
+const nodeReason = result.nodeOutcomes.map((o) => `${o.nodeId}:${o.status}${o.reason ? `:${o.reason}` : ''}`).join(',')
 
 if (reworkMode) {
   // 期望：跑一轮不过 → 派生后继任务 → 再不过 → 预算耗尽 → 升级给人
   if (result.state !== 'ESCALATED') {
-    fail(`预算耗尽后应升级给人，实际 ${result.state}（返工 ${result.rounds} 轮）`)
+    fail(`预算耗尽后应升级给人，实际 ${result.state}（返工 ${rounds} 轮）`)
   }
-  ok(`耗时 ${elapsed}s，返工 ${result.rounds} 轮后升级：${result.escalationReason}`)
+  ok(`耗时 ${elapsed}s，返工 ${rounds} 轮后升级：${nodeReason}`)
 
   if (result.taskIds.length !== 2) fail(`预算 1 轮应产生 2 个任务，实际 ${result.taskIds.length}`)
-  const [firstId, secondId] = result.taskIds
+  const [firstId, secondId] = orderedTasks.map((t) => t.id)
   const second = await store.getTask(secondId)
   if (second?.supersedes_task_id !== firstId) {
     fail('后继任务没有指向被返工的原任务——说不清第几轮卡在哪')
   }
   ok(`返工派生新任务 ${secondId}，supersedes ${firstId}`)
 
-  for (const taskId of result.taskIds) {
+  for (const taskId of orderedTasks.map((t) => t.id)) {
     const task = await store.getTask(taskId)
     const count = (await readdir(join(workRoot, taskId, 'sample'), { withFileTypes: true }))
       .filter(entry => entry.isFile()).length
@@ -263,14 +261,10 @@ if (reworkMode) {
 }
 
 if (result.state !== 'COMPLETED') {
-  fail(
-    `Mission 未通过：${result.state}，未过标准 ${result.failedCriteria.join(', ')}，` +
-      `${result.escalationReason ?? ''}摘要「${result.summary}」`,
-  )
+  fail(`Mission 未通过：${result.state}，节点 ${nodeReason}`)
 }
-ok(`Mission 完成，耗时 ${elapsed}s，返工 ${result.rounds} 轮，Agent 摘要：${result.summary}`)
-
-const taskId = result.taskIds[0]
+const taskId = orderedTasks[0].id
+ok(`Mission 完成，耗时 ${elapsed}s，返工 ${rounds} 轮，Agent 摘要：${orderedTasks[0].result?.summary}`)
 
 // -------------------------------------------------- 3. 账本必须留下痕迹
 

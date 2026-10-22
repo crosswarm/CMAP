@@ -99,7 +99,7 @@ export async function planMission(input,{bin='claude',timeoutMs=120000}={}) {
   if (Buffer.byteLength(JSON.stringify(input)??'')>REQUEST_LIMIT) throw new Error('PLANNER_INPUT_LIMIT')
   const request=structuredClone(input)
   const mission=missionFromRequest(request,'planner-validation','planner-validation')
-  if (mission.constraints.plan) return {...request,plan:mission.constraints.plan}
+  if (request.plan!==undefined) return {...request,plan:mission.constraints.plan}
   // discover() is local static metadata, not a health probe or an execution.
   const adapters=await Promise.all([
     new CodexAdapter({authorization:{mode:'standalone'},outputSchemaPath:fileURLToPath(new URL('../schemas/codex-output.v1.schema.json',import.meta.url))}).discover(),

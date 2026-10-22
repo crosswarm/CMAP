@@ -11,6 +11,7 @@ import {test} from 'node:test'
 import {MemoryStore,type EventActor,type Mission,type MissionState,type Store} from '#domain-model'
 import {missionFromRequest} from '../../apps/control-plane-api/src/mission-submission.ts'
 import {createActivities} from '../../workflows/activities.ts'
+import {materializeDagNode} from '../../workflows/dag-materialization.ts'
 import {MEMORY_ROLE} from '../../workflows/memory-context.ts'
 import {taskCreationId} from '../../workflows/task-creation.ts'
 import {syntheticActivityDeps,syntheticRunner} from './fake-adapter.ts'
@@ -87,6 +88,30 @@ test('续作首任务收到上一个 Mission 已接受的产物、交接内容�
   await createActivities(syntheticActivityDeps({store,runner:syntheticRunner(),workRoot})).createTask({missionId:'mis_next',capability:'code.analyze'})
   assert.equal((await store.listArtifacts(taskId)).length,refs.length)
   assert.deepEqual((await store.getTask(taskId))!.envelope,task.envelope)
+})
+
+test('不带 plan 的续作走 dag/v1：单节点首轮收到同样的冻结输入，重试不重复', async t=>{
+  const store=new MemoryStore(),workRoot=await mkdtemp(join(tmpdir(),'cmap-continuation-'))
+  t.after(()=>rm(workRoot,{recursive:true,force:true}))
+  const prior=await priorMission(store,workRoot)
+  const next=missionFromRequest({request_id:'synthetic-continue',goal:'续作目标',risk_level:'read-meta',
+    acceptance:[{criterion_id:'C',metric:'value',operator:'eq',expected:3}],continues_mission_id:'mis_prior'},'team-ycc','crosswarm')
+  assert.equal(next.workflow_template,'dag/v1')
+  await store.createMission({mission:next,actor})
+  const deps={store,workRoot,runner:syntheticRunner()}
+  const out=await materializeDagNode(deps,{missionId:next.id,nodeId:'main',attempt:1,acceptedDeps:{}})
+  assert.ok('taskId' in out)
+  const task=(await store.getTask(out.taskId))!
+  assert.equal(task.envelope.inputs!.parameters!['continues_mission_id'],'mis_prior')
+  const refs=task.envelope.inputs!.artifact_refs!
+  assert.deepEqual(refs.filter(r=>r.role==='continuation_input').map(r=>r.sha256),[prior.acceptedReportSha],'只继承已接受的产物')
+  assert.deepEqual(refs.filter(r=>r.role==='continuation_memory').map(r=>r.sha256),[prior.memorySha])
+  assert.equal(refs.filter(r=>r.role==='handoff').length,1)
+  for(const ref of refs) assert.equal(sha(await readFile(join(workRoot,out.taskId,ref.uri!))),ref.sha256,`${ref.role} 字节与引用一致`)
+  assert.equal((await store.listArtifacts(out.taskId)).length,refs.length)
+  await materializeDagNode(deps,{missionId:next.id,nodeId:'main',attempt:1,acceptedDeps:{}})
+  assert.equal((await store.listArtifacts(out.taskId)).length,refs.length)
+  assert.deepEqual((await store.getTask(out.taskId))!.envelope,task.envelope)
 })
 
 test('续作来源必须同租户、同 owner 且已终结，否则失败关闭', async t=>{

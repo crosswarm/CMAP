@@ -87,7 +87,7 @@ npm run start:api                        # 控制面 API，http://127.0.0.1:8787
 
 写入要求同源或本机 CLI、`application/json`、请求体不超过 64KiB；
 跨来源网页及非本机 Host 均拒绝。当前仍只允许本机使用，不具备多人身份认证。
-不带 `plan` 的请求启动既有 `inspect/v1`；带显式计划则校验后启动 `dag/v1`。
+新 Mission 一律启动 `dag/v1`：不带 `plan` 时控制面合成单节点计划（目标、全部验收、风险与记忆不变）；带显式计划则校验后使用。`inspect/v1` 只保留给已入账的历史 Mission。
 计划契约见 [mission-plan](schemas/mission-plan.v1.schema.json)，尚不自动生成自然语言计划。
 
 真实创建链路验证：给 API、Worker 和验证脚本配置相同的独立 `CMAP_DB_SCHEMA`、

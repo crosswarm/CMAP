@@ -21,7 +21,7 @@ import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError, EventConflictError } from '#domain-model'
 import type { Store, Approval, ApprovalAdviceV1, ApprovalScope, Artifact, MissionEventV1, TaskEvent } from '#domain-model'
 import type { Mission } from '#domain-model'
-import { missionFromRequest, validateMissionCancel } from './mission-submission.ts'
+import { legacyInspectForm, missionFromRequest, validateMissionCancel } from './mission-submission.ts'
 import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/generated/mission-submission.ts'
 import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/generated/control-plane-context.ts'
 
@@ -468,9 +468,10 @@ const routes: readonly Route[] = [
     handler: async (ctx) => {
       const { owner, startMission } = ctx.config
       if (!owner?.trim() || !startMission) return fail(ctx.res, 503, 'Mission 创建入口未配置')
-      let mission
+      let body, mission
       try {
-        mission = missionFromRequest(await readBody(ctx.req), ctx.tenant, owner)
+        body = await readBody(ctx.req)
+        mission = missionFromRequest(body, ctx.tenant, owner)
       } catch (error) {
         if (error instanceof RangeError) return fail(ctx.res, 400, error.message)
         throw error
@@ -484,11 +485,19 @@ const routes: readonly Route[] = [
         }
       }
       let saved
+      const actor = { type: 'system', id: 'control-plane-api' } as const
       try {
-        saved = await ctx.store.createMission({ mission, actor: { type: 'system', id: 'control-plane-api' } })
+        saved = await ctx.store.createMission({ mission, actor })
       } catch (error) {
-        if (error instanceof MissionConflictError) return fail(ctx.res, 409, error.message)
-        throw error
+        if (!(error instanceof MissionConflictError)) throw error
+        const legacy = (body as { plan?: unknown }).plan === undefined && (await ctx.store.getMission(mission.id))?.workflow_template === 'inspect/v1'
+        if (!legacy) return fail(ctx.res, 409, error.message)
+        try {
+          saved = await ctx.store.createMission({ mission: legacyInspectForm(mission), actor })
+        } catch (legacyError) {
+          if (legacyError instanceof MissionConflictError) return fail(ctx.res, 409, legacyError.message)
+          throw legacyError
+        }
       }
       await respondMissionStart(ctx, saved)
     },

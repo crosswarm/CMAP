@@ -549,6 +549,26 @@ describe('DAG materialization', () => {
     )
   })
 
+  test('Agent 自报 failed 且硬门槛判返工的上一轮也能物化下一轮（与 inspect/v1 返工一致）', async () => {
+    const store = new MemoryStore()
+    const m = mission('mis-dag-failed-rework')
+    await store.createMission({ mission: m, actor: ACTOR })
+    const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-'))
+    assertMaterialized(await materializeDagNode({ store, runner: syntheticRunner(), workRoot }, { missionId: m.id, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+    const taskId = dagTaskId(m.id, 'rootA', 1)
+    for (const [to, eventType] of [['READY', 'TASK_READY'], ['QUEUED', 'TASK_ASSIGNED'], ['RUNNING', 'TASK_STARTED'], ['VERIFYING', 'HARD_GATE_EVALUATED']] as const) {
+      await store.transitionTask({ taskId, to, actor: ACTOR, eventType, idempotencyKey: `${taskId}:${to}` })
+    }
+    await store.setTaskResult(taskId, { ...result(m.id, taskId, 1, 'A'), status: 'failed' })
+    await store.putReview(review(m.id, taskId, 'rework'))
+    await store.transitionTask({ taskId, to: 'REWORK', actor: ACTOR, eventType: 'REVIEW_REWORK_REQUESTED', idempotencyKey: `${taskId}:rework` })
+    await store.transitionTask({ taskId, to: 'COMPLETED', actor: ACTOR, eventType: 'TASK_COMPLETED', idempotencyKey: `${taskId}:completed` })
+    const out = assertMaterialized(await materializeDagNode({ store, runner: syntheticRunner(), workRoot }, {
+      missionId: m.id, nodeId: 'rootA', attempt: 2, supersedesTaskId: taskId, acceptedDeps: {},
+    }))
+    assert.equal((await store.getTask(out.taskId))!.supersedes_task_id, taskId)
+  })
+
   test('rejects missing risk ceiling and strict accepted-attempt metadata mismatches', async () => {
     const store = new MemoryStore()
     const missingCeiling = mission('mis-dag-no-risk', { constraints: { max_additional_cycles: 2, plan } })

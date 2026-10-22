@@ -31,7 +31,7 @@ inspect/v1 的审批等待在单个 7 天 Activity 内轮询，历史不随等�
 
 ## 续作 Mission（continues_mission_id）
 
-`POST /v1/missions` 可选 `continues_mission_id`（仅 inspect/v1，不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结，否则 400（不区分不存在与无权）。字段进入 `constraints`，参与幂等比较。
+`POST /v1/missions` 可选 `continues_mission_id`（仅限不带 plan 的请求，由合成单节点 dag/v1 的首轮任务接收；不能与 plan 同时出现）。来源必须同租户、同 owner 且已终结，否则 400（不区分不存在与无权）。字段进入 `constraints`，参与幂等比较。
 
 新 Mission 首个任务在入账前冻结三类输入，写进工作区 `inputs/continues/<sha256(artifact_id)>/payload` 并登记在本任务名下（producer `cmap-continuation`，provenance 记来源 mission/task/artifact）：
 

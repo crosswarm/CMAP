@@ -22,6 +22,7 @@ import type { MissionPlanV1 } from '../packages/domain-model/src/generated/missi
 import { INPUT_PAYLOAD, safeChildDir, safeMkdir, publishInput, verifiedArtifactBytes } from './artifact-files.ts'
 import { MEMORY_ROLE, freezeMemoryInput, registerMemoryArtifact, type FrozenInputRef, type MemoryDeps } from './memory-context.ts'
 import { resolveReviewInputRef } from './review-inputs.ts'
+import { continuationSource, freezeContinuationInputs, registerContinuationInputs } from './mission-continuation.ts'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 
 type DagNode = MissionPlanV1['nodes'][number]
@@ -184,9 +185,9 @@ const reworkedDagAttempt = async (
   const task = await store.getTask(taskId)
   if (!task || task.state !== 'COMPLETED') return false
   if (!assertEnvelopeMatchesNode(mission, node, task)) return false
+  // 结果状态不限：硬门槛对 Agent 自报 failed 等结果同样判返工，证明靠下面的返工评审与事件。
   if (
     !task.result ||
-    task.result.status !== 'completed' ||
     task.result.mission_id !== mission.id ||
     task.result.task_id !== taskId ||
     task.result.attempt !== task.attempt
@@ -318,7 +319,8 @@ const buildEnvelope = (
   },
   inputs: {
     ...(artifactRefs && artifactRefs.length > 0 ? { artifact_refs: artifactRefs } : {}),
-    parameters: { dependency_task_ids: deps, ...(node.yonwork ? { yonwork_policy_sha256: node.yonwork.policy_sha256 } : {}) },
+    parameters: { dependency_task_ids: deps, ...(node.yonwork ? { yonwork_policy_sha256: node.yonwork.policy_sha256 } : {}),
+      ...(continues(mission, node, attempt) ? { continues_mission_id: mission.constraints['continues_mission_id'] as string } : {}) },
     ...(previousAttempt ? { previous_attempt: previousAttempt } : {}),
   },
   environment: { tenant: mission.tenant },
@@ -368,6 +370,10 @@ const createDagTask = async (
     actor: ACTOR,
   })
 }
+
+/** 续作（continues_mission_id）只接在根节点首轮：控制面只为不带 plan 的请求合成的单节点计划写入该约束。 */
+const continues = (mission: Mission, node: DagNode, attempt: number): boolean =>
+  attempt === 1 && node.deps.length === 0 && mission.constraints['continues_mission_id'] !== undefined
 
 /** YonWork 等无任务工作区的 Adapter 收不到工作区文件，不附记忆快照与返工产物。 */
 const usesWorkspace = (node: DagNode): boolean => node.capability !== 'yonwork.validate'
@@ -466,6 +472,10 @@ export const materializeDagNode = async (
     node.deps,
   )
   const memory = await nodeMemoryInput(deps, mission, node, taskId, input.attempt, existing)
+  // 续作冻结输入：重试沿用已入账信封里的引用，只复核字节，不重新复制。
+  const source = continues(mission, node, input.attempt) ? await continuationSource(deps.store, mission) : null
+  const frozen = existing?.envelope.inputs?.artifact_refs?.filter((r) => ['continuation_input', 'continuation_memory', 'handoff'].includes(r.role))
+  const continuation = !source ? [] : frozen?.length ? frozen : await freezeContinuationInputs(deps.store, deps.workRoot, source, taskId)
   const rework = input.attempt > 1 ? await reworkInputs(deps.store, mission, node, input.supersedesTaskId!) : undefined
   await createDagTask(
     deps.store,
@@ -475,11 +485,12 @@ export const materializeDagNode = async (
     input.attempt,
     acceptedTaskIds,
     // 依赖产物已按父节点复制过的（含父节点快照），不再经 review input 重复交付。
-    [...(artifactRefs ?? []), ...(memory ? [memory.ref] : []),
+    [...(artifactRefs ?? []), ...continuation, ...(memory ? [memory.ref] : []),
       ...(rework?.refs ?? []).filter((ref) => !(artifactRefs ?? []).some((copied) => copied.artifact_id === ref.artifact_id))],
     input.supersedesTaskId,
     rework?.previousAttempt,
   )
   if (memory) await registerMemoryArtifact(deps.store, { missionId: mission.id, taskId, ref: memory.ref, projectId: memory.projectId, sizeBytes: memory.sizeBytes })
+  if (source) await registerContinuationInputs(deps.store, deps.workRoot, mission, source, taskId, continuation)
   return { taskId }
 }
