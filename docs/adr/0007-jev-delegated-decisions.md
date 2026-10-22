@@ -1,6 +1,6 @@
 # ADR-0007：Jev 委托决策层
 
-- 状态：提议（方向由 Cross 于 2026-10-21 提出；阈值与上线指标未定；**未实现**）
+- 状态：已接受：影子模式已实现，enforce 未开启（方向由 Cross 于 2026-10-21 提出；阈值与上线指标未定）
 - 日期：2026-10-21
 - 相关：[ADR-0001](0001-temporal-as-orchestration-engine.md)「控制面不放 LLM」、[Jev 决策辅助](../approval-advisor.md)、[威胁模型 T4/T14](../threat-model.md)
 - 契约：[delegation-policy.v1](../../schemas/delegation-policy.v1.schema.json)、[jev-decision.v1](../../schemas/jev-decision.v1.schema.json)
@@ -81,11 +81,13 @@
 - 委托策略本身是授权根，被改写即授权被改写；靠文件权限与哈希留痕防护，没有签名。
 - 阈值未经校准；影子模式之前没有任何数据支持自动执行。
 
-## 实现清单（均未开始）
+## 实现清单
 
-- [ ] 策略加载与校验（文件权限、过期、租户、sha256）
-- [ ] `decideWithJev` Activity：复用 `scripts/jev-approval.mjs` 的客户端与超时，输入只取可信字段
-- [ ] `JEV_DECIDED` 事件与 `Approval.decided_by = jev:<模型版本>`
-- [ ] 审批闸口、`selectAdapter`、执行不确定三处接入，以及兜底规则与当日预算
-- [ ] WebUI：区分 Jev 决定与真人决定；人工队列展示 Jev 评估
-- [ ] 影子模式一致率统计
+- [x] 策略加载与校验（文件权限、过期、租户、sha256）：`workflows/jev-shadow.ts` 的 `loadDelegationPolicy`；未设 `CMAP_DELEGATION_POLICY_FILE` 时 Worker 不注入，完全不调用 Jev
+- [x] Jev 调用 Activity：影子模式在 dag/v1 `checkDagApproval` 首次遇到未决审批时调用一次（按幂等键 `jev-decided:<approval_id>` 去重），客户端抽到 `scripts/jev-client.ts`（与 `jev-approval.mjs` 共用接口、15 秒超时与密钥读取），输入只取可信字段
+- [ ] `JEV_DECIDED` 事件与 `Approval.decided_by = jev:<模型版本>`：`JEV_DECIDED` 已实现（payload 经 `jev-decision.v1` 校验，actor 为 `jev:<模型>`）；`decided_by` 属 enforce，未实现
+- [ ] 审批闸口、`selectAdapter`、执行不确定三处接入，以及兜底规则与当日预算：只接入了 dag/v1 审批闸口（影子）；其余未开始
+- [ ] WebUI：区分 Jev 决定与真人决定；人工队列展示 Jev 评估：审批详情已单独显示影子决定（决定、自评风险、置信度、理由码），与「Jev 辅助判断」分开；enforce 下的区分未做
+- [x] 影子模式一致率统计：`node scripts/jev-shadow-stats.mjs`（总数、可比较数、一致数、Jev 通过而真人拒绝数）
+
+影子模式的记录一律 `route=human`、`reason_code=shadow_mode`（策略写 enforce 也如此）；Jev 不可用、超时或缺 key 记 `jev_unavailable`，输出不合法记 `jev_invalid_output`，审批照常等真人。2026-10-22 用一条合成 controlled 审批调用真实 Jev：`jev-1.14.0`，918ms，outcome=approve、自评 low、置信度 0.3（两问取小），审批仍 pending。本机网络下 Node 需 `NODE_USE_ENV_PROXY=1` 走代理，否则 TypeSafe 返回 451（地区不可用），记录为 `jev_unavailable`。

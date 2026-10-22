@@ -653,6 +653,21 @@ const routes: readonly Route[] = [
   },
 
   {
+    method: 'GET',
+    pattern: '/v1/approvals/:id/jev-decision',
+    handler: async (ctx) => {
+      // 只读账本里的影子决定：不是人工授权，不改审批。
+      const id = ctx.params['id']!
+      const target = await ctx.store.getApproval(id)
+      const recorded = target && (await missionInTenant(ctx, target.mission_id))
+        ? (await ctx.store.listEvents(target.mission_id)).find((e) => e.event_type === 'JEV_DECIDED' && e.idempotency_key === `jev-decided:${id}`)
+        : undefined
+      if (!recorded) return fail(ctx.res, 404, `Jev 决定不存在：${id}`)
+      json(ctx.res, 200, recorded.payload)
+    },
+  },
+
+  {
     method: 'POST',
     pattern: '/v1/approvals/:id/decision',
     handler: async (ctx) => {

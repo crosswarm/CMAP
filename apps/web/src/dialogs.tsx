@@ -9,9 +9,16 @@ import type {
   Approval,
   ApprovalAdviceV1,
   Artifact,
+  JevDecisionV1,
   Mission,
 } from '#domain-model'
-import { ApiError, post, approvalURL, artifactURL } from './api.ts'
+import {
+  ApiError,
+  post,
+  request,
+  approvalURL,
+  artifactURL,
+} from './api.ts'
 import {
   approvalPayload,
   expectedValue,
@@ -408,6 +415,21 @@ export function ApprovalDialog({
   const [adviceError, setAdviceError] = useState('')
   const adviceRequest = useRef<AbortController | null>(null)
   useEffect(() => () => adviceRequest.current?.abort(), [])
+  // ADR-0007 影子决定：只读账本记录，没有记录（未启用或尚未调用）时不显示。
+  const [shadow, setShadow] = useState<JevDecisionV1 | null>(null)
+  useEffect(() => {
+    const abort = new AbortController()
+    request<JevDecisionV1>(
+      `/v1/approvals/${encodeURIComponent(approval.id)}/jev-decision`,
+      { signal: abort.signal },
+    ).then(
+      (record) => {
+        if (!abort.signal.aborted) setShadow(record)
+      },
+      () => {},
+    )
+    return () => abort.abort()
+  }, [approval.id])
   const inFlight = useRef(false)
   const expired = Date.parse(approval.expires_at) <= Date.now()
   const askAdvice = async () => {
@@ -506,6 +528,35 @@ export function ApprovalDialog({
               只决定当前范围。批准 {scope} 不代表批准{' '}
               {scope === 'controlled' ? 'mutating' : 'controlled'}。
             </p>
+            {shadow && (
+              <section className="advice-box" aria-label="Jev 影子决定">
+                <div className="advice-heading">
+                  <strong>Jev 影子决定（仅记录）</strong>
+                </div>
+                <p className="advice-result">
+                  决定：
+                  {
+                    {
+                      approve: '通过',
+                      reject: '拒绝',
+                      escalate: '转人工',
+                      assign: '分配',
+                      retry: '重做',
+                    }[shadow.outcome]
+                  }
+                  {' · 自评风险 '}
+                  {shadow.assessed_risk ?? '无'}
+                  {shadow.confidence !== null
+                    ? ` · 置信度 ${Math.round(shadow.confidence * 100)}%`
+                    : ''}
+                </p>
+                <p className="muted small">
+                  理由码 <code>{shadow.reason_code}</code> ·{' '}
+                  {shadow.model ?? '模型不可用'}
+                  。影子模式只记录，不改变审批，仍由你决定。
+                </p>
+              </section>
+            )}
             <section className="advice-box" aria-label="Jev 辅助判断">
               <div className="advice-heading">
                 <strong>Jev 辅助判断</strong>

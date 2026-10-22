@@ -11,6 +11,7 @@ import { ApplicationFailure, Context } from '@temporalio/activity'
 import { ApprovalDecisionConflictError, detectNoProgress, isTerminal, snapshotRunnerDescriptor } from '#domain-model'
 import { adapterForBinding, createActivities, type ActivityDeps } from './activities.ts'
 import { createDagAttemptRunner } from './dag-attempt.ts'
+import { recordJevShadowDecision, type JevShadowDeps } from './jev-shadow.ts'
 import {
   acceptedDagAttempt,
   dagAttemptSatisfiesNode,
@@ -277,7 +278,11 @@ const withProgress = (
   progress: ProgressSnapshot | undefined,
 ): DagNodeOutcome => progress ? { ...outcome, progress } : outcome
 
-export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: string }) => {
+export const createDagActivities = (deps: ActivityDeps & {
+  readonly workRoot: string
+  /** ADR-0007 影子模式；只在配置了委托策略文件时注入。 */
+  readonly jevShadow?: JevShadowDeps
+}) => {
   const { store } = deps
   const runner = snapshotRunnerDescriptor(deps.runner)
   const base = createActivities(deps)
@@ -349,7 +354,11 @@ export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: st
       }
       const reread = await store.getApproval(approval.id)
       if (!reread) throw new Error(`审批不存在：${approval.id}`)
-      if (reread.decision === 'pending') return { decision: 'pending' }
+      if (reread.decision === 'pending') {
+        // 影子记录不改审批；失败只记日志，照常等真人。
+        if (deps.jevShadow) await recordJevShadowDecision(store, deps.jevShadow, reread)
+        return { decision: 'pending' }
+      }
       const waited = await base.waitForApproval({ taskId, approvalId: reread.id, scope: reread.scope })
       return { decision: waited.decision === 'approved' ? 'approved' : 'rejected' }
     },

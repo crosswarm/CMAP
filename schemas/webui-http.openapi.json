@@ -179,6 +179,27 @@
           "503": { "$ref": "#/components/responses/JsonError" }
         }
       }
+    },
+    "/v1/approvals/{approvalId}/jev-decision": {
+      "get": {
+        "summary": "Read the recorded Jev shadow decision for an approval",
+        "description": "Returns the JEV_DECIDED ledger record (ADR-0007 shadow mode). Read-only: it is not human authorization and never changes Approval or Task state. 404 when the approval is not visible in this tenant or no decision was recorded.",
+        "parameters": [
+          { "name": "approvalId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recorded decision; route is always human in shadow mode.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "jev-decision.v1.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/JsonError" },
+          "404": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
     }
   },
   "components": {

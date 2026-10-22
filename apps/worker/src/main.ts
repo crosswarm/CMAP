@@ -166,6 +166,8 @@ const worker = await Worker.create({
       signDispatchPermit,
       workRoot,
       ...(memory ? { memory } : {}),
+      // ADR-0007 影子模式：未配置策略文件 = 不启用，完全不调用 Jev。
+      ...(process.env['CMAP_DELEGATION_POLICY_FILE'] ? { jevShadow: { policyFile: process.env['CMAP_DELEGATION_POLICY_FILE'] } } : {}),
     }),
   },
 })

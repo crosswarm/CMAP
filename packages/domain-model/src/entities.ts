@@ -141,6 +141,8 @@ export const EVENT_TYPES = [
   'APPROVAL_REQUESTED',
   'APPROVAL_GRANTED',
   'APPROVAL_DENIED',
+  /** ADR-0007 Jev 决定（payload 为 jev-decision.v1）。影子模式只记录，不改审批或任务状态。 */
+  'JEV_DECIDED',
   'HARD_GATE_EVALUATED',
   'REVIEW_STARTED',
   'REVIEW_APPLICATION_INTENT',
