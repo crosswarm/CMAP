@@ -20,11 +20,11 @@ process.env['grpc_proxy'] = ''
 
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync, type KeyObject } from 'node:crypto'
 
 import { Worker, NativeConnection } from '@temporalio/worker'
 
-import { PgStore, issueDispatchPermit, verifyDispatchPermit, DispatchPermitError, loadOrCreatePermitKey } from '#domain-model'
+import { PgStore, issueDispatchPermit, verifyDispatchPermit, DispatchPermitError, loadOrCreatePermitKey, loadPinnedPublicKey } from '#domain-model'
 import type { AdapterAuthorization, AgentAdapter, DispatchPermitSigner } from '#adapter-sdk'
 import { CodexAdapter, CODEX_CAPABILITIES } from '../../../adapters/codex-adapter/src/index.ts'
 import { RemoteRunnerAdapter } from '../../../adapters/remote-runner/src/index.ts'
@@ -65,41 +65,60 @@ const authorization:AdapterAuthorization={mode:'managed',verifier:(token,envelop
   return verifyDispatchPermit(token,{publicKey,issuer,runnerId,adapterId,envelope})
 }}
 
+// 离线宽限上限；实际宽限另受任务等待截止约束（取剩余时间的一半），保证失联先判执行不确定、不先撞任务超时。
+const graceSeconds = Number(process.env['CMAP_REMOTE_OFFLINE_GRACE_SECONDS'] ?? 600)
+if (!Number.isInteger(graceSeconds) || graceSeconds < 1) throw new Error('CMAP_REMOTE_OFFLINE_GRACE_SECONDS 须为正整数秒')
+const remoteRunner = (target: string, baseUrl: string, agentId: string, runnerPublicKey?: KeyObject): RemoteRunnerAdapter => {
+  if (!permitKeyFile) throw new Error('runner 守护进程只认固定公钥：需要 CMAP_PERMIT_KEY_FILE')
+  if (!target || target === runnerId) throw new Error('runner 守护进程的 RUNNER_ID 必填且不能与本机 Worker 的 RUNNER_ID 相同')
+  return new RemoteRunnerAdapter({
+    authorization:{mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{
+      if(contextRunner!==target)throw new DispatchPermitError('CLAIM_MISMATCH')
+      return verifyDispatchPermit(token,{publicKey,issuer,runnerId:target,adapterId,envelope})
+    }},
+    ...(runnerPublicKey ? { runnerPublicKey } : {}),
+    baseUrl,
+    runnerId: target,
+    agentId,
+    workRoot,
+    capabilities: CODEX_CAPABILITIES,
+    offlineGraceMs: graceSeconds * 1000,
+  })
+}
+
+// 本机 runner 守护进程（S16）：设置后本机 codex 经 127.0.0.1 上的守护进程执行，Worker 重启不影响执行中的 Codex；
+// 守护进程不在线时 codex 健康探测失败，不回落进程内执行。Kimi / YonWork 仍在 Worker 进程内。
+const localRunnerUrl = process.env['CMAP_LOCAL_RUNNER_URL']?.trim()
+const localCodex = (): AgentAdapter => {
+  if (!localRunnerUrl) return new CodexAdapter({
+    authorization,
+    outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
+    // 运行记录：Worker 重启后据此恢复对 Codex 子进程的观察，且绝不重跑（S1）。
+    runsDir: join(workRoot, '.runs'),
+  })
+  // 只接受回环地址：本机 runner 不是第二台机器，不得借此接入 ADR-0006 范围外的主机。
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(localRunnerUrl).hostname)) throw new Error('CMAP_LOCAL_RUNNER_URL 只能是回环地址')
+  const pubkeyFile = process.env['CMAP_LOCAL_RUNNER_PUBKEY_FILE']?.trim()
+  if (!pubkeyFile) throw new Error('CMAP_LOCAL_RUNNER_URL 需要 CMAP_LOCAL_RUNNER_PUBKEY_FILE')
+  return remoteRunner(process.env['CMAP_LOCAL_RUNNER_ID']?.trim() ?? '', localRunnerUrl, 'codex', loadPinnedPublicKey(pubkeyFile))
+}
+
 const adapterNames = parseAdapterNames(process.env['CMAP_AGENTS'])
 const adapters: AgentAdapter[] = adapterNames.map((name) =>
   name === 'kimi'
     ? new KimiAdapter({authorization})
     : name === 'yonwork'
       ? new YonWorkAdapter({profileId:process.env['CMAP_YONWORK_AGENT_ID'] ?? '',runnerId,authorization})
-    : new CodexAdapter({
-        authorization,
-        outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
-        // 运行记录：Worker 重启后据此恢复对 Codex 子进程的观察，且绝不重跑（S1）。
-        runsDir: join(workRoot, '.runs'),
-      }),
+    : localCodex(),
 )
 
 // 远程 runner（ADR-0006）：只由本机主动访问 lap:8790；lap 不在线时路由按健康探测回落本地。
 const remoteRunnerUrl = process.env['CMAP_REMOTE_RUNNER_URL']?.trim()
 if (remoteRunnerUrl) {
   const remoteRunnerId = process.env['CMAP_REMOTE_RUNNER_ID']?.trim() ?? ''
-  if (!permitKeyFile) throw new Error('CMAP_REMOTE_RUNNER_URL 需要 CMAP_PERMIT_KEY_FILE：远程 runner 只认固定公钥')
-  if (!remoteRunnerId || remoteRunnerId === runnerId) throw new Error('CMAP_REMOTE_RUNNER_ID 必填且不能与本机 RUNNER_ID 相同')
-  // 离线宽限上限；实际宽限另受任务等待截止约束（取剩余时间的一半），保证失联先判执行不确定、不先撞任务超时。
-  const graceSeconds = Number(process.env['CMAP_REMOTE_OFFLINE_GRACE_SECONDS'] ?? 600)
-  if (!Number.isInteger(graceSeconds) || graceSeconds < 1) throw new Error('CMAP_REMOTE_OFFLINE_GRACE_SECONDS 须为正整数秒')
-  adapters.push(new RemoteRunnerAdapter({
-    authorization:{mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{
-      if(contextRunner!==remoteRunnerId)throw new DispatchPermitError('CLAIM_MISMATCH')
-      return verifyDispatchPermit(token,{publicKey,issuer,runnerId:remoteRunnerId,adapterId,envelope})
-    }},
-    baseUrl: remoteRunnerUrl,
-    runnerId: remoteRunnerId,
-    agentId: `codex@${remoteRunnerId}`,
-    workRoot,
-    capabilities: CODEX_CAPABILITIES,
-    offlineGraceMs: graceSeconds * 1000,
-  }))
+  if (localRunnerUrl && remoteRunnerId === process.env['CMAP_LOCAL_RUNNER_ID']?.trim()) throw new Error('CMAP_REMOTE_RUNNER_ID 不能与 CMAP_LOCAL_RUNNER_ID 相同')
+  // lap 响应验签公钥由适配器从 CMAP_REMOTE_RUNNER_PUBKEY_FILE 加载
+  adapters.push(remoteRunner(remoteRunnerId, remoteRunnerUrl, `codex@${remoteRunnerId}`))
 }
 
 const descriptors = await Promise.all(adapters.map(adapter => adapter.discover()))

@@ -9,7 +9,7 @@ import type {
 } from '#domain-model'
 import { ApplicationFailure, Context } from '@temporalio/activity'
 import { ApprovalDecisionConflictError, detectNoProgress, isTerminal, snapshotRunnerDescriptor } from '#domain-model'
-import { createActivities, type ActivityDeps } from './activities.ts'
+import { adapterForBinding, createActivities, type ActivityDeps } from './activities.ts'
 import { createDagAttemptRunner } from './dag-attempt.ts'
 import {
   acceptedDagAttempt,
@@ -321,7 +321,7 @@ export const createDagActivities = (deps: ActivityDeps & { readonly workRoot: st
     async runDagAttempt(input: { taskId: string }) {
       if (activityAttempt() > 1) {
         const binding = (await store.getTask(input.taskId))?.binding
-        if (binding && adapters.find((a) => a.adapterId === binding.adapter)?.restartSafe !== true) {
+        if (binding && adapterForBinding(adapters, binding)?.restartSafe !== true) {
           throw ApplicationFailure.nonRetryable(`Adapter ${binding.adapter} 不支持 Worker 重启恢复，不重试`, 'ATTEMPT_NOT_RESTART_SAFE')
         }
       }

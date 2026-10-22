@@ -217,6 +217,10 @@ export interface ApplyReviewOutput {
   readonly escalationReason?: string
 }
 
+/** binding 所属的 Adapter：本机 Adapter（无 runnerId）按 adapter_id；远程 runner 另须 runner_id 一致。 */
+export const adapterForBinding = (adapters: readonly AgentAdapter[], binding: RemoteTaskBinding): AgentAdapter | undefined =>
+  adapters.find((a) => a.adapterId === binding.adapter && (a.runnerId === undefined || a.runnerId === binding.runner_id))
+
 export const createActivities = (deps: ActivityDeps) => {
   const { store, adapter, workRoot } = deps
   if (adapter && deps.adapters) throw new Error('adapter 与 adapters 不能同时配置')
@@ -226,7 +230,8 @@ export const createActivities = (deps: ActivityDeps) => {
     if (candidate.authorizationMode !== 'managed') throw new Error('MANAGED_ADAPTER_REQUIRED')
     if (typeof candidate.prepareBinding !== 'function') throw new Error('PREPARED_ADAPTER_REQUIRED')
   }
-  if (new Set(adapters.map((a) => a.adapterId)).size !== adapters.length ||
+  // 同一 adapter_id 可注册多台 runner（本机 runner 与 lap，S16），以 adapter_id + runner_id 区分
+  if (new Set(adapters.map((a) => `${a.adapterId}@${a.runnerId ?? ''}`)).size !== adapters.length ||
       new Set(adapters.map((a) => a.agentId)).size !== adapters.length) {
     throw new Error('Adapter / Agent ID 重复')
   }
@@ -253,9 +258,9 @@ export const createActivities = (deps: ActivityDeps) => {
   }
   const approvalWaitTimeoutMs = deps.approvalWaitTimeoutMs ?? 24 * 3600 * 1000
 
-  const boundAdapter = (adapterId: string): AgentAdapter => {
-    const selected = adapters.find((a) => a.adapterId === adapterId)
-    if (!selected) throw new Error(`已绑定 Adapter 不可用：${adapterId}；不自动换 Agent`)
+  const boundAdapter = (binding: RemoteTaskBinding): AgentAdapter => {
+    const selected = adapterForBinding(adapters, binding)
+    if (!selected) throw new Error(`已绑定 Adapter 不可用：${binding.adapter}@${binding.runner_id}；不自动换 Agent`)
     return selected
   }
 
@@ -716,18 +721,18 @@ export const createActivities = (deps: ActivityDeps) => {
       let denied: AdmissionDenial | undefined
       try {denied=await readAdmissionDenial(store,t)}
       catch {
-        try {if(t.binding&&!t.result)await boundAdapter(t.binding.adapter).cancel(t.binding,'RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
+        try {if(t.binding&&!t.result)await boundAdapter(t.binding).cancel(t.binding,'RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
         finally {throw new Error('RUNNER_ADMISSION_OBSERVATION_UNAVAILABLE')}
       }
       if (denied) return {status:'failed',passed:false,failedCriteria:[],summary:admissionDenialReason(denied),...denied}
       if (t.result) {
-        if (t.binding) await recordResultArtifacts(t, t.result, boundAdapter(t.binding.adapter), t.binding)
+        if (t.binding) await recordResultArtifacts(t, t.result, boundAdapter(t.binding), t.binding)
         return judge(envelope, t.result)
       }
 
       if (!t.binding) throw new Error(`任务 ${taskId} 尚未派发，无结果可收`)
       if (await hasExecutionUncertainty(t)) return {executionUncertain}
-      const a = boundAdapter(t.binding.adapter)
+      const a = boundAdapter(t.binding)
 
       const waitMs =
         deps.waitTimeoutMs ?? (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
@@ -1035,7 +1040,7 @@ export const createActivities = (deps: ActivityDeps) => {
 
     /** 续接：取消 Mission 的未绑定任务，已绑定的调用其 Adapter cancel。可重复执行。 */
     async cancelMissionTasks(input: CancelMissionTasksInput): Promise<{ canceled: string[]; unconfirmed: string[] }> {
-      return cancelMissionTasks(store, (id) => adapters.find((a) => a.adapterId === id), input)
+      return cancelMissionTasks(store, (binding) => adapterForBinding(adapters, binding), input)
     },
 
     /** 协作：验收通过的可复用结论提交 Memross 候选。旁路，失败只记事件。 */

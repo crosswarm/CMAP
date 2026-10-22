@@ -5,7 +5,7 @@ import { Context } from '@temporalio/activity'
 import type { RemoteTaskBinding, ResourceLock, Store, TaskEnvelopeV1, TaskRecord } from '#domain-model'
 import { LockUnavailableError, snapshotRunnerDescriptor } from '#domain-model'
 import { AdapterError, type AgentAdapter, type NormalizedAgentStatus } from '#adapter-sdk'
-import { createActivities, type ActivityDeps } from './activities.ts'
+import { adapterForBinding, createActivities, type ActivityDeps } from './activities.ts'
 import { preflightTaskDispatch, readAdmissionDenial, admissionDenialReason } from './runner-admission.ts'
 
 export type DagAttemptOutcome = {
@@ -66,8 +66,8 @@ const adapterRegistry = (deps: ActivityDeps): readonly AgentAdapter[] => {
 }
 
 const findAdapter = (adapters: readonly AgentAdapter[], binding: RemoteTaskBinding): AgentAdapter => {
-  const adapter = adapters.find((a) => a.adapterId === binding.adapter)
-  if (!adapter) throw new Error(`已绑定 Adapter 不可用：${binding.adapter}`)
+  const adapter = adapterForBinding(adapters, binding)
+  if (!adapter) throw new Error(`已绑定 Adapter 不可用：${binding.adapter}@${binding.runner_id}`)
   return adapter
 }
 

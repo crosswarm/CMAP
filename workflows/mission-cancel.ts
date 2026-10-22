@@ -7,7 +7,7 @@
  * - 已出结果但未评审的任务直接落 CANCELED（执行已结束，评审不再进行）。
  * finalize 时把 Mission 置为 CANCELED。可重复执行：每一步都以账本状态与幂等键为准。
  */
-import { ApprovalDecisionConflictError, IllegalTransitionError, isTerminal, type Store, type TaskRecord } from '#domain-model'
+import { ApprovalDecisionConflictError, IllegalTransitionError, isTerminal, type RemoteTaskBinding, type Store, type TaskRecord } from '#domain-model'
 import type { AgentAdapter } from '#adapter-sdk'
 
 const ACTOR = { type: 'system', id: 'mission-cancel' } as const
@@ -36,7 +36,7 @@ const toCanceled = async (store: Store, task: TaskRecord): Promise<void> => {
 
 export async function cancelMissionTasks(
   store: Store,
-  adapterFor: (adapterId: string) => AgentAdapter | undefined,
+  adapterFor: (binding: RemoteTaskBinding) => AgentAdapter | undefined,
   input: CancelMissionTasksInput,
 ): Promise<{ canceled: string[]; unconfirmed: string[] }> {
   const mission = await store.getMission(input.missionId)
@@ -45,7 +45,7 @@ export async function cancelMissionTasks(
   for (const task of await store.queryTasks({ missionId: mission.id })) {
     if (isTerminal(task.state)) continue
     if (task.binding && !task.result) {
-      const adapter = adapterFor(task.binding.adapter)
+      const adapter = adapterFor(task.binding)
       let confirmed = false
       if (adapter) {
         try { await adapter.cancel(task.binding, input.reason); confirmed = true } catch { confirmed = false }

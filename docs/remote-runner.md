@@ -58,7 +58,34 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
 
 把 `crossmini-permit.pub` 拷到 lap（例如 `~/.cmap/crossmini-permit.pub`）。轮换私钥后必须同步更新 lap 上的公钥文件；没有网络发现。
 
-`apps/worker` 未改动：适配器在没有显式传入密钥时，从 `CMAP_PERMIT_KEY_FILE`（请求签名）与 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`（应答验签）加载，缺任一项即拒绝构造。
+lap 的适配器在没有显式传入密钥时，从 `CMAP_PERMIT_KEY_FILE`（请求签名）与 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`（应答验签）加载，缺任一项即拒绝构造。
+
+## 本机 runner 守护进程（S16，可选）
+
+目的：CrossMini 本机的 Codex 也经 runner 守护进程执行，而不是在 Worker 进程内 spawn。Worker 重启（含 SIGKILL）不影响执行中的 Codex，本机与 lap 走同一条协议路径（签名请求/应答、许可受众绑定、CrossMini 复算产物哈希）。
+
+做法：CrossMini 上再起一个 `apps/runner` 守护进程，只监听 `127.0.0.1`；Worker 把 `codex` 这个 Agent ID 注册成指向它的 `RemoteRunnerAdapter`（取代进程内 `CodexAdapter`）。lap 照旧注册为 `codex@lap`。两者 Adapter ID 都是 `remote-runner-adapter`，账本里只靠 `binding.runner_id` 区分；收结果、取消、Worker 重启恢复都按 `adapter_id + runner_id` 找回所属 runner（同一 runner 注册两次仍拒绝启动）。
+
+Worker 新增变量（不设 `CMAP_LOCAL_RUNNER_URL` 则行为不变，仍是进程内 `CodexAdapter`）：
+
+| 变量 | 说明 |
+|---|---|
+| `CMAP_LOCAL_RUNNER_URL` | 例如 `http://127.0.0.1:8791`。只接受回环地址（`127.0.0.1` / `localhost` / `[::1]`），否则拒绝启动 |
+| `CMAP_LOCAL_RUNNER_ID` | 本机守护进程的 `RUNNER_ID`，例如 `crossmini-runner`；不得等于 Worker 的 `RUNNER_ID` 或 `CMAP_REMOTE_RUNNER_ID` |
+| `CMAP_LOCAL_RUNNER_PUBKEY_FILE` | 本机守护进程响应验签公钥（用下面「导出 lap 公钥」同一命令从其 `CMAP_RUNNER_KEY_FILE` 导出）；与 lap 的公钥是两把 |
+
+另需 `CMAP_PERMIT_KEY_FILE`（与 lap 共用同一把请求/许可签名私钥，受众不同不能互相冒用）；`CMAP_REMOTE_OFFLINE_GRACE_SECONDS` 对两台 runner 都生效。
+
+本机守护进程按下面「lap 配置」同一套变量部署，差别：`RUNNER_ID` 用上面的本机 ID；`CMAP_RUNNER_LISTEN_HOST=127.0.0.1`；端口不要与别的服务冲突（例如 `8791`）；`CMAP_WORK_ROOT` 与 `CMAP_RUNNER_KEY_FILE` 必须是独立路径，**不得与 Worker 的 `CMAP_WORK_ROOT` 相同**（两边都按任务 ID 建子目录）；`RUNNER_ALLOWED_*` / `RUNNER_MAX_RISK` 应与 Worker 本机准入一致，否则路由会按 health 公布的白名单跳过 `codex`。它同样不得持有 `CMAP_PERMIT_KEY_FILE`、`CMAP_DATABASE_URL`、`MEMROSS_*`、`TEMPORAL_ADDRESS`（launchd 单独一份环境）。
+
+边界：
+
+- 只有 Codex 走守护进程；Kimi、YonWork 仍在 Worker 进程内执行，Worker 重启时照旧升级 `NODE_EXECUTION_ERROR`。
+- 本机守护进程不在线时 `codex` 健康探测失败，**不回落进程内执行**；有 `fallback_agents` 的任务按其顺序回落（例如到 `codex@lap`），否则派发失败。
+- 本机 Codex 从此以 `-m $CMAP_CODEX_MODEL` 显式指定模型（守护进程必填），不再依赖 CrossMini `~/.codex` 默认模型。
+- 本机任务的 `binding.runner_id` 与产物 provenance 由 Worker 的 `RUNNER_ID` 变为本机守护进程的 `RUNNER_ID`；切换前已绑定、尚未结束的进程内任务（`codex-adapter`）在切换后的 Worker 上找不到 Adapter，切换前应等其收尾。
+- 这不是第二台机器：守护进程与控制面同机，只经回环访问，不扩大 ADR-0006 的范围。
+- 验证：`tests/workflow/local-runner.test.ts`（两台守护进程同时注册：各自执行 1 次、binding/provenance 按 runner 区分、Worker 重启按 runner 找回 lap、取消落到所属 runner、重复注册拒绝）；CrossMini 真实部署与 Worker 重启实测 ⬜ 未做。
 
 ## lap（runner 守护进程）配置
 
@@ -213,4 +240,4 @@ CrossMini 起真实 Worker（`apps/worker/src/main.ts`），lap 守护进程为 
 - nonce 防重放缓存在内存，守护进程重启后窗口内（≤ 约 4 秒）理论上可重放；时钟偏差超过 2 秒的请求一律被拒，两机需要 NTP 同步。
 - 产物随结果以 base64 内联拉取，单个约 16 MiB 上限，适合报告类证据，不适合大文件。
 - `RemoteRunnerAdapter` 的静态风险上限默认 `mutating`（与被包装的 Codex 一致），真正的上限由 lap 的 `RUNNER_MAX_RISK` 执行：派发前按 health 公布的白名单回落本地（`risk_exceeded`），探测后白名单才收紧的情形仍由 lap 准入拒绝兜底。白名单不含 `affinity.host`，指定主机不符仍由 lap 准入拒绝（`HOST_MISMATCH`）。
-- 只有一个远程 runner（固定 Adapter ID `remote-runner-adapter`）；第三台机器不在 ADR-0006 范围内。
+- 远程 runner 至多两个：lap 与可选的本机 runner 守护进程（同为 Adapter ID `remote-runner-adapter`，按 `runner_id` 区分）；第三台机器不在 ADR-0006 范围内。
