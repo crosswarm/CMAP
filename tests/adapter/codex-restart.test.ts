@@ -6,9 +6,9 @@
  */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -131,6 +131,29 @@ test('启动前独占创建运行记录，记录含恢复所需字段且不含�
     assert.ok(record.result_file.endsWith('.cmap-result-tsk-rec-fields.json'))
     assert.ok(!raw.includes('SECRET-PROMPT-BODY'))
     assert.equal((await stat(f.recordPath)).mode & 0o777, 0o600)
+  } finally { await rm(f.root, { recursive: true, force: true }) }
+})
+
+test('standalone（无 runsDir）：结果文件在工作区外的独占临时目录，cleanup 后删除', async () => {
+  const f = await fixture('tsk-standalone-out', 'ok', 100)
+  const outLog = join(f.root, 'out-path')
+  const wrapper = join(f.root, 'wrap.cjs')
+  await writeFile(wrapper, `#!${process.execPath}
+const a = process.argv.slice(2)
+require('node:fs').writeFileSync(${JSON.stringify(outLog)}, a[a.indexOf('-o') + 1])
+require(${JSON.stringify(f.bin)})
+`)
+  await chmod(wrapper, 0o755)
+  const adapter = new CodexAdapter({ authorization: { mode: 'standalone' }, bin: wrapper, outputSchemaPath: SCHEMA })
+  try {
+    const binding = await adapter.startTask(envelope('tsk-standalone-out'), context(f.worktree))
+    await untilTerminal(adapter, binding)
+    assert.equal((await adapter.collectResult(binding)).status, 'completed')
+    const resultFile = await readFile(outLog, 'utf8')
+    const rel = relative(await realpath(f.worktree), resultFile)
+    assert.ok(rel.startsWith('..'), `结果文件不得位于 Agent 可写的工作区内：${resultFile}`)
+    await adapter.cleanup(binding)
+    await assert.rejects(stat(dirname(resultFile)), { code: 'ENOENT' })
   } finally { await rm(f.root, { recursive: true, force: true }) }
 })
 

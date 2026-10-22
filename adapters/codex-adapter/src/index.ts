@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
 import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import type {
   TaskEnvelopeV1,
@@ -332,10 +332,11 @@ export class CodexAdapter implements AgentAdapter {
     // TMPDIR 与 -C 都可能含 macOS 卷别名；沙箱可写根必须是物理路径。
     const physicalWorkDir = await realpath(workDir)
     // -o 由沙箱外的 codex 进程写入且会跟随符号链接：结果文件不能放在 Agent 可写的工作区。
-    // shortcut: 无 runsDir（standalone 测试/e2e）时仍在工作区，生产 Worker 与 runner 均配置 runsDir；standalone 接入不可信任务前要改。
-    const resultFile = join(this.#runsDir ?? physicalWorkDir, `.cmap-result-${envelope.identity.task_id}.json`)
-    const prompt = renderTaskPrompt(envelope)
+    // 无 runsDir（standalone）时用本进程独有的临时目录（0700），cleanup 时删除。
     const physicalTmpDir = await realpath(tmpdir())
+    const resultDir = this.#runsDir ?? (await mkdtemp(join(physicalTmpDir, 'cmap-codex-result-')))
+    const resultFile = join(resultDir, `.cmap-result-${envelope.identity.task_id}.json`)
+    const prompt = renderTaskPrompt(envelope)
     const binding = this.prepareBinding(envelope, ctx)
 
     const args = buildCodexArgs(envelope, {
@@ -350,6 +351,7 @@ export class CodexAdapter implements AgentAdapter {
       await ctx.beforeSend?.(binding)
       assertAdapterAuthorization(this.#authorization, envelope, ctx, ADAPTER_ID)
     } catch (cause) {
+      if (!this.#runsDir) await rm(resultDir, { recursive: true, force: true })
       if (ownsWorkDir) {
         await rm(workDir, { recursive: true, force: true })
       }
@@ -701,6 +703,7 @@ export class CodexAdapter implements AgentAdapter {
   async cleanup(binding: RemoteTaskBinding): Promise<void> {
     const state = this.#runs.get(binding.remote_task_id)
     if (!state) return
+    if (!this.#runsDir) await rm(dirname(state.resultFile), { recursive: true, force: true })
     if (state.ownsWorkDir) {
       await rm(state.workDir, { recursive: true, force: true })
     }
