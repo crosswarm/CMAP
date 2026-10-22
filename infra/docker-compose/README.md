@@ -144,7 +144,7 @@ docker run --rm --network cmap-dev_default \
   -e DB=postgres12 -e DB_PORT=5432 \
   -e POSTGRES_USER=temporal -e POSTGRES_PWD=temporal -e POSTGRES_SEEDS=postgresql \
   -e HTTP_PROXY= -e HTTPS_PROXY= -e http_proxy= -e https_proxy= -e NO_PROXY='*' \
-  temporalio/auto-setup:latest autosetup
+  temporalio/auto-setup:1.29.3 autosetup
 
 # 3. 起完整栈，namespace 由 verify 脚本兜底创建
 docker compose -f infra/docker-compose/docker-compose.yml up -d
@@ -160,5 +160,38 @@ PostgreSQL 用 `5433` 以避开本机可能存在的 `5432`。
 
 ## 版本钉扎
 
-镜像版本由 `TEMPORAL_VERSION` / `TEMPORAL_UI_VERSION` 控制，默认 `latest`。
-`.env.example` 中已记录首次验证通过的 digest（server 1.29.3），复制为 `.env` 即可钉住，避免 `latest` 漂移导致 Workflow 重放行为变化。
+compose 默认已钉死版本，不依赖 `.env`：Temporal server `temporalio/auto-setup:1.29.3`、UI `temporalio/ui:2.56.0`，避免 `latest` 漂移导致 Workflow 重放行为变化。
+两个 tag 经 registry 核对，解析的 digest 与 2026-10-22 实际运行的镜像一致（`.env.example` 记录了 digest）。
+
+```bash
+docker exec cmap-temporal temporal-server --version     # temporal version 1.29.3
+docker image inspect "$(docker inspect -f '{{.Image}}' cmap-temporal-ui)" \
+  --format '{{index .Config.Labels "org.opencontainers.image.version"}}'   # 2.56.0
+```
+
+升级：先在隔离环境验证 Workflow 重放，再同时改 compose 默认值与 `.env.example`；也可用 `TEMPORAL_VERSION` / `TEMPORAL_UI_VERSION` 临时覆盖。
+
+## 备份与还原
+
+```bash
+# 备份 cmap（账本）与 temporal（工作流状态）两个库，任一失败则非零退出
+node scripts/backup-db.mjs
+```
+
+经 `docker exec cmap-postgres pg_dump -Fc` 导出，宿主无需安装 PG 客户端，也不涉及密码。
+文件为 `~/.cmap/backups/<库名>-<UTC时间戳>.dump`（目录 0700、文件 0600；含账本业务数据，默认在仓库之外，勿提交）。
+`CMAP_BACKUP_DIR` 改目录，`CMAP_BACKUP_KEEP` 改每库保留份数（默认 14，超出的旧备份自动删除）。
+未覆盖 `temporal_visibility`（仅 Web UI 查询索引，非权威状态）。
+
+先还原到临时库校验（不碰源库），确认后删除：
+
+```bash
+TS=20261022T132739Z                                  # 换成要还原的备份时间戳
+DB=cmap_restore_check_$TS
+docker exec cmap-postgres createdb -U temporal $DB
+docker exec -i cmap-postgres pg_restore -U temporal -d $DB --no-owner --exit-on-error < ~/.cmap/backups/cmap-$TS.dump
+docker exec cmap-postgres psql -U temporal -d $DB -c 'select count(*) from public.missions'   # 抽查行数
+docker exec cmap-postgres dropdb -U temporal $DB
+```
+
+灾难恢复到正式库时，先停 API 与 Worker，对已清空重建的 `cmap` 库执行同样的 `pg_restore`。

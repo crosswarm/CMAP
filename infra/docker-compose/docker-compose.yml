@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
 
   temporal:
-    image: temporalio/auto-setup:${TEMPORAL_VERSION:-latest}
+    image: temporalio/auto-setup:${TEMPORAL_VERSION:-1.29.3}
     container_name: cmap-temporal
     # 跳过镜像默认的 `autosetup` 参数，直接走 start-temporal.sh
     # （其内容就是 `exec temporal-server --env docker start`）。
@@ -89,7 +89,7 @@ services:
     restart: unless-stopped
 
   temporal-ui:
-    image: temporalio/ui:${TEMPORAL_UI_VERSION:-latest}
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-2.56.0}
     container_name: cmap-temporal-ui
     depends_on:
       temporal:

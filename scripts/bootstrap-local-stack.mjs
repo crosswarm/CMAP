@@ -41,7 +41,7 @@ if (hasSchema === '1') {
   await run('docker', ['run', '-d', '--name', 'cmap-temporal-setup', '--network', network,
     '-e', 'DB=postgres12', '-e', 'DB_PORT=5432', '-e', 'POSTGRES_USER=temporal', '-e', 'POSTGRES_PWD=temporal', '-e', 'POSTGRES_SEEDS=postgresql',
     '-e', 'HTTP_PROXY=', '-e', 'HTTPS_PROXY=', '-e', 'http_proxy=', '-e', 'https_proxy=', '-e', 'NO_PROXY=*',
-    `temporalio/auto-setup:${process.env['TEMPORAL_VERSION'] ?? 'latest'}`, 'autosetup'])
+    `temporalio/auto-setup:${process.env['TEMPORAL_VERSION'] ?? '1.29.3'}`, 'autosetup'])
   try {
     for (let i = 0; ; i += 1) {
       const { stdout } = await run('docker', ['logs', 'cmap-temporal-setup'], { maxBuffer: 64 * 1024 * 1024 })
