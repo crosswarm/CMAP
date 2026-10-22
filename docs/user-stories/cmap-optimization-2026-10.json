@@ -80,7 +80,7 @@
       "实测一次备份并恢复到临时数据库，抽查行数一致",
       "按 AGENTS.md：实际启停一次栈并用 node scripts/verify-temporal.mjs 判定就绪"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S08",
