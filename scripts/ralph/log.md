@@ -77,3 +77,10 @@
 ## S16（已合入，待部署验收）
 
 - `e255eeb` 设置 `CMAP_LOCAL_RUNNER_URL` 时本机 Codex 改经 127.0.0.1 的 runner 守护进程；Adapter 查找改为 adapter_id + runner_id，协议与契约不变。Kimi/YonWork 仍在进程内。本机守护进程不在线时无进程内回落；切换前需等进程内 Codex 任务收尾。
+
+## S02、S15（通过）
+
+- `3b033ba` S02：dag/v1 审批未决时 `condition(门铃, 10 分钟)` 等待，API 落账后发 `approvalDecided` 信号；`patched('dag-approval-signal-v1')` 兼容旧历史，补丁前合成历史重放通过。测试中等待 4 秒历史不再增长（修复前增长 44 个事件）。
+- `10700df` S15：ADR-0007 影子模式。`CMAP_DELEGATION_POLICY_FILE` 加载并校验策略；审批闸口经 Activity 调用 Jev，只送可信字段，写 `JEV_DECIDED`（route=human），不改审批；WebUI 单独展示影子决定；`scripts/jev-shadow-stats.mjs` 统计一致率。Worker 需 `NODE_USE_ENV_PROXY=1` 才能经本机代理访问 Jev。
+- `d4f69e8` e2e-approval 改走 dag/v1 并真实通过（约 39 秒）：决定后 1.4 秒派发，审批人为 owner；真实 Jev（jev-1.14.0）为两个审批各写一条影子决定，拒绝路径上 Jev 判 approve（置信度 0.34）而真人拒绝。
+- 主会话验收：`d3f37a5` 上 `npm run check` 全过（test 453、api 71、pg 86、workflow 323）。

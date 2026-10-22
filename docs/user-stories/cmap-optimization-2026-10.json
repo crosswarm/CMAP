@@ -21,7 +21,7 @@
       "先写失败测试：等待审批期间 Workflow 历史事件数在模拟的长时间内保持很小（不随秒数线性增长）；收到信号后立即继续",
       "旧历史重放测试通过；npm run check 全过；node scripts/e2e-approval.mjs 真实通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S03",
@@ -166,7 +166,7 @@
       "先写失败测试；Jev 不可用时记录 jev_unavailable 且审批照常等待真人；npm run check 全过；真实 Jev 调用一次验证",
       "ADR-0007 状态改为已接受（影子模式已实现，enforce 未开启）"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S16",
