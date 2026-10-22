@@ -85,11 +85,15 @@ if ((await store.getMission(missionId))?.state !== 'AWAITING_APPROVAL') {
 }
 ok('批准前任务已暂停，binding 为空，Codex 尚未启动')
 
+// API 只接受 decided_by 等于其 CMAP_OWNER；从 /v1/context 取，避免脚本与 API 配置漂移。
+const { owner: decidedBy } = await (await fetch(`${api}/v1/context`)).json()
+if (!decidedBy) fail('API 未配置 owner，无法决策审批')
+
 const wrong = await fetch(`${api}/v1/approvals/${encodeURIComponent(approval.id)}/decision`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    decision: 'approved', scope: 'mutating', decided_by: 'test-harness:synthetic',
+    decision: 'approved', scope: 'mutating', decided_by: decidedBy,
   }),
 })
 if (wrong.status !== 409) fail(`错 scope 应返回 409，实际 ${wrong.status}`)
@@ -100,7 +104,7 @@ const approved = await fetch(`${api}/v1/approvals/${encodeURIComponent(approval.
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({
-    decision: 'approved', scope: 'controlled', decided_by: 'test-harness:synthetic',
+    decision: 'approved', scope: 'controlled', decided_by: decidedBy,
   }),
 })
 if (!approved.ok) fail(`正确批准失败：HTTP ${approved.status} ${await approved.text()}`)

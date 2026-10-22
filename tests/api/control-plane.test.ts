@@ -15,6 +15,7 @@ import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
 const ACTOR: EventActor = { type: 'system', id: 'test' }
 const T0 = '2026-08-05T00:00:00.000Z'
 const TENANT = 'team-ycc'
+const OWNER = 'user:crosswarm'
 
 let store: Store
 let server: Awaited<ReturnType<typeof createControlPlane>>
@@ -100,7 +101,7 @@ before(async () => {
     task_id: 'tsk-other',
   })
 
-  server = await createControlPlane({ store, tenant: TENANT })
+  server = await createControlPlane({ store, tenant: TENANT, owner: OWNER })
   await server.listen(0)
   const addr = server.address() as AddressInfo
   base = `http://127.0.0.1:${addr.port}`
@@ -157,7 +158,7 @@ describe('审批闸口', () => {
   test('过期审批不能批准，返回 409 且记录不变', async () => {
     await store.createApproval({ ...approval('apr-expired', 'controlled'), expires_at: T0 })
     const result = await post('/v1/approvals/apr-expired/decision', {
-      decision: 'approved', scope: 'controlled', decided_by: 'user:human',
+      decision: 'approved', scope: 'controlled', decided_by: OWNER,
     })
     assert.equal(result.status, 409)
     assert.equal((await store.getApproval('apr-expired'))?.decision, 'pending')
@@ -168,8 +169,8 @@ describe('审批闸口', () => {
   test('并发审批只接受一个决定，同一决定重试不改写时间', async () => {
     await store.createApproval(approval('apr-race', 'mutating'))
     const bodies = [
-      { decision: 'approved', scope: 'mutating', decided_by: 'user:a' },
-      { decision: 'rejected', scope: 'mutating', decided_by: 'user:b' },
+      { decision: 'approved', scope: 'mutating', decided_by: OWNER },
+      { decision: 'rejected', scope: 'mutating', decided_by: OWNER },
     ]
     const responses = await Promise.all(bodies.map((body) => post('/v1/approvals/apr-race/decision', body)))
     assert.deepEqual(responses.map((r) => r.status).sort(), [200, 409])
@@ -184,6 +185,37 @@ describe('审批闸口', () => {
       assert.equal((await post('/v1/approvals/apr-mut/decision', {
         decision: 'approved', scope: 'mutating', decided_by: decidedBy,
       })).status, 400)
+    }
+  })
+
+  test('decided_by 不等于服务端 owner 返回 403 且不落账', async () => {
+    for (const decidedBy of ['user:other', 'agent:codex', 'USER:CROSSWARM', ' user:crosswarm']) {
+      const { status } = await post('/v1/approvals/apr-mut/decision', {
+        decision: 'approved', scope: 'mutating', decided_by: decidedBy,
+      })
+      assert.equal(status, 403, decidedBy)
+    }
+    const after = await store.getApproval('apr-mut')
+    assert.equal(after?.decision, 'pending')
+    assert.equal(after?.decided_by, null)
+  })
+
+  test('服务端未配置 owner 时审批决定返回 503 且不落账', async () => {
+    const bare = new MemoryStore()
+    await bare.createMission({ mission: mission('mis-1'), actor: ACTOR })
+    await bare.createApproval(approval('apr-bare', 'controlled'))
+    const noOwner = await createControlPlane({ store: bare, tenant: TENANT })
+    await noOwner.listen(0)
+    try {
+      const res = await fetch(`http://127.0.0.1:${(noOwner.address() as AddressInfo).port}/v1/approvals/apr-bare/decision`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ decision: 'approved', scope: 'controlled', decided_by: OWNER }),
+      })
+      assert.equal(res.status, 503)
+      assert.equal((await bare.getApproval('apr-bare'))?.decision, 'pending')
+    } finally {
+      await noOwner.close()
     }
   })
 
@@ -250,7 +282,7 @@ describe('审批闸口', () => {
 
   test('对不存在的审批决策返回 404', async () => {
     const { status } = await post('/v1/approvals/ghost/decision', {
-      decision: 'approved', scope: 'controlled', decided_by: 'user:x',
+      decision: 'approved', scope: 'controlled', decided_by: OWNER,
     })
     assert.equal(status, 404)
   })

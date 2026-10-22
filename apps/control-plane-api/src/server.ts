@@ -655,6 +655,7 @@ const routes: readonly Route[] = [
     pattern: '/v1/approvals/:id/decision',
     handler: async (ctx) => {
       const id = ctx.params['id']!
+      if (!ctx.config.owner?.trim()) return fail(ctx.res, 503, '本机 owner 未配置，不能决策审批')
       const body = await readBody(ctx.req)
       if (body === null || typeof body !== 'object') {
         return fail(ctx.res, 400, '请求体不是合法 JSON')
@@ -676,6 +677,10 @@ const routes: readonly Route[] = [
       // 审计流不能出现「不知道谁批的」记录
       if (typeof decidedBy !== 'string' || !decidedBy.trim()) {
         return fail(ctx.res, 400, 'decided_by 必填，审批必须可追溯到具体的人')
+      }
+      // 身份由控制面配置决定，请求体只能复述它，不能自报别人
+      if (decidedBy !== ctx.config.owner) {
+        return fail(ctx.res, 403, 'decided_by 必须等于本机 owner')
       }
 
       const target = await ctx.store.getApproval(id)
