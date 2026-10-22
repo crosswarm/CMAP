@@ -19,6 +19,14 @@ export interface ProgressSnapshot {
   readonly failedCriteriaIds: readonly string[]
   /** 主指标实测值。null 表示本轮无指标数据。 */
   readonly metricValue: number | null
+  /**
+   * 主指标对应的验收标准（方向与目标值）。有它才能判断「变大」是靠近还是远离
+   * 目标；缺省时按越小越好处理。
+   */
+  readonly metricTarget?: {
+    readonly operator: 'lt' | 'lte' | 'gt' | 'gte' | 'eq'
+    readonly expected: number
+  }
   /** 错误指纹。相同说明碰到的是同一个问题。 */
   readonly errorFingerprint: string | null
 }
@@ -36,6 +44,21 @@ export interface NoProgressResult {
   readonly detected: boolean
   /** 具体是哪几项判定为无进展，便于在返工报告中说明理由。 */
   readonly reasons: readonly NoProgressReason[]
+}
+
+/** 指标与目标的差距：越小越接近达标。无目标信息时退化为指标本身（越小越好）。 */
+const gapToTarget = (value: number, target: ProgressSnapshot['metricTarget']): number => {
+  if (!target) return value
+  switch (target.operator) {
+    case 'lt':
+    case 'lte':
+      return Math.max(0, value - target.expected)
+    case 'gt':
+    case 'gte':
+      return Math.max(0, target.expected - value)
+    case 'eq':
+      return Math.abs(value - target.expected)
+  }
 }
 
 const sameSet = (a: readonly string[], b: readonly string[]): boolean => {
@@ -75,8 +98,10 @@ export const detectNoProgress = (
   // 缺一项判据，而判定要求四项齐备——于是它们永远逃过检测，只能靠
   // 轮次上限兜底。改为按绝对差值判断。
   if (prev.metricValue !== null && curr.metricValue !== null) {
-    const base = Math.abs(prev.metricValue)
-    const delta = prev.metricValue - curr.metricValue
+    const target = curr.metricTarget ?? prev.metricTarget
+    const prevGap = gapToTarget(prev.metricValue, target)
+    const base = Math.abs(prevGap)
+    const delta = prevGap - gapToTarget(curr.metricValue, target)
     const improved = base === 0 ? delta > 0 : delta / base >= IMPROVEMENT_THRESHOLD
 
     if (!improved) reasons.push('metric_improvement_below_threshold')

@@ -1074,6 +1074,17 @@ export const createActivities = (deps: ActivityDeps) => {
         ? answered.get(failed[0].criterion_id)?.actual
         : undefined
       const metric = Number(firstFailedActual)
+      // 主指标的验收方向与目标值：无进展检测据此判断数值变化是靠近还是远离目标
+      const metricCriterion = failed[0] ? criteria.find((c) => c.criterion_id === failed[0]!.criterion_id) : undefined
+      const metricTarget =
+        metricCriterion &&
+        metricCriterion.operator !== 'neq' &&
+        metricCriterion.operator !== 'contains' &&
+        metricCriterion.operator !== 'not_contains' &&
+        typeof metricCriterion.expected === 'number' &&
+        Number.isFinite(metricCriterion.expected)
+          ? { operator: metricCriterion.operator, expected: metricCriterion.expected }
+          : undefined
 
       return {
         decision,
@@ -1085,6 +1096,7 @@ export const createActivities = (deps: ActivityDeps) => {
             .digest('hex'),
           failedCriteriaIds: failed.map((f) => f.criterion_id),
           metricValue: Number.isFinite(metric) ? metric : null,
+          ...(metricTarget ? { metricTarget } : {}),
           errorFingerprint: t.result.error?.fingerprint ?? null,
         },
       }

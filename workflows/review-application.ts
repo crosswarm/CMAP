@@ -55,6 +55,7 @@ const progress = (snapshot: ApplyReviewInput['currentProgress']): unknown => {
     patchHash: snapshot.patchHash,
     failedCriteriaIds: [...snapshot.failedCriteriaIds].sort(keyOrder),
     metricValue: snapshot.metricValue,
+    metricTarget: snapshot.metricTarget,
     errorFingerprint: snapshot.errorFingerprint,
   })
 }

@@ -105,6 +105,34 @@ describe('无进展检测', () => {
     assert.equal(r.detected, false, '指标在改善就不该判定无进展')
   })
 
+  test('带验收目标时按与 expected 的差距判断改善：gte 80 从 50 升到 75 是改善', () => {
+    const target = { operator: 'gte', expected: 80 } as const
+    const r = detectNoProgress(snap({ metricValue: 50, metricTarget: target }), snap({ metricValue: 75, metricTarget: target }))
+    assert.ok(!r.reasons.includes('metric_improvement_below_threshold'))
+    assert.equal(r.detected, false)
+  })
+
+  test('带验收目标时：gte 80 从 75 降到 50 是退步，记为未改善', () => {
+    const target = { operator: 'gte', expected: 80 } as const
+    const r = detectNoProgress(snap({ metricValue: 75, metricTarget: target }), snap({ metricValue: 50, metricTarget: target }))
+    assert.ok(r.reasons.includes('metric_improvement_below_threshold'))
+    assert.equal(r.detected, true)
+  })
+
+  test('lte 目标仍是越小越好；eq 目标按绝对距离', () => {
+    const lte = { operator: 'lte', expected: 1800 } as const
+    assert.ok(!detectNoProgress(snap({ metricValue: 2400, metricTarget: lte }), snap({ metricValue: 2000, metricTarget: lte }))
+      .reasons.includes('metric_improvement_below_threshold'))
+    assert.ok(detectNoProgress(snap({ metricValue: 2000, metricTarget: lte }), snap({ metricValue: 2400, metricTarget: lte }))
+      .reasons.includes('metric_improvement_below_threshold'))
+
+    const eq = { operator: 'eq', expected: 3 } as const
+    assert.ok(!detectNoProgress(snap({ metricValue: 0, metricTarget: eq }), snap({ metricValue: 2, metricTarget: eq }))
+      .reasons.includes('metric_improvement_below_threshold'))
+    assert.ok(detectNoProgress(snap({ metricValue: 2, metricTarget: eq }), snap({ metricValue: 6, metricTarget: eq }))
+      .reasons.includes('metric_improvement_below_threshold'))
+  })
+
   test('无前一轮时不判定无进展（首轮没有比较对象）', () => {
     const r = detectNoProgress(null, snap())
     assert.equal(r.detected, false)

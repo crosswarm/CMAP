@@ -196,6 +196,7 @@ describe('硬门槛判定', () => {
 
     assert.deepEqual(progress.failedCriteriaIds, ['PERF-P95'])
     assert.equal(progress.metricValue, 2400, '主指标取第一条未过标准的实测值')
+    assert.deepEqual(progress.metricTarget, { operator: 'lte', expected: 1800 }, '快照携带该标准的方向与目标值')
     assert.equal(progress.errorFingerprint, 'timeout:perf')
     assert.ok(progress.patchHash.length > 0, '证据哈希充当 patchHash——没有它就无从判断这轮动没动东西')
   })
