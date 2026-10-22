@@ -42,3 +42,19 @@
 # 优化轮（2026-10-22 起，截止 2026-10-23 14:00）
 
 范围见 `docs/user-stories/cmap-optimization-2026-10.json`（S01–S17）。主会话编排子代理逐条实现，每条由主会话核验后才标 `passes: true` 并提交；工作分支 `optimization-2026-10-22`，发布时快进合并到 main。
+
+## S07/S08（已合入，待验收）
+
+- `55f8769` compose 默认钉 `temporalio/auto-setup:1.29.3` 与 `temporalio/ui:2.56.0`（registry digest 与本机运行镜像一致）；`scripts/backup-db.mjs` 备份 cmap 与 temporal 到 `~/.cmap/backups`，实测备份并还原到临时库，逐 schema 行数一致。实际重启栈的验证留到 S17。
+- `8dc4902` `npm run check` 纳入 `test:pg`；待下一次全量 check 通过后标记。
+
+## S10、S11（通过）
+
+- `6a6c18f` 凭据检测新增「凭据变量赋值」与「URL 内嵌口令」两条模式；URL 模式连主机段一起匹配，使本地开发 DSN 仍按占位符放行（pre-commit）。运行时扫描没有占位符放行，Agent 结果里出现带口令的连接串会被拒，属预期的行为变化。
+- `ee4b7f0` 无进展判定按指标到 expected 的差距判断改善方向（`ProgressSnapshot.metricTarget`，缺省时保持旧语义，旧指纹不变）。
+- 验证：子代理 worktree 内 typecheck 与 `npm test` 458 项全过；主检出 Planner 6 项失败已确认来自 S01 未完成的契约改动。
+
+## S13、S14（已合入，待验收）
+
+- `7d3ef1c` standalone（无 runsDir）时结果文件放进 `mkdtemp` 的独占临时目录。残余：codex workspace-write 沙箱通常可写 TMPDIR，Agent 运行中仍可能找到该目录预置符号链接；生产 Worker 与 lap runner 都配置 runsDir，不走此路径。
+- `20a0cef` 自报重复 artifact_id 的产物按下标各自入账，证据引用指向全部同名产物。

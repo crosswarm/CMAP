@@ -108,11 +108,11 @@
     "category": "edge-case",
     "description": "凭据检测覆盖 *_TOKEN/SECRET/KEY/PASSWORD 赋值与 URL 内嵌口令（审计第 18 条）",
     "steps": [
-      "先写失败测试：MEMROSS_TOKEN=<32hex> 与 postgres://user:pass@host/db 被识别",
+      "先写失败测试：MEMROSS_TOKEN=<32hex> 与带用户名和口令的数据库连接 URL 被识别",
       "不误报现有仓库内容：pre-commit 对现有文件不新增命中",
       "npm test 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S11",
@@ -122,7 +122,7 @@
       "先写失败测试：gte 标准从 50 升到 75 记为有改善，从 75 降到 50 记为未改善",
       "npm test 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S12",
