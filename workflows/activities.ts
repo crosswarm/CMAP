@@ -811,13 +811,18 @@ export const createActivities = (deps: ActivityDeps) => {
       // 大众名字——落到账本的全局主键上，第二个任务就会跟第一个撞车。
       // 控制面按「任务 + 角色」重新命名，并把结论里的证据引用一起改写，
       // 否则「这条结论基于哪些证据」在账本里就断了。
-      const ledgerIds = new Map<string, string>()
+      // 产物按下标映射：Agent 自报同一 id 的两份产物各自入账；引用该重复 id 的
+      // 证据指向全部同名产物（按产物顺序），确定且不丢。
       const used = new Set<string>()
-      raw.artifacts.forEach((art, i) => {
+      const newIds = raw.artifacts.map((art, i) => {
         let id = `${taskId}:${art.role}`
         if (used.has(id)) id = `${taskId}:${art.role}:${i}`
         used.add(id)
-        ledgerIds.set(art.artifact_id, id)
+        return id
+      })
+      const ledgerIds = new Map<string, string[]>()
+      raw.artifacts.forEach((art, i) => {
+        ledgerIds.set(art.artifact_id, [...(ledgerIds.get(art.artifact_id) ?? []), newIds[i]!])
       })
 
       const result: TaskResultV1 = {
@@ -825,10 +830,7 @@ export const createActivities = (deps: ActivityDeps) => {
         mission_id: t.mission_id,
         task_id: taskId,
         attempt: t.attempt,
-        artifacts: raw.artifacts.map((art) => ({
-          ...art,
-          artifact_id: ledgerIds.get(art.artifact_id) ?? art.artifact_id,
-        })),
+        artifacts: raw.artifacts.map((art, i) => ({ ...art, artifact_id: newIds[i]! })),
         criterion_results: raw.criterion_results.map((c) => {
           const criterion = envelope.goal.success_definition.find(
             (x) => x.criterion_id === c.criterion_id,
@@ -838,8 +840,8 @@ export const createActivities = (deps: ActivityDeps) => {
             ...(criterion ? { passed: recomputeCriterionPassed(criterion, c) } : {}),
             ...(c.evidence_artifact_ids
               ? {
-                  evidence_artifact_ids: c.evidence_artifact_ids.map(
-                    (x) => ledgerIds.get(x) ?? x,
+                  evidence_artifact_ids: c.evidence_artifact_ids.flatMap(
+                    (x) => ledgerIds.get(x) ?? [x],
                   ),
                 }
               : {}),

@@ -385,6 +385,28 @@ describe('收结果并落账本', () => {
     assert.deepEqual(versions, [1, 2])
   })
 
+  test('Agent 自报同一 artifact_id 的两份产物都入账，证据引用确定且不丢', async () => {
+    const taskId = await startTask()
+    const art = (uri: string, hex: string) => ({ artifact_id: 'dup', role: 'report', uri, media_type: 'application/json', size_bytes: 1, sha256: hex.repeat(64) })
+    adapter.result = {
+      schema: 'cmap/task-result/v1',
+      mission_id: 'x', task_id: 'x', attempt: 1,
+      status: 'completed',
+      summary: '两份报告自报同一个 id',
+      criterion_results: [{ criterion_id: 'FILE-COUNT', actual: 3, passed: true, evidence_artifact_ids: ['dup'] }],
+      artifacts: [art('evidence/a.json', 'a'), art('evidence/b.json', 'b')],
+    }
+    await acts.dispatchTask(taskId)
+    await acts.collectTaskResult(taskId)
+
+    const t = await store.getTask(taskId)
+    const resultIds = t?.result?.artifacts.map((a) => a.artifact_id) ?? []
+    assert.equal(new Set(resultIds).size, 2, '结果里两份产物必须有不同的账本 id')
+    const ledger = await store.listArtifacts(taskId)
+    assert.deepEqual(ledger.map((a) => a.uri).toSorted(), ['evidence/a.json', 'evidence/b.json'], '两份产物都要入账')
+    assert.deepEqual(t?.result?.criterion_results[0]?.evidence_artifact_ids, resultIds, '对重复 id 的引用指向全部同名产物，按产物顺序')
+  })
+
   test('验收未通过时 passed 为 false，并列出失败标准', async () => {
     const taskId = await startTask()
     adapter.result = {
