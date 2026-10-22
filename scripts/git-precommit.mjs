@@ -17,7 +17,8 @@ import {
 } from './precommit-checks.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })
+// 默认 quotePath 会把非 ASCII 路径输出成带引号的八进制转义，路径规则与 diff 头解析都会匹配不上。
+const git = (args) => execFileSync('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, encoding: 'utf8' })
 
 const staged = git(['diff', '--cached', '--name-only', '--diff-filter=ACMR'])
   .split('\n')

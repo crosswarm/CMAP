@@ -331,7 +331,9 @@ export class CodexAdapter implements AgentAdapter {
     const workDir = ctx.worktree ?? (await mkdtemp(join(tmpdir(), 'cmap-codex-')))
     // TMPDIR 与 -C 都可能含 macOS 卷别名；沙箱可写根必须是物理路径。
     const physicalWorkDir = await realpath(workDir)
-    const resultFile = join(physicalWorkDir, `.cmap-result-${envelope.identity.task_id}.json`)
+    // -o 由沙箱外的 codex 进程写入且会跟随符号链接：结果文件不能放在 Agent 可写的工作区。
+    // shortcut: 无 runsDir（standalone 测试/e2e）时仍在工作区，生产 Worker 与 runner 均配置 runsDir；standalone 接入不可信任务前要改。
+    const resultFile = join(this.#runsDir ?? physicalWorkDir, `.cmap-result-${envelope.identity.task_id}.json`)
     const prompt = renderTaskPrompt(envelope)
     const physicalTmpDir = await realpath(tmpdir())
     const binding = this.prepareBinding(envelope, ctx)

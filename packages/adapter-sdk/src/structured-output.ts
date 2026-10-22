@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readFile, realpath, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -45,6 +46,9 @@ const evidenceOutsideWorktree = (uri: string): AdapterError =>
     false,
     "evidence-outside-worktree",
   );
+
+/** 与 remote-runner.v1 产物 base64 上限（16MiB 原始字节）一致。 */
+const MAX_EVIDENCE_BYTES = 16 * 1024 * 1024;
 
 const evidenceFileMissing = (uri: string, role: string): AdapterError =>
   new AdapterError(
@@ -163,11 +167,23 @@ export const readVerifiedArtifact = async (
     throw new AdapterError('EVIDENCE_SECRET_DETECTED', '证据命中已知凭据模式', false, 'evidence-secret-detected');
   }
   const path = await resolveEvidencePath(workDir, artifact.uri, artifact.role);
-  let bytes: Buffer;
+  // 非阻塞打开后按句柄判定：FIFO 会让 readFile 永久占住线程池，检查后换文件也绕不过句柄。
+  let file: FileHandle;
   try {
-    bytes = await readFile(path);
+    file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch {
     throw evidenceFileMissing(artifact.uri, artifact.role);
+  }
+  let bytes: Buffer;
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw evidenceFileMissing(artifact.uri, artifact.role);
+    if (info.size > MAX_EVIDENCE_BYTES) {
+      throw new AdapterError('EVIDENCE_FILE_TOO_LARGE', `证据 ${artifact.role} 超过 16MiB`, false, `evidence-file-too-large:${artifact.role}`);
+    }
+    bytes = await file.readFile();
+  } finally {
+    await file.close();
   }
   if (hasKnownSecret(bytes.toString('utf8'))) {
     throw new AdapterError('EVIDENCE_SECRET_DETECTED', '证据命中已知凭据模式', false, 'evidence-secret-detected');

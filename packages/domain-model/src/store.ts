@@ -319,7 +319,7 @@ export interface Store {
   /** 已被他人持有且未过期时抛 LockUnavailableError；已过期的锁可被抢占。 */
   acquireLock(lock: ResourceLock): Promise<ResourceLock>
   /**
-   * 续租。返回 false 表示锁已释放、已过期被抢占或不存在。
+   * 续租。返回 false 表示锁已释放、已过期（期间是否被抢占已无法证明）或不存在。
    *
    * 这是哑资源（真机、YonWork、worktree）唯一可行的脑裂防线：它们无法
    * 校验 fencing token 并拒绝过期持有者，所以防线只能放在 runner 自己

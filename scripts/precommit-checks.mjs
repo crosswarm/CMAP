@@ -55,13 +55,10 @@ export const findSecrets = (patch) => {
     .filter((l) => l.startsWith('+') && !l.startsWith('+++'))
     .join('\n')
 
-  return SECRET_PATTERNS.filter(({ pattern }) => {
-    const m = added.match(pattern)
-    if (!m) return false
-    // 命中行若明显是占位符则放行
-    const line = added.split('\n').find((l) => pattern.test(l)) ?? ''
-    return !PLACEHOLDER.test(line)
-  }).map(({ label }) => label)
+  // 只看命中的那段是不是占位符：按整行判断时，同行的 localhost 或前一行的示例都会放过真 token
+  return SECRET_PATTERNS.filter(({ pattern }) =>
+    [...added.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))].some((m) => !PLACEHOLDER.test(m[0])),
+  ).map(({ label }) => label)
 }
 
 // --------------------------------------------- 按文件定位与豁免标记

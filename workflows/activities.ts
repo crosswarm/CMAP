@@ -1135,8 +1135,10 @@ export const createActivities = (deps: ActivityDeps) => {
     const seen = new Set((await store.listArtifacts(t.id)).map((x) => x.artifact_id))
     const now = new Date()
     const unassessedReply = t.capability === 'yonwork.validate' && binding.adapter === 'yonwork-adapter'
-    for (const art of result.artifacts) {
+    for (const [index, art] of result.artifacts.entries()) {
       if (seen.has(art.artifact_id)) continue
+      // 同一 role 内按结果中的顺序编号：账本以 (task_id, role, version) 唯一。
+      const version = result.artifacts.slice(0, index + 1).filter((a) => a.role === art.role).length
       const record: Artifact = {
         artifact_id: art.artifact_id,
         mission_id: t.mission_id,
@@ -1146,7 +1148,7 @@ export const createActivities = (deps: ActivityDeps) => {
         media_type: art.media_type ?? 'application/octet-stream',
         size_bytes: art.size_bytes ?? 0,
         sha256: art.sha256,
-        version: 1,
+        version,
         state: 'AVAILABLE',
         producer: {
           agent_id: adapter.agentId,

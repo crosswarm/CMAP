@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { closeSync, constants, openSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile, rm, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -206,6 +208,33 @@ test("normalizeAgentOutput 把目录型证据读取错误归一化为受控 Adap
     ),
     (err) =>
       err instanceof AdapterError && err.code === "EVIDENCE_FILE_MISSING",
+  );
+});
+
+test("readVerifiedArtifact 拒绝 FIFO 证据而不是永久阻塞", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-evidence-fifo-"));
+  const fifo = join(dir, "report.json");
+  execFileSync("mkfifo", [fifo]);
+  t.after(async () => {
+    // 修复前读端会阻塞在 open 上：打开写端解除阻塞，免得测试进程挂住。
+    try { closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK)); } catch { /* 无读端 */ }
+    await rm(dir, { recursive: true, force: true });
+  });
+  const hung = new Promise((_, reject) => setTimeout(() => reject(new Error("FIFO_HUNG")), 2000).unref());
+  await assert.rejects(
+    Promise.race([readVerifiedArtifact(dir, { uri: "report.json", role: "report", sha256: "0".repeat(64) }), hung]),
+    (err) => err instanceof AdapterError && err.code === "EVIDENCE_FILE_MISSING",
+  );
+});
+
+test("readVerifiedArtifact 拒绝超过 16MiB 的证据，不读入内存", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-evidence-large-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "big.bin"), "");
+  await truncate(join(dir, "big.bin"), 16 * 1024 * 1024 + 1);
+  await assert.rejects(
+    readVerifiedArtifact(dir, { uri: "big.bin", role: "report", sha256: "0".repeat(64) }),
+    (err) => err instanceof AdapterError && err.code === "EVIDENCE_FILE_TOO_LARGE",
   );
 });
 

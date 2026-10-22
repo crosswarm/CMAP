@@ -216,6 +216,17 @@ export const createDagAttemptRunner = (
         owned.push(acquired)
         policyByLockId.set(acquired.lock_id, policy)
       } catch (error) {
+        if (error instanceof LockUnavailableError && initial.binding) {
+          // 已派发（Worker 重启后恢复）而资源已被他人持有：原 Agent 可能仍在操作它，停掉而不是排队。
+          let bound: AgentAdapter
+          try {
+            bound = findAdapter(adapters, initial.binding)
+          } catch {
+            return { outcome: 'escalated', taskId, reason: 'ADAPTER_UNAVAILABLE' }
+          }
+          const lost = await handleLockLoss(bound, initial.binding, owned, `恢复时资源已被他人持有：${policy.resource}`)
+          return { outcome: lost.outcome, taskId, ...(lost.reason ? { reason: lost.reason } : {}) }
+        }
         await releaseAll(store, owned)
         if (!(error instanceof LockUnavailableError)) throw error
         await transitionToWaiting(store, taskId, policy.resource)

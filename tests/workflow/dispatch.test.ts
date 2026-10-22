@@ -367,6 +367,24 @@ describe('收结果并落账本', () => {
     )
   })
 
+  test('同一 role 交回两个产物时都入账，version 按序递增', async () => {
+    const taskId = await startTask()
+    const art = (id: string) => ({ artifact_id: id, role: 'report', uri: `evidence/${id}.json`, media_type: 'application/json', size_bytes: 1, sha256: id.padStart(64, 'a') })
+    adapter.result = {
+      schema: 'cmap/task-result/v1',
+      mission_id: 'x', task_id: 'x', attempt: 1,
+      status: 'completed',
+      summary: '两份报告',
+      criterion_results: [{ criterion_id: 'FILE-COUNT', actual: 3, passed: true, evidence_artifact_ids: ['r1', 'r2'] }],
+      artifacts: [art('r1'), art('r2')],
+    }
+    await acts.dispatchTask(taskId)
+    await acts.collectTaskResult(taskId)
+
+    const versions = (await store.listArtifacts(taskId)).map((a) => a.version).toSorted()
+    assert.deepEqual(versions, [1, 2])
+  })
+
   test('验收未通过时 passed 为 false，并列出失败标准', async () => {
     const taskId = await startTask()
     adapter.result = {

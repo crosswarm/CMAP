@@ -262,6 +262,14 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.ok((await s.listEvents('mis-1')).some((e) => e.event_type === 'MISSION_ESCALATED'))
       })
 
+      test('已终结的 Mission 不能回到运行态：取消后迟到的 RUNNING 不得复活它', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.setMissionState('mis-1', 'CANCELED', ACTOR)
+        await assert.rejects(s.setMissionState('mis-1', 'RUNNING', ACTOR))
+        assert.equal((await s.getMission('mis-1'))?.state, 'CANCELED')
+      })
+
       test('失败与完成分别记成各自的事件', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
@@ -1110,6 +1118,17 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.equal((await s.listArtifacts('tsk-1')).length, 1)
       })
 
+      test('同一任务、同一 role、同一 version 只能有一份（与 PG 唯一约束一致）', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
+
+        await s.putArtifact(artifact('art-1', 'tsk-1', 'report'))
+        await assert.rejects(() => s.putArtifact(artifact('art-2', 'tsk-1', 'report')))
+        await s.putArtifact({ ...artifact('art-2', 'tsk-1', 'report'), version: 2 })
+        assert.equal((await s.listArtifacts('tsk-1')).length, 2)
+      })
+
       test('同一 id 落到另一个任务必须报错，不得静默丢弃或覆盖', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
@@ -1212,6 +1231,20 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
           await s.renewLock('lk-1', new Date(Date.now() + 600_000).toISOString()),
           false,
           '资源已易主，原持有者续租必须失败',
+        )
+      })
+
+      test('过期期间被他人抢过又释放，原持有者续租仍须失败', async () => {
+        const s = await createStore()
+        const past = new Date(Date.now() - 1000).toISOString()
+        await s.acquireLock(lock('lk-1', 'device:x', 'tsk-1', past))
+        await s.acquireLock(lock('lk-2', 'device:x', 'tsk-2', new Date(Date.now() + 600_000).toISOString()))
+        await s.releaseLock('lk-2', new Date().toISOString())
+
+        assert.equal(
+          await s.renewLock('lk-1', new Date(Date.now() + 600_000).toISOString()),
+          false,
+          '过期后独占已无法证明：续租成功会让两个 Agent 先后操作同一台真机',
         )
       })
 

@@ -25,6 +25,7 @@ import pg from 'pg'
 import type { TaskResultV1 } from './generated/task-result.ts'
 import { assertTransition, IllegalTransitionError } from './task-state.ts'
 import type { TaskState } from './task-state.ts'
+import { assertMissionStateChange } from './entities.ts'
 import type {
   Mission,
   MissionState,
@@ -376,6 +377,7 @@ export class PgStore implements Store {
       if (current.rowCount === 0) throw new NotFoundError('Mission', id)
       const before = toMission(current.rows[0] as Record<string, unknown>)
       if (before.state === state) return before
+      assertMissionStateChange(id, before.state, state)
 
       const { rows, rowCount } = await c.query(
         'UPDATE missions SET state = $2, updated_at = now() WHERE id = $1 RETURNING *',
@@ -875,8 +877,9 @@ export class PgStore implements Store {
       )
       if (taken.rowCount && taken.rowCount > 0) return false
 
+      // 过期即失去独占（期间可能被抢过又释放）；用实时时钟，不用事务开始时刻的 now()。
       const upd = await c.query(
-        'UPDATE resource_locks SET expires_at = $2 WHERE lock_id = $1 AND released_at IS NULL',
+        'UPDATE resource_locks SET expires_at = $2 WHERE lock_id = $1 AND released_at IS NULL AND expires_at > clock_timestamp()',
         [lockId, newExpiresAt],
       )
       return upd.rowCount === 1

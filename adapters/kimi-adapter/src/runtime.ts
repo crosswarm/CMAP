@@ -13,6 +13,19 @@ import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { AdapterError } from '#adapter-sdk'
 
+/** 控制面本机端口：API、账本库、Temporal、Temporal UI（compose 固定 8088）。 */
+export const controlPlanePorts = (env: NodeJS.ProcessEnv): number[] => {
+  const portOf = (url: string, fallback: number): number => {
+    try { return Number(new URL(url).port) || fallback } catch { return fallback }
+  }
+  return [
+    Number(env['CMAP_API_PORT'] ?? 8787),
+    portOf(env['CMAP_DATABASE_URL'] ?? '', 5433),
+    portOf(`grpc://${env['TEMPORAL_ADDRESS'] ?? ''}`, 7233),
+    8088,
+  ]
+}
+
 export const buildKimiSandbox = (paths: {
   workDir: string
   runtimeDir: string
@@ -20,7 +33,7 @@ export const buildKimiSandbox = (paths: {
   oauthDir: string
   userHome: string
   bin: string
-}): string => {
+}, deniedPorts: readonly number[]): string => {
   const subpath = (path: string) => `(subpath ${JSON.stringify(path)})`
   const writable = [
     paths.workDir,
@@ -30,10 +43,15 @@ export const buildKimiSandbox = (paths: {
   ]
     .map(subpath)
     .join(' ')
+  // 网络出口开放但不得直连控制面：否则任务内的 Agent 能自批审批或直接改账本（T4）。
+  // 空列表时不输出：不带过滤条件的 deny 会封掉全部网络。
+  const denyNet = deniedPorts.length
+    ? `(deny network-outbound ${deniedPorts.map((p) => `(remote ip "localhost:${p}")`).join(' ')})\n`
+    : ''
   // P3: 模型网络出口开放；只给既有认证存储保留 OAuth 原子轮换例外。
   return `(version 1)
 (allow default)
-(deny file-write*)
+${denyNet}(deny file-write*)
 (allow file-write* ${writable} (literal "/dev/null"))
 (deny file-read-data ${subpath(paths.userHome)})
 (allow file-read-data ${writable} ${subpath(dirname(paths.bin))})
@@ -144,7 +162,7 @@ export const prepareKimiRun = async (
       oauthDir,
       userHome: await realpath(homedir()),
       bin: executable,
-    })
+    }, controlPlanePorts(process.env))
     return {
       workDir,
       runtimeDir,

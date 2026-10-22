@@ -35,7 +35,8 @@ const artifact = (
   missionId = 'mis-1',
   uri = `artifact://${missionId}/${taskId}/${path}`,
 ): Artifact => ({
-  artifact_id: id, mission_id: missionId, task_id: taskId, role: 'report',
+  // role 取 id：同一任务的多份夹具不得撞 (task_id, role, version) 唯一约束（PG 一直会拒）
+  artifact_id: id, mission_id: missionId, task_id: taskId, role: id,
   uri,
   media_type: 'application/octet-stream', size_bytes: bytes.length,
   sha256: createHash('sha256').update(bytes).digest('hex'),

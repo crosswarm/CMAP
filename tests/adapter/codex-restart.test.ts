@@ -6,7 +6,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -131,6 +131,21 @@ test('启动前独占创建运行记录，记录含恢复所需字段且不含�
     assert.ok(record.result_file.endsWith('.cmap-result-tsk-rec-fields.json'))
     assert.ok(!raw.includes('SECRET-PROMPT-BODY'))
     assert.equal((await stat(f.recordPath)).mode & 0o777, 0o600)
+  } finally { await rm(f.root, { recursive: true, force: true }) }
+})
+
+test('结果文件写在 runsDir：工作区里预置的同名符号链接不会把结果写到工作区外', async () => {
+  const f = await fixture('tsk-res-link', 'ok', 100)
+  const outside = join(f.root, 'outside.txt')
+  await writeFile(outside, 'keep')
+  await symlink(outside, join(f.worktree, '.cmap-result-tsk-res-link.json'))
+  const adapter = adapterFor(f)
+  try {
+    const binding = await adapter.startTask(envelope('tsk-res-link'), context(f.worktree))
+    await untilTerminal(adapter, binding)
+    assert.equal((await adapter.collectResult(binding)).status, 'completed')
+    assert.equal(await readFile(outside, 'utf8'), 'keep')
+    assert.ok(JSON.parse(await readFile(f.recordPath, 'utf8')).result_file.startsWith(f.runsDir))
   } finally { await rm(f.root, { recursive: true, force: true }) }
 })
 

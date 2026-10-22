@@ -18,6 +18,7 @@ import type {
 import { AdapterError, type DispatchContext, type NormalizedAgentStatus } from '#adapter-sdk'
 import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 import { createDagAttemptRunner } from '../../workflows/dag-attempt.ts'
+import { createActivities } from '../../workflows/activities.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'dag-attempt-test' }
 const T0 = '2026-09-21T00:00:00.000Z'
@@ -411,6 +412,31 @@ describe('DAG attempt runner', () => {
     assert.equal(result.reason, 'CANCELLATION_UNCONFIRMED')
     assert.ok(Date.now() - started < 6500)
     assert.equal((await store.listActiveLocks(new Date().toISOString())).length,1)
+  })
+
+  test('Worker 重启恢复时锁已被他人拿走：停掉已绑定的 Agent 并升级 LOCK_LOST，不排队等锁', async () => {
+    const store = new MemoryStore()
+    const adapter = new ControlledAdapter()
+    const deps = syntheticActivityDeps({ runner: syntheticRunner(), store, adapter, workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-attempt-')), pollIntervalMs: 5 })
+    await createTask(store, 'tsk-resume', [{ resource: 'device:resume', ttl_seconds: 15 }])
+    await createTask(store, 'tsk-other')
+    const lease = (lockId: string, taskId: string) => ({
+      lock_id: lockId, resource: 'device:resume', task_id: taskId, mission_id: `mis-${taskId}`,
+      holder_runner_id: 'runner-test', acquired_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(), released_at: null,
+    })
+    // 第一个 Worker 已持锁派发：binding 落账，Agent 在跑
+    await store.acquireLock(lease('lk-first', 'tsk-resume'))
+    await createActivities(deps).dispatchTask('tsk-resume')
+    assert.ok((await store.getTask('tsk-resume'))?.binding)
+    // Worker 停机期间锁过期并被排队的任务拿走
+    await store.releaseLock('lk-first', new Date().toISOString())
+    await store.acquireLock(lease('lk-other', 'tsk-other'))
+
+    const result = await createDagAttemptRunner(deps)({ taskId: 'tsk-resume' })
+    assert.equal(result.outcome, 'escalated')
+    assert.equal(result.reason, 'LOCK_LOST')
+    assert.equal(adapter.cancelCalls.length, 1)
   })
 
   test('serializes concurrent attempts for the same declared resource', async () => {

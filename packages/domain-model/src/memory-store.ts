@@ -13,6 +13,7 @@ import { isDeepStrictEqual } from 'node:util'
 
 import type { TaskResultV1 } from './generated/task-result.ts'
 import { assertTransition, IllegalTransitionError } from './task-state.ts'
+import { assertMissionStateChange } from './entities.ts'
 import type {
   Mission,
   MissionState,
@@ -170,6 +171,7 @@ export class MemoryStore implements Store {
     const m = this.#missions.get(id)
     if (!m) throw new NotFoundError('Mission', id)
     if (m.state === state) return m
+    assertMissionStateChange(id, m.state, state)
 
     const next: Mission = { ...m, state, updated_at: new Date().toISOString() }
     this.#missions.set(id, next)
@@ -395,6 +397,11 @@ export class MemoryStore implements Store {
           `不能改指任务 ${a.task_id}`,
       )
     }
+    // 与 PG 的 UNIQUE (task_id, role, version) 一致，否则只在 PG 上才会撞约束。
+    if ([...this.#artifacts.values()].some((x) => x.artifact_id !== a.artifact_id &&
+      x.task_id === a.task_id && x.role === a.role && x.version === a.version)) {
+      throw new ArtifactConflictError(a.artifact_id, `任务 ${a.task_id} 已有 ${a.role} v${a.version}`)
+    }
     this.#artifacts.set(a.artifact_id, a)
     return a
   }
@@ -506,19 +513,9 @@ export class MemoryStore implements Store {
     const l = this.#locks.get(lockId)
     if (!l || l.released_at !== null) return false
 
-    // 已过期且资源已被他人持有 → 续租失败。
+    // 过期即失去独占：期间是否被他人抢过又释放已无法证明。
     // 这是 runner 必须终止操作的信号，不能静默成功。
-    const now = Date.now()
-    if (Date.parse(l.expires_at) <= now) {
-      const taken = [...this.#locks.values()].some(
-        (o) =>
-          o.lock_id !== lockId &&
-          o.resource === l.resource &&
-          o.released_at === null &&
-          Date.parse(o.expires_at) > now,
-      )
-      if (taken) return false
-    }
+    if (Date.parse(l.expires_at) <= Date.now()) return false
 
     this.#locks.set(lockId, { ...l, expires_at: newExpiresAt })
     return true

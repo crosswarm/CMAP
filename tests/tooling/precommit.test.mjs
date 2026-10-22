@@ -3,6 +3,9 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 
 import {
   findForbiddenPaths,
@@ -100,6 +103,16 @@ describe('凭据模式检测', () => {
     assert.deepEqual(findSecrets(patch), [], '本地开发占位值不应误报')
   })
 
+  test('同一行出现 localhost 等词不能让真 token 被当成占位符放行', () => {
+    const patch = `+GITHUB_TOKEN=ghp_${'A'.repeat(36)} # 指向 localhost 调试`
+    assert.ok(findSecrets(patch).length > 0)
+  })
+
+  test('前一行是占位符也不能掩盖后面的真 token', () => {
+    const patch = [`+# 示例：sk-example-${'x'.repeat(20)}`, `+const key = "sk-proj-${'b'.repeat(40)}"`].join('\n')
+    assert.ok(findSecrets(patch).length > 0)
+  })
+
   test('只检查新增行，删除行不算', () => {
     const patch = `-const key = "sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`
     assert.deepEqual(findSecrets(patch), [], '删除凭据是好事，不该被拦')
@@ -192,5 +205,28 @@ describe('生成文件与 Schema 的一致性', () => {
     // 静默通过意味着这个检查形同虚设
     const drift = await findHandEditedGenerated(join(root, 'no-such-dir'))
     assert.ok(drift.length > 0, '目录缺失时必须报告，不得静默放行')
+  })
+})
+
+describe('pre-commit 钩子（真实 git 仓库）', () => {
+  test('中文目录下的 .env 与凭据文件同样被拦截', async (t) => {
+    const repo = await mkdtemp(join(tmpdir(), 'cmap-precommit-'))
+    t.after(() => rm(repo, { recursive: true, force: true }))
+    // 钩子以脚本所在目录的上一级为仓库根：按原相对路径复制，跑的就是真钩子。
+    for (const f of ['scripts/git-precommit.mjs', 'scripts/precommit-checks.mjs', 'packages/adapter-sdk/src/secret-patterns.ts']) {
+      await mkdir(dirname(join(repo, f)), { recursive: true })
+      await copyFile(join(root, f), join(repo, f))
+    }
+    const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' })
+    git('init', '-q')
+    await mkdir(join(repo, '笔记'))
+    await writeFile(join(repo, '笔记/.env'), 'A=1\n')
+    await writeFile(join(repo, '笔记/a.md'), `token: ghp_${'A'.repeat(36)}\n`)
+    git('add', '笔记')
+
+    const run = spawnSync(process.execPath, [join(repo, 'scripts/git-precommit.mjs'), '--staged'], { cwd: repo, encoding: 'utf8' })
+    assert.equal(run.status, 1, run.stderr)
+    assert.match(run.stderr, /禁止入库：笔记\/\.env/)
+    assert.match(run.stderr, /疑似凭据泄漏：笔记\/a\.md/)
   })
 })
