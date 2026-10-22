@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { recomputeCriterionPassed, type Mission, type Store, type TaskRecord } from '#domain-model'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 import { MEMORY_ROLE, memoryManifest, type MemoryDeps } from './memory-context.ts'
+import { artifactShareable } from './review-inputs.ts'
 
 const ACTOR = { type: 'system', id: 'memross-writeback' } as const
 const sha256 = (value: string): string => createHash('sha256').update(value).digest('hex')
@@ -105,7 +106,10 @@ export async function proposeTaskKnowledge(
   ].slice(0, MAX_PROPOSALS_PER_TASK)
   if (items.length === 0) return
 
-  const artifacts = (await store.listArtifacts(task.id)).filter((a) => a.state === 'AVAILABLE' &&
+  const ledgerArtifacts = await store.listArtifacts(task.id)
+  // 含任何受限产物的任务，其结论不进共享记忆。
+  if (ledgerArtifacts.some((a) => !artifactShareable(a))) return
+  const artifacts = ledgerArtifacts.filter((a) => a.state === 'AVAILABLE' &&
     task.result!.artifacts.some((r) => r.artifact_id === a.artifact_id && r.sha256.toLowerCase() === a.sha256.toLowerCase()))
   const artifactEvidence = artifacts.map((a) => ({ uri: cmapArtifactUri(task.id, a.artifact_id), sha256: a.sha256.toLowerCase() }))
   const blockEvidence = (await usedMemoryBlocks(deps.workRoot, task, projectId))

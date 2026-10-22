@@ -21,7 +21,7 @@ import type { TaskEnvelopeV1 } from '#domain-model'
 import type { MissionPlanV1 } from '../packages/domain-model/src/generated/mission-plan.ts'
 import { INPUT_PAYLOAD, safeChildDir, safeMkdir, publishInput, verifiedArtifactBytes } from './artifact-files.ts'
 import { MEMORY_ROLE, freezeMemoryInput, registerMemoryArtifact, type FrozenInputRef, type MemoryDeps } from './memory-context.ts'
-import { resolveReviewInputRef } from './review-inputs.ts'
+import { artifactShareable, resolveReviewInputRef } from './review-inputs.ts'
 import { continuationSource, freezeContinuationInputs, registerContinuationInputs } from './mission-continuation.ts'
 import { readVerifiedArtifact } from '../packages/adapter-sdk/src/structured-output.ts'
 
@@ -267,7 +267,7 @@ const copyParentArtifacts = async (
   for (const depNodeId of depNodeIds) {
     const parentTaskId = acceptedDeps[depNodeId]!
     const artifacts = (await store.listArtifacts(parentTaskId))
-      .filter((a) => a.state === 'AVAILABLE')
+      .filter(artifactShareable)
       .toSorted((a, b) => a.artifact_id.localeCompare(b.artifact_id))
     for (const artifact of artifacts) {
       assertArtifactOwned(artifact, parentTaskId)

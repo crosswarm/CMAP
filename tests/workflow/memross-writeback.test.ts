@@ -97,6 +97,17 @@ test('没有 Memross 项目范围时不提交 propose，也不抛错', async t=>
   assert.equal(f.calls.length,0)
 })
 
+test('任务含任何不可共享产物（含 PII）时不回写 propose，也不抛错', async t=>{
+  const f=await setup();t.after(()=>rm(f.workRoot,{recursive:true,force:true}))
+  await finish(f.store,f.mission.id,f.taskId,'3')
+  await f.store.putArtifact({artifact_id:`${f.taskId}:pii`,mission_id:f.mission.id,task_id:f.taskId,role:'log',uri:'evidence/pii.json',media_type:'application/json',
+    size_bytes:6,sha256:sha('pii'),version:1,state:'AVAILABLE',producer:{agent_id:'fake',adapter_version:'1',execution_session_id:'s'},provenance:{},
+    retention:{retain_until:'2099-01-01T00:00:00.000Z',immutable:true},security:{classification:'internal',contains_secrets:false,contains_pii:true,allowed_roles:[]},created_at:now})
+  await f.acts.proposeTaskKnowledge({missionId:f.mission.id,taskId:f.taskId})
+  assert.equal(f.calls.filter(c=>c.path==='/api/memory/v1/propose').length,0)
+  assert.equal((await f.store.listEvents(f.mission.id)).filter(e=>e.event_type==='KNOWLEDGE_PROPOSED').length,0)
+})
+
 test('ESCALATED 时写交接记录：失败标准、证据链接、绑定状态与 refs；幂等；不可用时只记事件', async t=>{
   const f=await setup();t.after(()=>rm(f.workRoot,{recursive:true,force:true}))
   const reportSha=await finish(f.store,f.mission.id,f.taskId,'2')

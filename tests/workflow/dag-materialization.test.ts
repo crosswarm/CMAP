@@ -159,6 +159,7 @@ const createAcceptedNode = async (
     ledgerRole?: string
     ledgerSha?: string
     ledgerSize?: number
+    ledgerSecurity?: Artifact['security']
   } = {},
 ): Promise<TaskRecord> => {
   const node = plan.nodes.find((n) => n.node_id === nodeId)!
@@ -189,6 +190,7 @@ const createAcceptedNode = async (
       ...artifact(m.id, taskId, artifactId, opts.ledgerSha ?? artifactSha, opts.ledgerSize ?? artifactSize),
       role: opts.ledgerRole ?? 'report',
       state: opts.ledgerState ?? 'AVAILABLE',
+      ...(opts.ledgerSecurity ? { security: opts.ledgerSecurity } : {}),
     })
   }
   const decision = opts.decision === undefined ? 'accept' : opts.decision
@@ -350,6 +352,43 @@ describe('DAG materialization', () => {
     for (const ref of task.envelope.inputs?.artifact_refs ?? []) {
       assert.equal((await readFile(join(workRoot, joinNode.taskId, ref.uri!))).toString(), ref.artifact_id === 'art-A' ? 'rootA-bytes' : 'rootB-bytes')
     }
+  })
+
+  test('受限产物不复制给下游节点，可共享产物照常复制', async () => {
+    const store = new MemoryStore()
+    const m = mission('mis-dag-restricted-copy')
+    await store.createMission({ mission: m, actor: ACTOR })
+    const workRoot = await mkdtemp(join(tmpdir(), 'cmap-dag-'))
+    const parentA = dagTaskId(m.id, 'rootA', 1)
+    const parentB = dagTaskId(m.id, 'rootB', 1)
+    await createAcceptedNode(store, m, 'rootA', 1, {
+      resultArtifactId: 'art-A',
+      resultArtifactSha: sha('rootA-bytes'),
+      resultArtifactSize: Buffer.byteLength('rootA-bytes'),
+      putLedgerArtifact: true,
+      ledgerSecurity: { classification: 'internal', contains_secrets: false, contains_pii: true, allowed_roles: [] },
+    })
+    await createAcceptedNode(store, m, 'rootB', 1, {
+      resultArtifactId: 'art-B',
+      resultArtifactSha: sha('rootB-bytes'),
+      resultArtifactSize: Buffer.byteLength('rootB-bytes'),
+      putLedgerArtifact: true,
+    })
+    // 不用 seedParentArtifact：它会以默认（可共享）安全属性重写账本产物
+    await mkdir(join(workRoot, parentA, 'evidence'), { recursive: true })
+    await writeFile(join(workRoot, parentA, 'evidence/report.txt'), 'rootA-bytes')
+    await seedParentArtifact(store, workRoot, m.id, parentB, 'art-B', 'rootB-bytes')
+
+    const joinNode = assertMaterialized(await materializeDagNode({ store, workRoot, runner: syntheticRunner() }, {
+      missionId: m.id,
+      nodeId: 'join',
+      attempt: 1,
+      acceptedDeps: { rootA: parentA, rootB: parentB },
+    }))
+
+    const refs = (await store.getTask(joinNode.taskId))!.envelope.inputs?.artifact_refs ?? []
+    assert.deepEqual(refs.map((a) => a.artifact_id), ['art-B'])
+    await assert.rejects(() => access(join(workRoot, joinNode.taskId, 'inputs', 'rootA')), /ENOENT/)
   })
 
   test('retry and concurrent materialization preserve one task and identical input bytes', async () => {
