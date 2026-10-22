@@ -60,3 +60,20 @@
 - `20a0cef` 自报重复 artifact_id 的产物按下标各自入账，证据引用指向全部同名产物。
 
 - S13 验收：`node scripts/e2e-single-hop.mjs`（standalone，无 runsDir）真实 Codex 通过，退出 0。
+
+## S01、S03、S04、S05、S06、S08、S09、S12、S14（通过）
+
+- `e1ee6e2` S01：不带 plan 的请求合成单节点计划走 dag/v1；inspect/v1 只留给已入账记录；dag/v1 支持续作；修正 Agent 自报 failed 时 DAG 无法物化返工轮。真实 `e2e-mission.mjs` 默认与 `--rework` 均通过（子代理，独立 schema `e2e_s01`）。
+- `e17e640` S03：执行不确定的 DAG 节点保持 INPUT_REQUIRED；e2e-remote-mission 的放宽断言已改回。
+- `c5706a7` S04：收结果时去重 criterion_results（以最后一条为准，与硬门槛一致），未知标准不入账。
+- `c076aa7` S05：受限产物不复制给下游节点，含不可共享产物的任务不回写 Memross。
+- `adec1fc` S06：Store.listTenantEvents 一次查询；Mission 列表默认非终态加最近 50 条终态；前端不再逐个拉 RUNNING Mission 的任务。e2e-events 真实通过。遗留：侧栏未选中的 Mission 只能显示待审批，看不到 INPUT_REQUIRED 等需处理状态。
+- `872ed54` S09：删除无调用方的 Store 方法与锁 Activity（生产 -233 行，测试 -379 行），`events_undelivered_idx` 幂等删除。
+- `0da16c2` S12：审批 decided_by 必须等于服务端 owner（不符 403、未配 503，均不落账）。
+- `20a0cef` S14：重复自报 artifact_id 的产物按下标各自入账。
+- 合并冲突：S05 与 S01 的 import、S06 与 S09 的 Store 方法相邻处，均手工保留双方意图。
+- 主会话验收：`0da16c2` 上 `npm run check` 全过（test 452、api 68、pg 86、workflow 311）；`e255eeb` 上 typecheck、build:web、test 452 通过。
+
+## S16（已合入，待部署验收）
+
+- `e255eeb` 设置 `CMAP_LOCAL_RUNNER_URL` 时本机 Codex 改经 127.0.0.1 的 runner 守护进程；Adapter 查找改为 adapter_id + runner_id，协议与契约不变。Kimi/YonWork 仍在进程内。本机守护进程不在线时无进程内回落；切换前需等进程内 Codex 任务收尾。

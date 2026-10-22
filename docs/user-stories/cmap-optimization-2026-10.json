@@ -9,7 +9,7 @@
       "先写失败测试：无 plan 的创建请求断言启动的 Workflow 类型为 dag/v1",
       "npm run check 全过；node scripts/e2e-mission.mjs 真实 Codex 跑通（脚本按需改为走 dag/v1）"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S02",
@@ -33,7 +33,7 @@
       "把 scripts/e2e-remote-mission.mjs 中放宽为两种终态都接受的断言改回只接受 INPUT_REQUIRED",
       "npm run test:workflow 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S04",
@@ -44,7 +44,7 @@
       "未知 criterion_id 的处理与 inspect/硬门槛一致且有测试",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S05",
@@ -56,7 +56,7 @@
       "两条各有先失败后通过的测试",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S06",
@@ -68,7 +68,7 @@
       "先写失败测试：租户流查询次数不随 Mission 数线性增长；列表有上限",
       "node scripts/e2e-events.mjs 真实通过；npm run check 全过；npm run build:web 通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S07",
@@ -90,7 +90,7 @@
       "npm run check 包含 test:pg",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S09",
@@ -101,7 +101,7 @@
       "同步删除只服务它们的测试与 events_undelivered_idx 索引（迁移幂等）",
       "npm run check 与 npm run test:pg 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S10",
@@ -133,7 +133,7 @@
       "既有审批冲突与并发测试改用合法身份后语义不变",
       "e2e 脚本与 WebUI 适配；npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S13",
@@ -153,7 +153,7 @@
       "先写失败测试：两份产物自报同一 artifact_id 时两份都入账、证据引用不丢",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "S15",
