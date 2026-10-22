@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/jev-decision/v1",
+  "title": "Jev Decision v1",
+  "description": "Jev 在委托策略内做出的一次决定的账本记录（ADR-0007）。有效风险 = max(信封声明风险的下限, 确定性规则, Jev 评估)，只升不降。route=auto 表示控制面已按策略自动执行；高风险、影子模式、Jev 判升级或模型不可用一律 route=human。只存哈希与枚举，不存动作正文、理由原文或原始模型响应。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "decision_id", "decision_type", "subject", "policy_id", "policy_sha256", "mode", "input_sha256", "model", "confidence", "declared_risk", "assessed_risk", "effective_risk", "outcome", "route", "reason_code", "decided_at", "elapsed_ms"],
+  "properties": {
+    "schema": { "const": "cmap/jev-decision/v1" },
+    "decision_id": { "type": "string", "pattern": "^jvd_[A-Za-z0-9_]{1,120}$" },
+    "decision_type": { "enum": ["approval", "routing", "retry_uncertain"] },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mission_id", "task_id"],
+      "properties": {
+        "mission_id": { "$ref": "#/$defs/identifier" },
+        "task_id": { "$ref": "#/$defs/identifier" },
+        "approval_id": { "$ref": "#/$defs/identifier" },
+        "approval_scope": { "enum": ["controlled", "mutating"] }
+      }
+    },
+    "policy_id": { "type": "string", "pattern": "^pol_[a-z0-9_]{1,120}$" },
+    "policy_sha256": { "$ref": "#/$defs/sha256" },
+    "mode": { "enum": ["shadow", "enforce"] },
+    "input_sha256": { "$ref": "#/$defs/sha256" },
+    "model": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 128 }, { "type": "null" }] },
+    "confidence": { "anyOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }] },
+    "declared_risk": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] },
+    "assessed_risk": { "enum": ["low", "medium", "high", null] },
+    "effective_risk": { "enum": ["low", "medium", "high"] },
+    "outcome": { "enum": ["approve", "reject", "assign", "retry", "escalate"] },
+    "assigned_agent": { "$ref": "#/$defs/identifier" },
+    "route": { "enum": ["auto", "human"] },
+    "reason_code": { "enum": ["within_policy", "shadow_mode", "assessed_high_risk", "deterministic_high_risk", "below_confidence", "budget_exhausted", "policy_missing", "policy_expired", "policy_scope_mismatch", "jev_unavailable", "jev_invalid_output"] },
+    "decided_at": { "type": "string", "format": "date-time" },
+    "elapsed_ms": { "type": "integer", "minimum": 0 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "declared_risk": { "enum": ["controlled", "mutating"] } }, "required": ["declared_risk"] },
+      "then": { "properties": { "effective_risk": { "enum": ["medium", "high"] } } }
+    },
+    {
+      "if": { "properties": { "assessed_risk": { "const": "medium" } }, "required": ["assessed_risk"] },
+      "then": { "properties": { "effective_risk": { "enum": ["medium", "high"] } } }
+    },
+    {
+      "if": { "properties": { "assessed_risk": { "const": "high" } }, "required": ["assessed_risk"] },
+      "then": { "properties": { "effective_risk": { "const": "high" } } }
+    },
+    {
+      "if": { "properties": { "route": { "const": "auto" } }, "required": ["route"] },
+      "then": { "properties": {
+        "effective_risk": { "enum": ["low", "medium"] },
+        "mode": { "const": "enforce" },
+        "outcome": { "enum": ["approve", "reject", "assign", "retry"] },
+        "model": { "type": "string" },
+        "confidence": { "type": "number" },
+        "assessed_risk": { "enum": ["low", "medium"] },
+        "reason_code": { "const": "within_policy" }
+      } }
+    },
+    {
+      "if": { "properties": { "decision_type": { "const": "approval" } }, "required": ["decision_type"] },
+      "then": { "properties": {
+        "outcome": { "enum": ["approve", "reject", "escalate"] },
+        "subject": {
+          "type": "object",
+          "required": ["approval_id", "approval_scope"],
+          "properties": { "approval_id": { "$ref": "#/$defs/identifier" }, "approval_scope": { "enum": ["controlled", "mutating"] } }
+        }
+      } }
+    },
+    {
+      "if": { "properties": { "decision_type": { "const": "routing" } }, "required": ["decision_type"] },
+      "then": { "properties": { "outcome": { "enum": ["assign", "escalate"] } } }
+    },
+    {
+      "if": { "properties": { "decision_type": { "const": "retry_uncertain" } }, "required": ["decision_type"] },
+      "then": { "properties": { "outcome": { "enum": ["retry", "escalate"] } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "assign" } }, "required": ["outcome"] },
+      "then": { "required": ["assigned_agent"], "properties": { "assigned_agent": { "$ref": "#/$defs/identifier" } } }
+    }
+  ],
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "not": { "pattern": "[\\s*]" } },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

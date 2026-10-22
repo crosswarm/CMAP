@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/delegation-policy/v1",
+  "title": "Delegation Policy v1",
+  "description": "真人签发的委托策略（ADR-0007）：授权来源是本策略，不是 Jev 的置信度。策略只能在确定性兜底规则之内收窄 Jev 可代为决定的范围，不能放宽兜底规则。controlled 与 mutating 逐 scope 委托、互不蕴含；mutating 只能委托不推送的改动；执行不确定后的重做只限只读级风险。shadow 模式下 Jev 的决定只记录、不执行。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "policy_id", "tenant", "issued_by", "issued_at", "expires_at", "mode", "min_confidence", "daily_auto_budget", "rules"],
+  "properties": {
+    "schema": { "const": "cmap/delegation-policy/v1" },
+    "policy_id": { "type": "string", "pattern": "^pol_[a-z0-9_]{1,120}$" },
+    "tenant": { "$ref": "#/$defs/identifier" },
+    "issued_by": { "type": "string", "maxLength": 256, "pattern": "^user:[^\\s*]+$", "description": "签发策略的真人；Agent 或 Jev 身份无效。" },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "mode": { "enum": ["shadow", "enforce"] },
+    "min_confidence": { "type": "number", "minimum": 0.8, "maximum": 1 },
+    "daily_auto_budget": { "type": "integer", "minimum": 0, "maximum": 1000, "description": "每租户每 UTC 日 Jev 自动执行决定的上限；0 表示不自动执行。" },
+    "rules": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "oneOf": [
+      { "$ref": "#/$defs/approval_rule" },
+      { "$ref": "#/$defs/routing_rule" },
+      { "$ref": "#/$defs/retry_rule" }
+    ] } }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "not": { "pattern": "[\\s*]" } },
+    "capabilities": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+    "approval_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_type", "approval_scope", "capabilities", "outcomes"],
+      "properties": {
+        "decision_type": { "const": "approval" },
+        "approval_scope": { "enum": ["controlled", "mutating"] },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
+        "outcomes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["approve", "reject"] } },
+        "require_no_push": { "const": true }
+      },
+      "if": { "properties": { "approval_scope": { "const": "mutating" } }, "required": ["approval_scope"] },
+      "then": { "required": ["require_no_push"], "properties": { "require_no_push": { "const": true } } }
+    },
+    "routing_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_type", "capabilities"],
+      "properties": {
+        "decision_type": { "const": "routing" },
+        "capabilities": { "$ref": "#/$defs/capabilities" }
+      }
+    },
+    "retry_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_type", "capabilities", "max_declared_risk"],
+      "properties": {
+        "decision_type": { "const": "retry_uncertain" },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
+        "max_declared_risk": { "enum": ["read-meta", "read-sensitive"] }
+      }
+    }
+  }
+}
