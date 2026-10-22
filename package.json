@@ -22,7 +22,7 @@
     "test:contract": "node --test tests/contract/*.test.mjs",
     "test:adapter": "node --test tests/adapter/*.test.ts",
     "test:domain": "node --test tests/domain/memory-store.test.ts tests/domain/task-state.test.ts tests/domain/evidence-pack.test.ts tests/domain/no-progress.test.ts tests/domain/criterion-check.test.ts tests/domain/mission-plan.test.ts tests/domain/runner-admission.test.ts tests/domain/dispatch-permit.test.ts",
-    "check": "npm run typecheck && npm test && npm run test:api && npm run test:workflow",
+    "check": "npm run typecheck && npm test && npm run test:api && npm run test:pg && npm run test:workflow",
     "test:pg": "node --test --test-concurrency=1 tests/domain/pg-store.test.ts tests/domain/pg-migration.test.ts",
     "test:store": "node --test --test-concurrency=1 tests/domain/memory-store.test.ts tests/domain/pg-store.test.ts tests/domain/pg-migration.test.ts",
     "test:workflow": "node --test --test-concurrency=1 tests/workflow/*.test.ts",
