@@ -1002,12 +1002,23 @@ describe('DAG attempt runner', () => {
   test('missing adapter for an existing binding is uncertain and does not release locks', async () => {
     const store = new MemoryStore()
     await createTask(store, 'tsk-missing-adapter', [{ resource: 'res:missing-adapter', ttl_seconds: 15 }])
-    await store.setTaskBinding('tsk-missing-adapter', {
-      adapter: 'missing',
-      remote_task_id: 'remote-missing',
-      protocol: 'fake-exec',
-      protocol_version: '0.0.1',
-      runner_id: 'runner-test',
+    await store.transitionTask({
+      taskId: 'tsk-missing-adapter',
+      to: 'QUEUED',
+      actor: ACTOR,
+      eventType: 'TASK_ASSIGNED',
+      idempotencyKey: 'tsk-missing-adapter:queued',
+    })
+    await store.claimTaskBinding({
+      taskId: 'tsk-missing-adapter',
+      binding: {
+        adapter: 'missing',
+        remote_task_id: 'remote-missing',
+        protocol: 'fake-exec',
+        protocol_version: '0.0.1',
+        runner_id: 'runner-test',
+      },
+      actor: ACTOR,
     })
 
     const out = await createDagAttemptRunner(syntheticActivityDeps({ runner: syntheticRunner(),

@@ -21,7 +21,6 @@ import type {
   TaskRecord,
   TaskEvent,
   EventActor,
-  RemoteTaskBinding,
   Approval,
   ResourceLock,
   Artifact,
@@ -80,7 +79,6 @@ export class MemoryStore implements Store {
   readonly #reviews: Review[] = []
   readonly #approvals = new Map<string, Approval>()
   readonly #locks = new Map<string, ResourceLock>()
-  readonly #delivered = new Set<string>()
   /** idempotencyKey → 已产生的 event_id，用于重复投递去重 */
   readonly #seenKeys = new Map<string, string>()
 
@@ -262,20 +260,6 @@ export class MemoryStore implements Store {
     return cloneTask(back)
   }
 
-  async setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord> {
-    const t = this.#tasks.get(taskId)
-    if (!t) throw new NotFoundError('Task', taskId)
-
-    const next: TaskRecord = { ...t, binding: structuredClone(binding), updated_at: new Date().toISOString() }
-    this.#tasks.set(taskId, next)
-
-    const back = this.#tasks.get(taskId)
-    if (back?.binding?.remote_task_id !== binding.remote_task_id) {
-      throw new WriteVerificationError('Task', taskId, 'binding 回读不符')
-    }
-    return cloneTask(back)
-  }
-
   async claimTaskBinding(input: ClaimTaskBindingInput): Promise<ClaimTaskBindingResult> {
     const t = this.#tasks.get(input.taskId)
     if (!t) throw new NotFoundError('Task', input.taskId)
@@ -333,18 +317,6 @@ export class MemoryStore implements Store {
     return (q.limit ? out.slice(0, q.limit) : out).map(cloneTask)
   }
 
-  async findReadyTasks(missionId: string): Promise<readonly TaskRecord[]> {
-    const all = [...this.#tasks.values()].filter((t) => t.mission_id === missionId)
-    const byId = new Map(all.map((t) => [t.id, t]))
-
-    return all.filter((t) => {
-      if (t.state !== 'READY') return false
-      // 依赖必须全部 COMPLETED。缺失的依赖视为未满足——
-      // 宁可不调度，也不能在依赖缺失的情况下执行。
-      return t.deps.every((d) => byId.get(d)?.state === 'COMPLETED')
-    }).map(cloneTask)
-  }
-
   // ------------------------------------------------------------ Event
 
   async appendEvent(input: AppendEventInput): Promise<TaskEvent> {
@@ -374,18 +346,6 @@ export class MemoryStore implements Store {
       .map(cloneEvent)
   }
 
-  async listUndeliveredEvents(limit: number): Promise<readonly TaskEvent[]> {
-    return this.#events
-      .filter((e) => !this.#delivered.has(e.event_id))
-      .sort((a, b) => a.lamport - b.lamport)
-      .slice(0, limit)
-      .map(cloneEvent)
-  }
-
-  async markEventDelivered(eventId: string): Promise<void> {
-    this.#delivered.add(eventId)
-  }
-
   // --------------------------------------------------------- Artifact
 
   async putArtifact(a: Artifact): Promise<Artifact> {
@@ -408,15 +368,6 @@ export class MemoryStore implements Store {
 
   async listArtifacts(taskId: string): Promise<readonly Artifact[]> {
     return [...this.#artifacts.values()].filter((a) => a.task_id === taskId)
-  }
-
-  async linkArtifacts(edge: ArtifactEdge): Promise<void> {
-    // PG 靠外键约束保证两端存在，内存版必须显式校验，否则两个实现
-    // 行为不一致：一边拒绝悬空边，另一边默默写入。
-    for (const id of [edge.source_artifact_id, edge.target_artifact_id]) {
-      if (!this.#artifacts.has(id)) throw new NotFoundError('Artifact', id)
-    }
-    this.#edges.push({ ...edge })
   }
 
   async listLineage(artifactId: string): Promise<readonly ArtifactEdge[]> {

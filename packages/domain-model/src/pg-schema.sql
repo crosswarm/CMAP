@@ -73,8 +73,8 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_mission_lamport_idx ON events (mission_id, lamport);
--- 未投递事件的扫描是高频操作，只索引未投递的行
-CREATE INDEX IF NOT EXISTS events_undelivered_idx ON events (lamport) WHERE delivered_at IS NULL;
+-- 事件投递标记已无调用方；列保留以免破坏现有数据，仅清理旧库里的部分索引。
+DROP INDEX IF EXISTS events_undelivered_idx;
 
 CREATE TABLE IF NOT EXISTS artifacts (
   artifact_id  TEXT PRIMARY KEY,

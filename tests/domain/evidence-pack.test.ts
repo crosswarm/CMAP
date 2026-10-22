@@ -64,25 +64,6 @@ describe('Evidence Pack', () => {
     )
   })
 
-  test('包含血缘边，可追溯结论到原始证据', async () => {
-    const s = await seed()
-    await s.linkArtifacts({
-      source_artifact_id: 'art-diff',
-      target_artifact_id: 'art-before',
-      relation: 'DERIVED_FROM',
-    })
-    await s.linkArtifacts({
-      source_artifact_id: 'art-diff',
-      target_artifact_id: 'art-after',
-      relation: 'DERIVED_FROM',
-    })
-
-    const pack = await buildEvidencePack(s, 'mis-1')
-
-    assert.equal(pack.edges.length, 2, '血缘边缺失会让「这个结论基于哪些证据」无法回答')
-    assert.ok(pack.edges.every((e) => e.source_artifact_id === 'art-diff'))
-  })
-
   test('无任何证据时返回空 tasks，不抛错', async () => {
     const s = new MemoryStore()
     await s.createMission({ mission: mission('mis-empty'), actor: ACTOR })
@@ -94,13 +75,6 @@ describe('Evidence Pack', () => {
 
   test('携带任务的验收结论，供评审直接判定', async () => {
     const s = await seed()
-    // 模拟 codex 回报的结果落库
-    const t = await s.getTask('tsk-2')
-    await s.setTaskBinding('tsk-2', {
-      adapter: 'codex-adapter', remote_task_id: 'r1',
-      protocol: 'codex-exec', protocol_version: '0.1.0', runner_id: 'runner-1',
-    })
-    assert.ok(t)
 
     const pack = await buildEvidencePack(s, 'mis-1')
     const t2 = pack.tasks.find((x) => x.taskId === 'tsk-2')!

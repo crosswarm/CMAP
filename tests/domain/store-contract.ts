@@ -416,13 +416,6 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
           eventType: 'TASK_READY',
           idempotencyKey: 'tsk-1:ready',
         })
-        await s.setTaskBinding('tsk-1', {
-          adapter: 'codex-adapter',
-          remote_task_id: 'codex:tsk-1:1',
-          protocol: 'codex-exec',
-          protocol_version: '0.1.0',
-          runner_id: 'runner-1',
-        })
         await s.setTaskResult('tsk-1', taskResult('tsk-1', 'mis-1'))
         const before = await s.listEvents('mis-1')
 
@@ -440,7 +433,6 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         })
 
         assert.equal(again.state, 'READY')
-        assert.equal(again.binding?.remote_task_id, 'codex:tsk-1:1')
         assert.equal(again.result?.status, 'completed')
         assert.deepEqual(again.deps, ['dep-1'])
         assert.equal((await s.listEvents('mis-1')).length, before.length)
@@ -692,57 +684,6 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
             `事件 ${i} 的 lamport 未递增`,
           )
         }
-      })
-
-      test('未投递事件可被查出并标记（Outbox）', async () => {
-        const s = await createStore()
-        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
-
-        const pending = await s.listUndeliveredEvents(10)
-        assert.ok(pending.length > 0, '新事件默认处于未投递状态')
-
-        await s.markEventDelivered(pending[0]!.event_id)
-        const after = await s.listUndeliveredEvents(10)
-        assert.ok(
-          !after.some((e) => e.event_id === pending[0]!.event_id),
-          '已标记的事件不应再出现在未投递列表',
-        )
-      })
-    })
-
-    describe('就绪任务查询', () => {
-      test('依赖全部完成才算就绪', async () => {
-        const s = await createStore()
-        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
-        await s.createTask({ task: task('dep-1', 'mis-1'), actor: ACTOR })
-        await s.createTask({
-          task: task('tsk-2', 'mis-1', { deps: ['dep-1'] }),
-          actor: ACTOR,
-        })
-        await driveTo(s, 'dep-1', ['READY'])
-        await driveTo(s, 'tsk-2', ['READY'])
-
-        assert.deepEqual(
-          (await s.findReadyTasks('mis-1')).map((t) => t.id),
-          ['dep-1'],
-          '依赖未完成的任务不得就绪',
-        )
-
-        // 让依赖走完整条路径到 COMPLETED
-        await driveTo(s, 'dep-1', ['QUEUED', 'RUNNING', 'VERIFYING', 'REVIEWING', 'COMPLETED'])
-
-        assert.deepEqual(
-          (await s.findReadyTasks('mis-1')).map((t) => t.id),
-          ['tsk-2'],
-          '依赖完成后应就绪',
-        )
-      })
-
-      test('只返回 READY 状态的任务', async () => {
-        const s = await createStore()
-        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
-        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
-        assert.deepEqual(await s.findReadyTasks('mis-1'), [], 'DRAFT 不算就绪')
       })
     })
 
@@ -1062,47 +1003,11 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         )
       })
 
-      test('binding 写入后可读回，runner_id 不丢失', async () => {
-        const s = await createStore()
-        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
-        await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
-
-        await s.setTaskBinding('tsk-1', {
-          adapter: 'codex-adapter',
-          remote_task_id: 'codex:tsk-1:1',
-          protocol: 'codex-exec',
-          protocol_version: '0.1.0',
-          runner_id: 'runner-mac-a',
-          provider_session_id: 'sess-9',
-        })
-
-        const back = await s.getTask('tsk-1')
-        assert.equal(back?.binding?.remote_task_id, 'codex:tsk-1:1')
-        assert.equal(
-          back?.binding?.runner_id,
-          'runner-mac-a',
-          'runner_id 丢失会导致 P4 时无法定位任务在哪台机器执行',
-        )
-        assert.equal(back?.binding?.provider_session_id, 'sess-9')
-      })
-
       test('未派发的任务 binding 为 null', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
         await s.createTask({ task: task('tsk-1', 'mis-1'), actor: ACTOR })
         assert.equal((await s.getTask('tsk-1'))?.binding, null)
-      })
-
-      test('对不存在的任务设置 binding 抛错', async () => {
-        const s = await createStore()
-        await assert.rejects(
-          () =>
-            s.setTaskBinding('ghost', {
-              adapter: 'a', remote_task_id: 'r', protocol: 'p',
-              protocol_version: '1', runner_id: 'runner-1',
-            }),
-          /不存在/,
-        )
       })
     })
 
@@ -1293,67 +1198,6 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         await s.putArtifact(artifact('art-after', 'tsk-1', 'measure_after'))
         await s.putArtifact(artifact('art-diff', 'tsk-1', 'metric_diff'))
       }
-
-      test('SUPERSEDES 边写入后可读回，relation 正确', async () => {
-        const s = await createStore()
-        await seed(s)
-
-        await s.linkArtifacts({
-          source_artifact_id: 'art-after',
-          target_artifact_id: 'art-before',
-          relation: 'SUPERSEDES',
-        })
-
-        const edges = await s.listLineage('art-after')
-        assert.equal(edges.length, 1)
-        assert.equal(edges[0]!.target_artifact_id, 'art-before')
-        assert.equal(edges[0]!.relation, 'SUPERSEDES')
-      })
-
-      test('同一 artifact 可有多条出边', async () => {
-        const s = await createStore()
-        await seed(s)
-
-        // 指标对比派生自前后两份原始测量
-        await s.linkArtifacts({
-          source_artifact_id: 'art-diff',
-          target_artifact_id: 'art-before',
-          relation: 'DERIVED_FROM',
-        })
-        await s.linkArtifacts({
-          source_artifact_id: 'art-diff',
-          target_artifact_id: 'art-after',
-          relation: 'DERIVED_FROM',
-        })
-
-        const edges = await s.listLineage('art-diff')
-        assert.equal(edges.length, 2)
-        assert.deepEqual(
-          edges.map((e) => e.target_artifact_id).sort(),
-          ['art-after', 'art-before'],
-        )
-      })
-
-      test('对不存在的 artifact 建边必须抛错，不得留下悬空边', async () => {
-        const s = await createStore()
-        await seed(s)
-
-        await assert.rejects(
-          () =>
-            s.linkArtifacts({
-              source_artifact_id: 'art-after',
-              target_artifact_id: 'ghost',
-              relation: 'SUPERSEDES',
-            }),
-          '悬空边会让血缘链在追溯时断裂，且无法被发现',
-        )
-
-        assert.equal(
-          (await s.listLineage('art-after')).length,
-          0,
-          '失败的建边不得留下任何痕迹',
-        )
-      })
 
       test('无血缘的 artifact 返回空数组', async () => {
         const s = await createStore()
@@ -1626,33 +1470,6 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
             s.appendEvent(appendedEvent({ idempotency_key: 'append-race', payload: { winner: 2 } })),
           ]),
           EventConflictError,
-        )
-      })
-
-      test('追加的事件同样进入未投递队列', async () => {
-        const s = await createStore()
-        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
-        const e = await s.appendEvent({
-          event: {
-            event_type: 'TASK_HEARTBEAT',
-            event_version: 1,
-            occurred_at: T0,
-            mission_id: 'mis-1',
-            task_id: null,
-            attempt: null,
-            actor: ACTOR,
-            causation_id: null,
-            correlation_id: 'mis-1',
-            trace_id: null,
-            idempotency_key: 'append-outbox',
-            payload: {},
-          },
-        })
-
-        const pending = await s.listUndeliveredEvents(50)
-        assert.ok(
-          pending.some((p) => p.event_id === e.event_id),
-          '经 appendEvent 写入的事件也必须能被投递器发现，否则会静默丢失',
         )
       })
     })

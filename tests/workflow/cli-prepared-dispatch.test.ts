@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { MemoryStore } from '#domain-model'
-import type { Mission, RemoteTaskBinding, TaskEnvelopeV1 } from '#domain-model'
+import type { Mission, RemoteTaskBinding, TaskEnvelopeV1, TaskRecord } from '#domain-model'
 import type { DispatchContext } from '#adapter-sdk'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
@@ -119,6 +119,7 @@ const cleanupStoredBinding = async (
 const makeStoreTask = async (
   taskId: string,
   e: TaskEnvelopeV1 = envelope(taskId),
+  seed: Partial<TaskRecord> = {},
 ): Promise<MemoryStore> => {
   const store = new MemoryStore()
   await store.createMission({ mission: mission(e.identity.mission_id), actor: ACTOR })
@@ -141,15 +142,18 @@ const makeStoreTask = async (
       deps: [],
       created_at: '2026-09-22T00:00:00.000Z',
       updated_at: '2026-09-22T00:00:00.000Z',
+      ...seed,
     },
   })
-  await store.transitionTask({
-    taskId,
-    to: 'READY',
-    actor: ACTOR,
-    eventType: 'TASK_READY',
-    idempotencyKey: `${taskId}:ready`,
-  })
+  if (!seed.state) {
+    await store.transitionTask({
+      taskId,
+      to: 'READY',
+      actor: ACTOR,
+      eventType: 'TASK_READY',
+      idempotencyKey: `${taskId}:ready`,
+    })
+  }
   return store
 }
 
@@ -535,20 +539,15 @@ test('historical queued task with binding keeps its state and never relaunches',
   const root = await mkdtemp(join(tmpdir(), 'cmap-cli-queued-bound-'))
   try {
     const launches = join(root, 'launches')
-    const store = await makeStoreTask('tsk-historical')
-    await store.transitionTask({
-      taskId: 'tsk-historical',
-      to: 'QUEUED',
-      actor: ACTOR,
-      eventType: 'TASK_ASSIGNED',
-      idempotencyKey: 'tsk-historical:queued',
-    })
-    await store.setTaskBinding('tsk-historical', {
-      adapter: 'codex-adapter',
-      remote_task_id: 'codex:tsk-historical:1',
-      protocol: 'codex-exec',
-      protocol_version: '0.1.0',
-      runner_id: 'runner-test',
+    const store = await makeStoreTask('tsk-historical', envelope('tsk-historical'), {
+      state: 'QUEUED',
+      binding: {
+        adapter: 'codex-adapter',
+        remote_task_id: 'codex:tsk-historical:1',
+        protocol: 'codex-exec',
+        protocol_version: '0.1.0',
+        runner_id: 'runner-test',
+      },
     })
     const adapter = new ObservedCodexAdapter({
       bin: await makeCodex(root, launches),

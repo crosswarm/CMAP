@@ -70,7 +70,6 @@ test('SSE 历史、实时事件、双客户端独立推送，事件不泄漏 pay
   assert.equal('payload' in second.data, false)
   assert.equal('actor' in second.data, false)
   assert.deepEqual(await b.next(), second)
-  assert.equal((await store.listUndeliveredEvents(100)).length, 3)
 })
 
 test('SSE 重连完整回放，可按 event_id 去重且不漏断线事件', { timeout: 6000 }, async (t) => {

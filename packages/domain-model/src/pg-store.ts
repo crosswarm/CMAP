@@ -33,7 +33,6 @@ import type {
   TaskEvent,
   EventActor,
   EventType,
-  RemoteTaskBinding,
   Approval,
   ResourceLock,
   Artifact,
@@ -71,7 +70,6 @@ const { Pool } = pg
 type PoolClient = pg.PoolClient
 
 const UNIQUE_VIOLATION = '23505'
-const FOREIGN_KEY_VIOLATION = '23503'
 
 const iso = (v: unknown): string =>
   v instanceof Date ? v.toISOString() : String(v)
@@ -505,20 +503,6 @@ export class PgStore implements Store {
     })
   }
 
-  async setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord> {
-    const { rows, rowCount } = await this.#pool.query(
-      'UPDATE tasks SET binding = $2, updated_at = now() WHERE id = $1 RETURNING *',
-      [taskId, JSON.stringify(binding)],
-    )
-    if (rowCount === 0) throw new NotFoundError('Task', taskId)
-
-    const back = toTask(rows[0] as Record<string, unknown>)
-    if (back.binding?.remote_task_id !== binding.remote_task_id) {
-      throw new WriteVerificationError('Task', taskId, 'binding 回读不符')
-    }
-    return back
-  }
-
   async claimTaskBinding(input: ClaimTaskBindingInput): Promise<ClaimTaskBindingResult> {
     return this.#tx(async (c) => {
       const cur = await c.query('SELECT * FROM tasks WHERE id = $1 FOR UPDATE', [input.taskId])
@@ -591,25 +575,6 @@ export class PgStore implements Store {
     return rows.map((r) => toTask(r as Record<string, unknown>))
   }
 
-  async findReadyTasks(missionId: string): Promise<readonly TaskRecord[]> {
-    // 依赖必须全部 COMPLETED。用 NOT EXISTS 表达「不存在未完成的依赖」，
-    // 缺失的依赖同样算未满足——宁可不调度，也不能在依赖缺失时执行。
-    const { rows } = await this.#pool.query(
-      `SELECT t.* FROM tasks t
-       WHERE t.mission_id = $1
-         AND t.state = 'READY'
-         AND NOT EXISTS (
-           SELECT 1 FROM unnest(t.deps) AS dep_id
-           WHERE NOT EXISTS (
-             SELECT 1 FROM tasks d WHERE d.id = dep_id AND d.state = 'COMPLETED'
-           )
-         )
-       ORDER BY t.created_at`,
-      [missionId],
-    )
-    return rows.map((r) => toTask(r as Record<string, unknown>))
-  }
-
   // ------------------------------------------------------------ Event
 
   async appendEvent(input: AppendEventInput): Promise<TaskEvent> {
@@ -653,21 +618,6 @@ export class PgStore implements Store {
     return rows.map((r) => toEvent(r as Record<string, unknown>))
   }
 
-  async listUndeliveredEvents(limit: number): Promise<readonly TaskEvent[]> {
-    const { rows } = await this.#pool.query(
-      'SELECT * FROM events WHERE delivered_at IS NULL ORDER BY lamport LIMIT $1',
-      [limit],
-    )
-    return rows.map((r) => toEvent(r as Record<string, unknown>))
-  }
-
-  async markEventDelivered(eventId: string): Promise<void> {
-    await this.#pool.query(
-      'UPDATE events SET delivered_at = now() WHERE event_id = $1',
-      [eventId],
-    )
-  }
-
   // --------------------------------------------------------- Artifact
 
   async putArtifact(a: Artifact): Promise<Artifact> {
@@ -707,25 +657,6 @@ export class PgStore implements Store {
       [taskId],
     )
     return rows.map((r) => toArtifact(r as Record<string, unknown>))
-  }
-
-  async linkArtifacts(edge: ArtifactEdge): Promise<void> {
-    try {
-      await this.#pool.query(
-        `INSERT INTO artifact_edges (source_artifact_id, target_artifact_id, relation)
-         VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-        [edge.source_artifact_id, edge.target_artifact_id, edge.relation],
-      )
-    } catch (e) {
-      // 外键冲突说明某一端不存在。转成领域错误，与内存版行为一致。
-      if ((e as { code?: string }).code === FOREIGN_KEY_VIOLATION) {
-        throw new NotFoundError(
-          'Artifact',
-          `${edge.source_artifact_id} 或 ${edge.target_artifact_id}`,
-        )
-      }
-      throw e
-    }
   }
 
   async listLineage(artifactId: string): Promise<readonly ArtifactEdge[]> {

@@ -17,14 +17,12 @@ import { PgStore } from '#domain-model'
 import type {
   Approval,
   Artifact,
-  ArtifactEdge,
   CreateMissionInput,
   CreateTaskInput,
   EventActor,
   Mission,
   MissionQuery,
   MissionState,
-  RemoteTaskBinding,
   ResourceLock,
   Review,
   Store,
@@ -92,20 +90,15 @@ class ThrowAfterCommitStore implements Store {
   }
   async getTask(id: string) { return this.inner.getTask(id) }
   async transitionTask(input: TransitionTaskInput) { return this.inner.transitionTask(input) }
-  async setTaskBinding(taskId: string, binding: RemoteTaskBinding) { return this.inner.setTaskBinding(taskId, binding) }
   async claimTaskBinding(input: Parameters<Store['claimTaskBinding']>[0]) { return this.inner.claimTaskBinding(input) }
   async setTaskResult(taskId: string, result: TaskResultV1) { return this.inner.setTaskResult(taskId, result) }
   async queryTasks(q: Parameters<Store['queryTasks']>[0]) { return this.inner.queryTasks(q) }
-  async findReadyTasks(missionId: string) { return this.inner.findReadyTasks(missionId) }
 
   async appendEvent(input: Parameters<Store['appendEvent']>[0]) { return this.inner.appendEvent(input) }
   async listEvents(missionId: string) { return this.inner.listEvents(missionId) }
-  async listUndeliveredEvents(limit: number) { return this.inner.listUndeliveredEvents(limit) }
-  async markEventDelivered(eventId: string) { return this.inner.markEventDelivered(eventId) }
 
   async putArtifact(a: Artifact) { return this.inner.putArtifact(a) }
   async listArtifacts(taskId: string) { return this.inner.listArtifacts(taskId) }
-  async linkArtifacts(edge: ArtifactEdge) { return this.inner.linkArtifacts(edge) }
   async listLineage(artifactId: string) { return this.inner.listLineage(artifactId) }
 
   async putReview(r: Review) {

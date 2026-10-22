@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import pg from 'pg'
 
 import { MemoryStore, PgStore } from '#domain-model'
-import type { EventActor, Mission, Store, TaskRecord, TaskResultV1 } from '#domain-model'
+import type { EventActor, Mission, RemoteTaskBinding, Store, TaskRecord, TaskResultV1 } from '#domain-model'
 import {
   cancelPendingMissionTasks,
   MISSION_ACTOR,
@@ -63,6 +63,14 @@ const task = (missionId: string, id: string, patch: Partial<TaskRecord> = {}): T
   updated_at: T0,
   ...patch,
 })
+
+const BOUND: RemoteTaskBinding = {
+  adapter: 'codex',
+  remote_task_id: 'remote-1',
+  protocol: 'codex-cli',
+  protocol_version: '1',
+  runner_id: 'runner-1',
+}
 
 const result = (missionId: string, taskId: string): TaskResultV1 => ({
   schema: 'cmap/task-result/v1',
@@ -243,16 +251,10 @@ const runSharedCases = (name: string, makeStore: (fn: (store: Store) => Promise<
 
     test('rejects foreign, bound, result-bearing, duplicate, and forged receipt inputs', async () => {
       await makeStore(async (store) => {
-        await setup(store, 'mis-main', ['tsk-a', 'tsk-bound', 'tsk-result', 'tsk-forged'])
+        await setup(store, 'mis-main', ['tsk-a', 'tsk-result', 'tsk-forged'])
+        await store.createTask({ task: task('mis-main', 'tsk-bound', { binding: BOUND }), actor: ACTOR })
         await store.createMission({ mission: mission('mis-other'), actor: ACTOR })
         await store.createTask({ task: task('mis-other', 'tsk-foreign'), actor: ACTOR })
-        await store.setTaskBinding('tsk-bound', {
-          adapter: 'codex',
-          remote_task_id: 'remote-1',
-          protocol: 'codex-cli',
-          protocol_version: '1',
-          runner_id: 'runner-1',
-        })
         await store.setTaskResult('tsk-result', result('mis-main', 'tsk-result'))
         await store.transitionTask({
           taskId: 'tsk-forged',
@@ -320,15 +322,8 @@ test('DRAFT task with an existing cancel receipt fails before any write', async 
 
 test('exact canceled retry still rejects binding, result, and duplicate receipts', async () => {
   const bound = new MemoryStore()
-  await setup(bound, 'mis-bound-canceled', ['tsk-a'])
-  await cancelPendingMissionTasks(bound, input('mis-bound-canceled', ['tsk-a']))
-  await bound.setTaskBinding('tsk-a', {
-    adapter: 'codex',
-    remote_task_id: 'remote-1',
-    protocol: 'codex-cli',
-    protocol_version: '1',
-    runner_id: 'runner-1',
-  })
+  await bound.createMission({ mission: mission('mis-bound-canceled'), actor: ACTOR })
+  await bound.createTask({ task: task('mis-bound-canceled', 'tsk-a', { state: 'CANCELED', binding: BOUND }), actor: ACTOR })
   await assert.rejects(cancelPendingMissionTasks(bound, input('mis-bound-canceled', ['tsk-a'])), /binding/)
 
   const withResult = new MemoryStore()

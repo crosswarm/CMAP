@@ -117,15 +117,6 @@ const DEFAULT_MAX_CYCLES = 2
 /** 证据保留期。到期前不得覆盖，否则结论无法复核。 */
 const RETENTION_MS = 365 * 24 * 3600 * 1000
 
-/**
- * 锁 TTL。runner 须在此周期内续租，否则视为失锁并主动终止操作。
- *
- * 这是哑资源唯一可行的脑裂防线——真机、YonWork、worktree 都无法校验
- * fencing token 并拒绝过期持有者，所以防线只能放在 runner 自己身上。
- * 见 ADR-0004。
- */
-const LOCK_TTL_MS = 90_000
-
 export interface ActivityDeps {
   readonly store: Store
   /**
@@ -853,91 +844,6 @@ export const createActivities = (deps: ActivityDeps) => {
       await recordResultArtifacts(t, result, a, t.binding)
 
       return judge(envelope, result)
-    },
-
-    /**
-     * 获取任务所需的独占资源锁。
-     *
-     * 拿不到锁**不是失败**——真机被占、租户被占都是正常排队。任务进入
-     * WAITING_RESOURCE 等待，而非 FAILED_RETRYABLE：后者会消耗重试预算，
-     * 且把「资源忙」误报成「执行出错」，掩盖真实原因。
-     */
-    async acquireTaskLock(input: {
-      taskId: string
-      resource: string
-    }): Promise<{ acquired: boolean; lockId: string | null }> {
-      const lockId = nextId('lk')
-      const now = new Date()
-      const acquiredAt = now.toISOString()
-      const expiresAt = new Date(now.getTime() + LOCK_TTL_MS).toISOString()
-
-      let t = await store.getTask(input.taskId)
-      if (!t) throw new Error(`任务不存在：${input.taskId}`)
-
-      // 申请资源本身就是排队的一部分：READY 表示依赖已满足但尚未入队，
-      // 而状态机只允许从 QUEUED 进入 WAITING_RESOURCE。补上这一步使
-      // 本 Activity 自洽，调用方不必记住这个前置条件。
-      if (t.state === 'READY') {
-        t = await store.transitionTask({
-          taskId: input.taskId, to: 'QUEUED', actor: ACTOR,
-          eventType: 'TASK_ASSIGNED',
-          idempotencyKey: `queued-for-lock:${input.taskId}`,
-        })
-      }
-
-      try {
-        await store.acquireLock({
-          lock_id: lockId,
-          resource: input.resource,
-          task_id: input.taskId,
-          mission_id: t.mission_id,
-          holder_runner_id: runnerId,
-          acquired_at: acquiredAt,
-          expires_at: expiresAt,
-          released_at: null,
-        })
-      } catch (e) {
-        if ((e as Error).name !== 'LockUnavailableError') throw e
-
-        if (t.state !== 'WAITING_RESOURCE') {
-          await store.transitionTask({
-            taskId: input.taskId, to: 'WAITING_RESOURCE', actor: ACTOR,
-            eventType: 'RESOURCE_LOCK_REQUESTED',
-            idempotencyKey: `waiting:${input.taskId}:${input.resource}`,
-            payload: { resource: input.resource },
-          })
-        }
-        return { acquired: false, lockId: null }
-      }
-
-      // 拿到锁后回到运行态。从 WAITING_RESOURCE 与从 QUEUED 进入的路径不同，
-      // 但都应落到 RUNNING。
-      const cur = await store.getTask(input.taskId)
-      if (cur && cur.state !== 'RUNNING') {
-        await store.transitionTask({
-          taskId: input.taskId, to: 'RUNNING', actor: ACTOR,
-          eventType: 'RESOURCE_LOCK_ACQUIRED',
-          idempotencyKey: `lock-acquired:${lockId}`,
-          payload: { resource: input.resource, lock_id: lockId },
-        })
-      }
-
-      return { acquired: true, lockId }
-    },
-
-    /**
-     * 续租。返回 false 表示已失去独占——runner 应据此**主动终止操作**。
-     *
-     * 必须返回 false 而非抛错：抛错会让 Temporal 把它当作瞬时故障并重试，
-     * 而失锁不是瞬时故障，重试也拿不回来。见 ADR-0004。
-     */
-    async renewTaskLock(lockId: string): Promise<boolean> {
-      const newExpiry = new Date(Date.now() + LOCK_TTL_MS).toISOString()
-      return store.renewLock(lockId, newExpiry)
-    },
-
-    async releaseTaskLock(lockId: string): Promise<void> {
-      await store.releaseLock(lockId, new Date().toISOString())
     },
 
     /**

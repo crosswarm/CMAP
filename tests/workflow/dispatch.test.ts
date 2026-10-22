@@ -567,9 +567,9 @@ describe('收结果并落账本', () => {
 
 test('fresh CLI runtime loss is a durable nonterminal uncertainty, not a TaskResult', async () => {
   const taskId = await startTask()
-  await acts.dispatchTask(taskId)
   const binding = {adapter:'codex-adapter',remote_task_id:`codex:${taskId}:1`,protocol:'codex-exec',protocol_version:'0.1.0',runner_id:'runner-test'}
-  await store.setTaskBinding(taskId,binding)
+  await store.transitionTask({taskId,to:'QUEUED',actor:ACTOR,eventType:'TASK_ASSIGNED',idempotencyKey:`${taskId}:queued`})
+  await store.claimTaskBinding({taskId,binding,actor:ACTOR})
   const freshAdapter = new CodexAdapter({outputSchemaPath:'schemas/codex-output.v1.schema.json', authorization: syntheticAdapterAuthorization({ runnerId: 'runner-test' })})
   const fresh = createActivities(syntheticActivityDeps({store,adapter:freshAdapter,runner:syntheticRunner({runner_id:'runner-test'})}))
   const expected = {executionUncertain:{code:'BINDING_NOT_FOUND',terminalObserved:false}}

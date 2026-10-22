@@ -256,14 +256,6 @@ export interface Store {
    * → 回读校验。任一环节失败则整体回滚。
    */
   transitionTask(input: TransitionTaskInput): Promise<TaskRecord>
-  /**
-   * 持久化派发绑定。
-   *
-   * 这是跨进程幂等的基础：Adapter 的内存缓存在 Worker 重启后失效，
-   * 只有落库的 binding 才能让重试的 Activity 认出「已经派发过了」。
-   * 没有它，Temporal 重试会重复 spawn Agent 进程。
-   */
-  setTaskBinding(taskId: string, binding: RemoteTaskBinding): Promise<TaskRecord>
   claimTaskBinding(input: ClaimTaskBindingInput): Promise<ClaimTaskBindingResult>
   /**
    * 持久化 Agent 交回的归一化结果。
@@ -275,28 +267,15 @@ export interface Store {
   setTaskResult(taskId: string, result: TaskResultV1): Promise<TaskRecord>
 
   queryTasks(q: TaskQuery): Promise<readonly TaskRecord[]>
-  /**
-   * 就绪任务：状态为 READY 且所有 deps 均已 COMPLETED。
-   * 依赖未完成或已失败的任务不得被返回——否则会在依赖缺失的情况下执行。
-   */
-  findReadyTasks(missionId: string): Promise<readonly TaskRecord[]>
 
   // Event（Outbox）
   appendEvent(input: AppendEventInput): Promise<TaskEvent>
   /** 按 lamport 升序返回，保证跨主机可复现的顺序。 */
   listEvents(missionId: string): Promise<readonly TaskEvent[]>
-  /** 尚未投递到外部总线的事件。投递成功后由调用方标记。 */
-  listUndeliveredEvents(limit: number): Promise<readonly TaskEvent[]>
-  markEventDelivered(eventId: string): Promise<void>
 
   // Artifact
   putArtifact(a: Artifact): Promise<Artifact>
   listArtifacts(taskId: string): Promise<readonly Artifact[]>
-  /**
-   * 建立血缘边。两端 artifact 都必须已存在——悬空边会让追溯链断裂，
-   * 且断在哪里无从发现，因此宁可建边失败也不留半条链。
-   */
-  linkArtifacts(edge: ArtifactEdge): Promise<void>
   /** 某 artifact 的全部出边。无血缘时返回空数组。 */
   listLineage(artifactId: string): Promise<readonly ArtifactEdge[]>
 
