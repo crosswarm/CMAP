@@ -816,19 +816,26 @@ export const createActivities = (deps: ActivityDeps) => {
         ledgerIds.set(art.artifact_id, [...(ledgerIds.get(art.artifact_id) ?? []), newIds[i]!])
       })
 
+      // 归一化 criterion_results：只留信封声明的标准，重复回应以最后一条为准——
+      // 与 judge / evaluateHardGate 的取数一致，DAG 复核才不会和硬门槛看到不同的数据。
+      const declared = new Set(envelope.goal.success_definition.map((x) => x.criterion_id))
+      const answered = new Map(
+        raw.criterion_results.filter((c) => declared.has(c.criterion_id)).map((c) => [c.criterion_id, c]),
+      )
+
       const result: TaskResultV1 = {
         ...raw,
         mission_id: t.mission_id,
         task_id: taskId,
         attempt: t.attempt,
         artifacts: raw.artifacts.map((art, i) => ({ ...art, artifact_id: newIds[i]! })),
-        criterion_results: raw.criterion_results.map((c) => {
+        criterion_results: [...answered.values()].map((c) => {
           const criterion = envelope.goal.success_definition.find(
             (x) => x.criterion_id === c.criterion_id,
-          )
+          )!
           return {
             ...c,
-            ...(criterion ? { passed: recomputeCriterionPassed(criterion, c) } : {}),
+            passed: recomputeCriterionPassed(criterion, c),
             ...(c.evidence_artifact_ids
               ? {
                   evidence_artifact_ids: c.evidence_artifact_ids.flatMap(

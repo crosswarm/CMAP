@@ -18,7 +18,7 @@ import type {
   TaskResultV1,
 } from '#domain-model'
 import type { MissionPlanV1 } from '../../packages/domain-model/src/generated/mission-plan.ts'
-import { syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
+import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 import { createDagActivities } from '../../workflows/dag-activities.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'dag-controller-test' }
@@ -453,6 +453,54 @@ await acts.finishDagNode({ missionId: m.id, nodeId: 'rootA', taskId, status: 'fa
 
     assert.equal(out.status, 'escalated')
     assert.equal((await store.getTask(taskId))?.state, 'INPUT_REQUIRED')
+  })
+
+  describe('Agent 回应的 criterion_results 在收结果处归一化，DAG 复核与硬门槛看到同一份数据', () => {
+    const runWith = async (missionId: string, criterionResults: TaskResultV1['criterion_results']) => {
+      const m = mission(missionId)
+      const store = new MemoryStore()
+      await store.createMission({ mission: m, actor: ACTOR })
+      const adapter = new FakeAdapter()
+      adapter.result = {
+        ...result(missionId, 'x', 1, 'A'),
+        criterion_results: criterionResults,
+        artifacts: [{ artifact_id: 'report', role: 'report', uri: 'evidence/report.json', sha256: 'a'.repeat(64), size_bytes: 1 }],
+      }
+      const acts = createDagActivities(syntheticActivityDeps({
+        store,
+        adapter,
+        workRoot: await mkdtemp(join(tmpdir(), 'cmap-dag-controller-')),
+        runner: syntheticRunner(),
+        pollIntervalMs: 1,
+        approvalWaitTimeoutMs: 1,
+      }))
+      const { taskId } = assertMaterialized(await acts.materializeDagNode({ missionId, nodeId: 'rootA', attempt: 1, acceptedDeps: {} }))
+      assert.deepEqual(await acts.checkDagApproval(taskId), { decision: 'approved' })
+      assert.equal((await acts.runDagAttempt({ taskId })).outcome, 'collected')
+      return { store, acts, taskId }
+    }
+
+    test('重复回同一条标准：去重后硬门槛与 DAG 复核都通过，节点被接受', async () => {
+      const dup = { criterion_id: 'A', actual: true, passed: true, evidence_artifact_ids: [] }
+      const { store, acts, taskId } = await runWith('mis-dup-criterion', [dup, { ...dup }])
+
+      const out = await acts.reviewDagAttempt({ taskId })
+
+      assert.equal(out.status, 'accepted')
+      assert.equal((await store.getTask(taskId))?.result?.criterion_results.length, 1)
+    })
+
+    test('未知 criterion_id 与硬门槛一致：忽略，不影响已声明标准的判定', async () => {
+      const { store, acts, taskId } = await runWith('mis-unknown-criterion', [
+        { criterion_id: 'A', actual: true, passed: true, evidence_artifact_ids: [] },
+        { criterion_id: 'NOT-DECLARED', actual: true, passed: true, evidence_artifact_ids: [] },
+      ])
+
+      const out = await acts.reviewDagAttempt({ taskId })
+
+      assert.equal(out.status, 'accepted')
+      assert.deepEqual((await store.getTask(taskId))?.result?.criterion_results.map((c) => c.criterion_id), ['A'])
+    })
   })
 
   test('pending approval check returns immediately and stopped pending approval expires without grant', async (t) => {
