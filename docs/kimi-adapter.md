@@ -18,6 +18,13 @@ node scripts/e2e-kimi.mjs
 fallback_agents 时按显式列表。替补仅用于启动前筛选，启动确认不明不换 Agent 重跑。
 配置仅支持 codex/kimi，拒绝未知或重复项。身份由控制面填充。
 
+## 成本计量
+
+结果的 `cost.duration_seconds` 为进程启动到退出的耗时。**tokens 不可得**：Kimi Code 2.2.0 的
+`-p --output-format stream-json` 只输出 `assistant` / `tool` / `meta` 行，源码里的 JSON writer 没有任何用量记录
+（仅 `/goal` 模式末尾会输出带 `tokensUsed` 的 `goal.summary`，CMAP 不使用 `/goal`）。因此默认 `cost.tokens` 缺省，
+不估算、不编造；输出里出现合法的 `goal.summary.tokensUsed`（非负整数）时才写入。报表中这类任务计入 `tasks_without_tokens`。
+
 ## 运行时与权限
 
 - 每次任务生成私有 KIMI_CODE_HOME、空 skills 目录和固定 agent-file；不复制用户配置。

@@ -169,6 +169,8 @@ export const EVENT_TYPES = [
   'HANDOFF_RECORDED',
   /** 交接记录写入失败（错误类别）。不影响升级流程。 */
   'HANDOFF_FAILED',
+  /** Mission 累计 tokens 超过 CMAP_MISSION_COST_ALERT_TOKENS：每个 Mission 至多一条，payload 仅含 total_tokens 与 threshold_tokens。只告警，不阻断执行。 */
+  'MISSION_COST_ALERT',
   /** 人请求取消 Mission（payload 含原因）。状态由 Workflow 收尾。 */
   'MISSION_CANCEL_REQUESTED',
   /** 因 Mission 取消向已绑定任务的 Adapter 发出 cancel；confirmed 表示 Adapter 是否确认。 */

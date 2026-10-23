@@ -31,7 +31,7 @@ import type {
   RunnerDescriptor,
   QuotaSnapshotV1,
 } from '#domain-model'
-import { needsApproval, ApprovalDecisionConflictError } from '#domain-model'
+import { needsApproval, ApprovalDecisionConflictError, EventConflictError } from '#domain-model'
 import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError, DispatchPermitError } from '#domain-model'
 import { AdapterError, type AgentAdapter, type DispatchContext, type DispatchPermitSigner } from '#adapter-sdk'
 import { preflightTaskDispatch, assertCurrentTaskApproval, assertStoredTaskAdmission, persistAdmissionDenial, readAdmissionDenial, admissionDenialReason, type AdmissionDenial } from './runner-admission.ts'
@@ -151,6 +151,8 @@ export interface ActivityDeps {
   readonly approvalWaitTimeoutMs?: number
   /** Memross 记忆检索。Mission 要求记忆而未配置时失败关闭，不静默降级。 */
   readonly memory?: MemoryDeps
+  /** Mission 累计 tokens 超过该值时写一条 MISSION_COST_ALERT。只告警，不阻断执行；不配置则不检查。 */
+  readonly missionCostAlertTokens?: number
 }
 
 export interface ApprovalGateOutput {
@@ -1100,6 +1102,25 @@ export const createActivities = (deps: ActivityDeps) => {
 
   // ------------------------------------------------------------ 内部
 
+  /** 结果入账后核对 Mission 累计成本；每个 Mission 至多一条告警（已存在则跳过），不影响任务流转。 */
+  async function alertMissionCost(missionId: string): Promise<void> {
+    const threshold = deps.missionCostAlertTokens
+    if (threshold === undefined) return
+    const total = (await store.queryTasks({ missionId })).reduce((sum, x) => sum + (x.result?.cost?.tokens ?? 0), 0)
+    if (total <= threshold) return
+    try {
+      await store.appendEvent({ event: {
+        event_type: 'MISSION_COST_ALERT', event_version: 1, occurred_at: new Date().toISOString(),
+        mission_id: missionId, task_id: null, attempt: null, actor: ACTOR, causation_id: null,
+        correlation_id: missionId, trace_id: null, idempotency_key: `mission-cost-alert:${missionId}`,
+        payload: { total_tokens: total, threshold_tokens: threshold },
+      } })
+    } catch (error) {
+      // 同键已存在但总量不同：说明此前已告警过，保持唯一一条
+      if (!(error instanceof EventConflictError)) throw error
+    }
+  }
+
   async function recordResultArtifacts(
     t: TaskRecord,
     result: TaskResultV1,
@@ -1108,6 +1129,7 @@ export const createActivities = (deps: ActivityDeps) => {
   ): Promise<void> {
     // 证据落库可重入。结果先落账本，artifact 写入可能因瞬时存储错误失败；
     // Activity 重试必须用已验证的缓存结果补齐 registry，而不是重跑 Agent。
+    await alertMissionCost(t.mission_id)
     const seen = new Set((await store.listArtifacts(t.id)).map((x) => x.artifact_id))
     const now = new Date()
     const unassessedReply = t.capability === 'yonwork.validate' && binding.adapter === 'yonwork-adapter'

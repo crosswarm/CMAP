@@ -44,6 +44,9 @@ const connectionString =
   'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
 const runnerId = process.env['RUNNER_ID'] ?? ''
+// Mission 累计 tokens 超过该值时写 MISSION_COST_ALERT（只告警，不阻断）；不设置则不检查。
+const missionCostAlertTokens = process.env['CMAP_MISSION_COST_ALERT_TOKENS']?.trim()
+if (missionCostAlertTokens && !/^[1-9]\d*$/.test(missionCostAlertTokens)) throw new Error('CMAP_MISSION_COST_ALERT_TOKENS 须为正整数')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(here, '../../..')
@@ -161,6 +164,7 @@ const worker = await Worker.create({
       signDispatchPermit,
       workRoot,
       ...(memory ? { memory } : {}),
+      ...(missionCostAlertTokens ? { missionCostAlertTokens: Number(missionCostAlertTokens) } : {}),
     }),
     ...createDagActivities({
       store,

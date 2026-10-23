@@ -169,7 +169,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 | 无进展检测（四项组合判定，不靠自然语言） | ✅ Schema 已实现，逻辑待 P1 |
 | `stop_conditions.max_additional_cycles` | ✅ Schema 已实现 |
 | 资源锁带 TTL 且可抢占 | ✅ Schema 已实现，执行待 P1 |
-| 每 Mission 成本计量与告警 | 🟡 Codex 结果已记录 tokens 与耗时（`task-result.cost`，`scripts/mission-report.mjs` 汇总）；Kimi/YonWork 未计量，告警与 `max_cost_units` 执行 ⬜ |
+| 每 Mission 成本计量与告警 | 🟡 Codex 结果记录 tokens 与耗时（`task-result.cost`）；Kimi 记录耗时，**tokens 不可得**（见下）；YonWork 未计量。`scripts/mission-report.mjs` 按 Agent 汇总（Kimi 无 tokens 的任务计入 `tasks_without_tokens`）。Worker 配置 `CMAP_MISSION_COST_ALERT_TOKENS` 后，Mission 累计 tokens 超阈值写一条 `MISSION_COST_ALERT`（每 Mission 至多一条，只告警不阻断，单测）。`max_cost_units` 执行 ⬜；Claude 调度者调用未计量 ⬜ |
 
 ### T9 — 重放与重复副作用
 

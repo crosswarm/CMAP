@@ -87,6 +87,10 @@ interface RunState {
   result: TaskResultV1 | null
   resultError: AdapterError | null
   runtimeCleaned: boolean
+  readonly startedAt: number
+  settledAt: number | null
+  /** 仅来自 goal.summary.tokensUsed；kimi 2.2.0 普通 -p stream-json 不输出用量，此时保持 null，不估算。 */
+  tokens: number | null
 }
 
 export class KimiAdapter implements AgentAdapter {
@@ -244,6 +248,9 @@ export class KimiAdapter implements AgentAdapter {
       result: null,
       resultError: null,
       runtimeCleaned: false,
+      startedAt: Date.now(),
+      settledAt: null,
+      tokens: null,
     }
     this.#wire(state)
 
@@ -302,7 +309,10 @@ export class KimiAdapter implements AgentAdapter {
       consumeLine(buffer)
       state.exitCode = code
       state.signal = signal
-      void finalizeState(state).then((event) => emit(event))
+      void finalizeState(state).then((event) => {
+        state.settledAt = Date.now()
+        emit(event)
+      })
     })
 
     state.child.on('error', () => {
@@ -397,7 +407,14 @@ export class KimiAdapter implements AgentAdapter {
           'kimi-result-missing',
         )
       }
-      return state.result
+      return {
+        ...state.result,
+        // 成本计量（威胁模型 T8）：耗时为进程启动到退出；tokens 只在输出带用量时才有。
+        cost: {
+          ...(state.tokens !== null ? { tokens: state.tokens } : {}),
+          duration_seconds: Math.round(((state.settledAt ?? Date.now()) - state.startedAt) / 100) / 10,
+        },
+      }
     } finally {
       if (!state.ownsWorkDir) await cleanupRuntime(state)
     }
@@ -704,6 +721,9 @@ const normalizeKimiEvent = (
   const obj = raw as Record<string, unknown>
   const role = typeof obj['role'] === 'string' ? obj['role'] : ''
   const type = typeof obj['type'] === 'string' ? obj['type'] : role
+
+  const used = obj['tokensUsed']
+  if (type === 'goal.summary' && typeof used === 'number' && Number.isInteger(used) && used >= 0) state.tokens = used
 
   if (role === 'assistant' && typeof obj['content'] === 'string') {
     state.lastAssistant = obj['content']

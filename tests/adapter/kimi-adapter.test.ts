@@ -1121,3 +1121,49 @@ test('Kimi: 未识别的失败（普通 429 限流、无 429 的额度字样）�
   await rejectsCode(kimiExit('tsk-kimi-ratelimit', `process.stderr.write("Error code: 429 - rate limit reached, slow down\\n"); process.exit(1)`), 'TASK_FAILED')
   await rejectsCode(kimiExit('tsk-kimi-no429', `process.stderr.write("exceeded_current_quota_error\\n"); process.exit(1)`), 'TASK_FAILED')
 })
+
+const completedKimiOutput = `console.log(JSON.stringify({ role: 'assistant', content: JSON.stringify({
+  status: 'completed',
+  summary: 'ok',
+  criterion_results: [{ criterion_id: 'C1', actual: 'ok', passed: true, evidence_artifact_ids: ['a1'] }],
+  artifacts: [{ artifact_id: 'a1', role: 'report', uri: 'report.txt', media_type: 'text/plain', size_bytes: 2, sha256: '${sha256('ok')}' }],
+  findings: [],
+  error: null
+}) }))`
+
+test('成本计量：stream-json 带 goal.summary.tokensUsed 时写入 cost.tokens，并记录耗时', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-cost-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  await writeFile(join(root, 'report.txt'), 'ok')
+  const kimi = await makeKimi(
+    root,
+    `${completedKimiOutput}
+console.log(JSON.stringify({ type: 'goal.summary', goalId: 'g', status: 'complete', tokensUsed: 1234 }))`,
+  )
+  const a = adapter(kimi, sandboxBin, root)
+  const result = await a.collectResult(await startAndWait(a, envelope('tsk-cost'), root))
+
+  assert.equal(result.cost?.tokens, 1234)
+  assert.equal(typeof result.cost?.duration_seconds, 'number')
+})
+
+test('成本计量：Kimi 普通输出没有用量字段时不编造 tokens，只记耗时', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-nocost-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  await writeFile(join(root, 'report.txt'), 'ok')
+  // 非法 tokensUsed（负数、小数、字符串）也不能当用量
+  const kimi = await makeKimi(
+    root,
+    `${completedKimiOutput}
+console.log(JSON.stringify({ type: 'goal.summary', tokensUsed: -5 }))
+console.log(JSON.stringify({ type: 'goal.summary', tokensUsed: 1.5 }))
+console.log(JSON.stringify({ type: 'goal.summary', tokensUsed: '9' }))`,
+  )
+  const a = adapter(kimi, sandboxBin, root)
+  const result = await a.collectResult(await startAndWait(a, envelope('tsk-nocost'), root))
+
+  assert.equal(result.cost && 'tokens' in result.cost, false)
+  assert.equal(typeof result.cost?.duration_seconds, 'number')
+})
