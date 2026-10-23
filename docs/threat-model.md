@@ -119,7 +119,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 | `Approval.decided_by` 必须是有权限的真人 | 🟡 OIDC 模式下取 token 主体（请求体不符即 403），controlled / mutating 分别要求 `approver-controlled` / `approver-mutating`，互不蕴含（`tests/api/oidc.test.ts`，[映射](identity.md)）；本机模式仍为配置的 owner；公网上线闸口未过 |
 | `controlled` 与 `mutating` **互不蕴含**，不得合并为单一批准 | ✅ Schema 与状态机已实现 |
 | 审批终态不可覆盖、过期不可批准；并发决策只接受一个终态 | ✅ Memory/PG 共享转换规则，API/真实 PG 并发与到期验证通过 |
-| 审批记录进不可变审计流 | ⬜ P4 |
+| 审批记录进不可变审计流 | 🟡 `events` 表已由数据库触发器拒绝一切 UPDATE/DELETE（`pg-schema.sql`，`tests/domain/pg-store.test.ts`），审批放行/拒绝的任务事件因此不可改写；但审批记录本身（含 `decided_by`）仍在可更新的 `approvals` 表，不在事件流里。运行账号对 `events` 撤销 UPDATE/DELETE 权限是生产部署项（开发栈与表所有者同一账号，做不到），见 [部署](deploy-edge.md#注意) |
 | 继承现有 skill 约束："不得把自己的判断伪装成人工授权" | ✅ 已写入提示词与文档 |
 
 ### T5 — 身份冒充与越权写账本

@@ -76,6 +76,24 @@ CREATE INDEX IF NOT EXISTS events_mission_lamport_idx ON events (mission_id, lam
 -- 事件投递标记已无调用方；列保留以免破坏现有数据，仅清理旧库里的部分索引。
 DROP INDEX IF EXISTS events_undelivered_idx;
 
+-- 审计流只允许追加（ADR-0008 §6）：任何 UPDATE / DELETE 都报错，包括 delivered_at。
+-- 这是兜底；生产另须让运行账号对 events 没有 UPDATE/DELETE 权限（开发栈与表所有者同一账号，做不到）。
+-- TRUNCATE 与 DROP SCHEMA 不触发行级触发器，测试清理不受影响。
+CREATE OR REPLACE FUNCTION events_append_only() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'events 只允许追加，拒绝 %', TG_OP USING ERRCODE = 'insufficient_privilege';
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'events_append_only' AND tgrelid = 'events'::regclass) THEN
+    CREATE TRIGGER events_append_only BEFORE UPDATE OR DELETE ON events
+      FOR EACH ROW EXECUTE FUNCTION events_append_only();
+  END IF;
+END
+$$;
+
 CREATE TABLE IF NOT EXISTS artifacts (
   artifact_id  TEXT PRIMARY KEY,
   mission_id   TEXT NOT NULL,

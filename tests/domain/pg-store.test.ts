@@ -8,7 +8,8 @@
  * 测试不应依赖外部服务。但它也不会在数据库不可用时"跳过并假装通过"——
  * 那等于用沉默替代真实验证。
  */
-import { before, after } from 'node:test'
+import { before, after, test } from 'node:test'
+import assert from 'node:assert/strict'
 
 import { runStoreContractTests } from './store-contract.ts'
 import { PgStore } from '#domain-model'
@@ -52,6 +53,36 @@ after(async () => {
 runStoreContractTests('PgStore', async () => {
   await truncateAll()
   return shared
+})
+
+test('PgStore events 只追加：UPDATE 与 DELETE 被数据库拒绝；重复迁移幂等；TRUNCATE 清理不受影响', async () => {
+  await truncateAll()
+  await shared.migrate()
+  await shared.createMission({
+    mission: {
+      id: 'mis-append-only', tenant: 'team-ycc', owner: 'crosswarm', type: 'inspect', goal: 'g', constraints: {},
+      acceptance: [{ criterion_id: 'C', metric: 'm', operator: 'eq', expected: 1, hard_gate: true }],
+      workflow_template: 'inspect/v1', state: 'DRAFT', revision: 1,
+      created_at: '2026-10-23T00:00:00.000Z', updated_at: '2026-10-23T00:00:00.000Z',
+    },
+    actor: { type: 'system', id: 'pg-append-only-test' },
+  })
+  const pg = await import('pg')
+  const c = new pg.default.Client({ connectionString: CONN })
+  await c.connect()
+  try {
+    await c.query(`SET search_path TO ${SCHEMA}`)
+    const before = (await c.query('SELECT * FROM events ORDER BY event_id')).rows
+    assert.ok(before.length > 0)
+    await assert.rejects(c.query(`UPDATE events SET payload = '{}'::jsonb`), /events 只允许追加/)
+    await assert.rejects(c.query('UPDATE events SET delivered_at = now()'), /events 只允许追加/)
+    await assert.rejects(c.query('DELETE FROM events'), /events 只允许追加/)
+    assert.deepEqual((await c.query('SELECT * FROM events ORDER BY event_id')).rows, before)
+  } finally {
+    await c.end()
+  }
+  await truncateAll()
+  assert.deepEqual(await shared.listEvents('mis-append-only'), [])
 })
 
 async function truncateAll(): Promise<void> {

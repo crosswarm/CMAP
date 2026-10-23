@@ -1427,6 +1427,19 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         },
       })
 
+      test('事件只追加：Store 不提供改写或删除事件的方法；同键不同内容拒绝且原事件不变', async () => {
+        const s = await createStore()
+        const methods = new Set<string>()
+        for (let p = Object.getPrototypeOf(s); p && p !== Object.prototype; p = Object.getPrototypeOf(p)) {
+          for (const name of Object.getOwnPropertyNames(p)) if (/event/i.test(name)) methods.add(name)
+        }
+        assert.deepEqual([...methods].sort(), ['appendEvent', 'listEvents', 'listTenantEvents'])
+        await s.createMission({ mission: mission('mis-1'), actor: ACTOR })
+        const first = await s.appendEvent(appendedEvent())
+        await assert.rejects(s.appendEvent(appendedEvent({ payload: { rewritten: true } })), EventConflictError)
+        assert.deepEqual((await s.listEvents('mis-1')).find((e) => e.event_id === first.event_id), first)
+      })
+
       test('写入后出现在事件流中', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-1'), actor: ACTOR })

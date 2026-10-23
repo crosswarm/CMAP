@@ -191,3 +191,4 @@ kill "$(launchctl list | awk '$3=="com.cmap.tunnel"{print $1}')"   # 隧道约 1
 
 - qcl 装有腾讯云主机安全（iptables 链 `YJ-FIREWALL-INPUT`），会封禁 SSH 认证反复失败的来源 IP。隧道密钥或 known_hosts 配错时 launchd 每 10 秒重试一次，可能把 CrossMini 的出口 IP 封掉，连带 ubuntu 运维登录；改密钥前先手动验证一次。
 - 隧道断开时公网入口只剩登录页，其余返回 502。
+- 审计流只追加（ADR-0008 §6）：`events` 表的 UPDATE/DELETE 已由迁移建的触发器拒绝，这只是兜底——表所有者能删触发器。**生产部署项（未完成）**：控制面运行账号不能是表所有者，并对它 `REVOKE UPDATE, DELETE, TRUNCATE ON events`；当前 `CMAP_DATABASE_URL` 用的 `temporal` 账号既是所有者又是运行账号，做不到权限分离。
