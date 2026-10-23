@@ -7,6 +7,8 @@
  */
 import { createPublicKey, type KeyObject } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 
@@ -132,11 +134,7 @@ export const gatewayCall = async (opts: GatewayClient,
   const url = new URL(path, opts.controlPlaneUrl)
   const payload = JSON.stringify(body)
   const headers = signRunnerRequest({ privateKey: opts.signingKey, method: 'POST', target: url.pathname + url.search, audience: opts.runnerId, body: payload, scheme: 'gateway' })
-  const res = await fetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: payload,
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
-  })
-  return gatewayReply(opts, res, headers)
+  return gatewayReply(opts, await send(url, { 'content-type': 'application/json', ...headers }, payload, timeoutMs, signal), headers)
 }
 
 /**
@@ -148,24 +146,42 @@ export const gatewayUpload = async (opts: GatewayClient, art: { lease_id: string
   const query = new URLSearchParams({ lease_id: art.lease_id, sha256: art.sha256, size: String(art.size_bytes) })
   const url = new URL(`/v1/gateway/artifacts?${query}`, opts.controlPlaneUrl)
   const headers = signRunnerRequest({ privateKey: opts.signingKey, method: 'POST', target: url.pathname + url.search, audience: opts.runnerId, contentSha256: art.sha256, scheme: 'gateway' })
-  const res = await fetch(url, {
-    method: 'POST', headers: { 'content-type': 'application/octet-stream', ...headers },
-    body: Readable.toWeb(body) as ReadableStream, duplex: 'half',
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
-  } as RequestInit)
-  return gatewayReply(opts, res, headers)
+  return gatewayReply(opts, await send(url, { 'content-type': 'application/octet-stream', ...headers }, body, timeoutMs, signal), headers)
 }
 
-const gatewayReply = async (opts: GatewayClient, res: Response, headers: Record<string, string>): Promise<{ status: number; message: RunnerGatewayMessageV1 }> => {
-  const bytes = Buffer.from(await res.arrayBuffer())
-  if (res.status === 401) throw new GatewayRejectedError('UNAUTHORIZED')
+type RawReply = { status: number; signature: string | null; bytes: Buffer }
+
+/**
+ * 网关请求走 node:http/https（HTTP/1.1 keep-alive 全局 Agent），不用 fetch：Node 26 的 undici 8 对 https 默认协商 HTTP/2，
+ * 长轮询 claim 在途时同一连接上的带体 POST 被排到 claim 返回之后才发出，签名过期被 401（2026-10-23 生产实测）。
+ * HTTP/1.1 Agent 不把请求排在忙碌的连接上，claim 与其余请求各占一条连接，签名后即发出。
+ */
+const send = (url: URL, headers: Record<string, string>, body: string | Readable, timeoutMs: number, signal?: AbortSignal): Promise<RawReply> =>
+  new Promise((resolve, reject) => {
+    const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
+      method: 'POST', headers,
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+    }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => resolve({ status: res.statusCode!, signature: (res.headers['x-cmap-signature'] as string | undefined) ?? null, bytes: Buffer.concat(chunks) }))
+      res.on('error', reject)
+      res.on('close', () => { if (!res.complete) reject(new Error('response aborted')) })
+    })
+    req.on('error', reject)
+    if (typeof body === 'string') req.end(body)
+    else body.on('error', (error) => req.destroy(error)).pipe(req)
+  })
+
+const gatewayReply = (opts: GatewayClient, { status, signature, bytes }: RawReply, headers: Record<string, string>): { status: number; message: RunnerGatewayMessageV1 } => {
+  if (status === 401) throw new GatewayRejectedError('UNAUTHORIZED')
   verifyRunnerResponse({
     publicKey: opts.controlPlanePublicKey, audience: opts.runnerId, requestNonce: headers['x-cmap-nonce']!,
-    status: res.status, body: bytes, signature: res.headers.get('x-cmap-signature'), scheme: 'gateway',
+    status, body: bytes, signature, scheme: 'gateway',
   })
   const message: unknown = JSON.parse(bytes.toString('utf8'))
   if (!validateGatewayMessage(message)) throw new GatewayRejectedError('PROTOCOL_INVALID')
-  return { status: res.status, message }
+  return { status, message }
 }
 
 export const startOutboundRunner = (opts: OutboundRunnerOptions) => {
