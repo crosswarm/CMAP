@@ -68,7 +68,7 @@ const badResponseSignature = (path: string): AdapterError => path.endsWith('/res
   : new AdapterError('REMOTE_RESPONSE_SIGNATURE_INVALID', '远程 runner 响应签名无效', false, 'remote-response-signature-invalid')
 
 /** 远端拒绝原样还原为本地错误类型，控制面据此落 PERMIT_INVALID / 准入拒绝等既有回执。 */
-const raise = (error: ErrorMessage): never => {
+export const raiseRemoteError = (error: ErrorMessage): never => {
   if (error.category === 'permit') throw new DispatchPermitError(error.code as DispatchPermitErrorCode)
   if (error.category === 'admission' && (RUNNER_ADMISSION_CODES as readonly string[]).includes(error.code)) {
     throw new RunnerAdmissionError(error.code as RunnerAdmissionErrorCode)
@@ -80,6 +80,68 @@ const requiredEnv = (key: string): string => {
   const value = process.env[key]?.trim()
   if (!value) throw new RangeError(`${key} is required for the remote runner (ADR-0006)`)
   return value
+}
+
+/** 只发送控制面已冻结、已复核的输入文件；路径或哈希不合规即按输入无效拒绝。 */
+export const readFrozenInputs = async (envelope: TaskEnvelopeV1, ctx: DispatchContext) => {
+  const refs = (envelope.inputs?.artifact_refs ?? []).filter((ref) => ref.uri !== undefined)
+  const inputs: { uri: string; sha256: string; content_base64: string }[] = []
+  try {
+    for (const ref of refs) {
+      if (!ctx.worktree || !INPUT_URI.test(ref.uri!) || typeof ref.sha256 !== 'string') throw new Error('INPUT_INVALID')
+      const verified = await readVerifiedArtifact(ctx.worktree, { uri: ref.uri!, role: ref.role, sha256: ref.sha256 })
+      inputs.push({ uri: ref.uri!, sha256: verified.sha256, content_base64: verified.bytes.toString('base64') })
+    }
+  } catch {
+    throw new RunnerAdmissionError('INPUT_INVALID')
+  }
+  return inputs
+}
+
+/**
+ * 结果与产物落到控制面工作区后独立复算哈希（remote-runner.v1 的 result 应答；出站网关的 result 回报同一形状）。
+ * 身份字段仍由 Activities 覆盖；这里只保证结果形状合法、产物字节与哈希一致。
+ */
+export const materializeRemoteResult = async (workRoot: string, id: string, body: Extract<RemoteRunnerMessageV1, { kind: 'result' }>): Promise<TaskResultV1> => {
+  const result = body.result
+  if (!validateTaskResult(result)) {
+    throw new AdapterError('RESULT_INVALID', '远程结果不符合 task-result.v1', false, 'remote-result-invalid')
+  }
+  if (hasKnownSecret(JSON.stringify(result))) {
+    throw new AdapterError('RESULT_SECRET_DETECTED', '结果命中已知凭据模式', false, 'result-secret-detected')
+  }
+
+  const dir = join(workRoot, REMOTE_TASK_ID.exec(id)![1]!)
+  await mkdir(dir, { recursive: true })
+  const artifacts: TaskResultV1['artifacts'] = []
+  for (const art of result.artifacts) {
+    const pulled = body.artifacts.filter((p) => p.uri === art.uri)
+    if (pulled.length !== 1) {
+      throw new AdapterError('EVIDENCE_FILE_MISSING', `远程产物未随结果回传：${art.role}`, false, `evidence-missing:${art.role}`)
+    }
+    const bytes = Buffer.from(pulled[0]!.content_base64, 'base64')
+    const target = resolve(dir, art.uri)
+    if (!target.startsWith(dir + sep)) throw protocolInvalid()
+    await mkdir(dirname(target), { recursive: true })
+    let created = false
+    try {
+      await writeFile(target, bytes, { flag: 'wx', mode: 0o600 })
+      created = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (!(await readFile(target)).equals(bytes)) {
+        throw new AdapterError('EVIDENCE_CONFLICT', `产物路径已有不同内容：${art.role}`, false, `evidence-conflict:${art.role}`)
+      }
+    }
+    try {
+      const verified = await readVerifiedArtifact(dir, { uri: art.uri, role: art.role, sha256: art.sha256 })
+      artifacts.push({ ...art, size_bytes: verified.bytes.length, sha256: verified.sha256 })
+    } catch (error) {
+      if (created) await rm(target, { force: true })
+      throw error
+    }
+  }
+  return { ...result, artifacts }
 }
 
 export interface RemoteRunnerAdapterOptions {
@@ -182,7 +244,7 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     if (frozenCtx.runner_id !== this.runnerId) throw new DispatchPermitError('CLAIM_MISMATCH')
     const binding = this.prepareBinding(frozenEnvelope, frozenCtx)
 
-    const inputs = await this.#readInputs(frozenEnvelope, frozenCtx)
+    const inputs = await readFrozenInputs(frozenEnvelope, frozenCtx)
     await frozenCtx.beforeSend?.(binding)
     assertAdapterAuthorization(this.#authorization, frozenEnvelope, frozenCtx, REMOTE_ADAPTER_ID)
 
@@ -261,45 +323,7 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     const id = this.#own(binding)
     const body = this.#expect(await this.#call('GET', `/v1/tasks/${encodeURIComponent(id)}/result`), 'result')
     if (body.remote_task_id !== id) throw protocolInvalid()
-    const result = body.result
-    if (!validateTaskResult(result)) {
-      throw new AdapterError('RESULT_INVALID', '远程结果不符合 task-result.v1', false, 'remote-result-invalid')
-    }
-    if (hasKnownSecret(JSON.stringify(result))) {
-      throw new AdapterError('RESULT_SECRET_DETECTED', '结果命中已知凭据模式', false, 'result-secret-detected')
-    }
-
-    const dir = join(this.#workRoot, REMOTE_TASK_ID.exec(id)![1]!)
-    await mkdir(dir, { recursive: true })
-    const artifacts: TaskResultV1['artifacts'] = []
-    for (const art of result.artifacts) {
-      const pulled = body.artifacts.filter((p) => p.uri === art.uri)
-      if (pulled.length !== 1) {
-        throw new AdapterError('EVIDENCE_FILE_MISSING', `远程产物未随结果回传：${art.role}`, false, `evidence-missing:${art.role}`)
-      }
-      const bytes = Buffer.from(pulled[0]!.content_base64, 'base64')
-      const target = resolve(dir, art.uri)
-      if (!target.startsWith(dir + sep)) throw protocolInvalid()
-      await mkdir(dirname(target), { recursive: true })
-      let created = false
-      try {
-        await writeFile(target, bytes, { flag: 'wx', mode: 0o600 })
-        created = true
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-        if (!(await readFile(target)).equals(bytes)) {
-          throw new AdapterError('EVIDENCE_CONFLICT', `产物路径已有不同内容：${art.role}`, false, `evidence-conflict:${art.role}`)
-        }
-      }
-      try {
-        const verified = await readVerifiedArtifact(dir, { uri: art.uri, role: art.role, sha256: art.sha256 })
-        artifacts.push({ ...art, size_bytes: verified.bytes.length, sha256: verified.sha256 })
-      } catch (error) {
-        if (created) await rm(target, { force: true })
-        throw error
-      }
-    }
-    return { ...result, artifacts }
+    return materializeRemoteResult(this.#workRoot, id, body)
   }
 
   async health(): Promise<AdapterHealth> {
@@ -313,21 +337,6 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     }
   }
 
-  /** 只发送控制面已冻结、已复核的输入文件；路径或哈希不合规即按输入无效拒绝。 */
-  async #readInputs(envelope: TaskEnvelopeV1, ctx: DispatchContext) {
-    const refs = (envelope.inputs?.artifact_refs ?? []).filter((ref) => ref.uri !== undefined)
-    const inputs: { uri: string; sha256: string; content_base64: string }[] = []
-    try {
-      for (const ref of refs) {
-        if (!ctx.worktree || !INPUT_URI.test(ref.uri!) || typeof ref.sha256 !== 'string') throw new Error('INPUT_INVALID')
-        const verified = await readVerifiedArtifact(ctx.worktree, { uri: ref.uri!, role: ref.role, sha256: ref.sha256 })
-        inputs.push({ uri: ref.uri!, sha256: verified.sha256, content_base64: verified.bytes.toString('base64') })
-      }
-    } catch {
-      throw new RunnerAdmissionError('INPUT_INVALID')
-    }
-    return inputs
-  }
 
   #own(binding: RemoteTaskBinding): string {
     if (binding.adapter !== REMOTE_ADAPTER_ID || binding.runner_id !== this.runnerId || !REMOTE_TASK_ID.test(binding.remote_task_id)) {
@@ -337,7 +346,7 @@ export class RemoteRunnerAdapter implements AgentAdapter {
   }
 
   #expect<K extends RemoteRunnerMessageV1['kind']>(reply: Reply, kind: K): Extract<RemoteRunnerMessageV1, { kind: K }> {
-    if (reply.body?.kind === 'error') raise(reply.body)
+    if (reply.body?.kind === 'error') raiseRemoteError(reply.body)
     if (reply.status !== 200 || reply.body?.kind !== kind) throw protocolInvalid()
     return reply.body as Extract<RemoteRunnerMessageV1, { kind: K }>
   }

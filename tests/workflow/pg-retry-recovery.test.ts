@@ -129,6 +129,16 @@ class ThrowAfterCommitStore implements Store {
   async getLatestQuotaSnapshot(...args: Parameters<Store['getLatestQuotaSnapshot']>) { return this.inner.getLatestQuotaSnapshot(...args) }
   async listLatestQuotaSnapshots() { return this.inner.listLatestQuotaSnapshots() }
   async healthCheck() { return this.inner.healthCheck() }
+  registerGatewayRunner: Store['registerGatewayRunner'] = (...a) => this.inner.registerGatewayRunner(...a)
+  getGatewayRunner: Store['getGatewayRunner'] = (...a) => this.inner.getGatewayRunner(...a)
+  listGatewayRunners: Store['listGatewayRunners'] = (...a) => this.inner.listGatewayRunners(...a)
+  touchGatewayRunner: Store['touchGatewayRunner'] = (...a) => this.inner.touchGatewayRunner(...a)
+  enqueueGatewayLease: Store['enqueueGatewayLease'] = (...a) => this.inner.enqueueGatewayLease(...a)
+  claimGatewayLease: Store['claimGatewayLease'] = (...a) => this.inner.claimGatewayLease(...a)
+  renewGatewayLeases: Store['renewGatewayLeases'] = (...a) => this.inner.renewGatewayLeases(...a)
+  recordGatewayReport: Store['recordGatewayReport'] = (...a) => this.inner.recordGatewayReport(...a)
+  cancelGatewayLease: Store['cancelGatewayLease'] = (...a) => this.inner.cancelGatewayLease(...a)
+  getGatewayLease: Store['getGatewayLease'] = (...a) => this.inner.getGatewayLease(...a)
 }
 
 type CliMissingBindingAdapter = FakeAdapter & { missingBinding: boolean }

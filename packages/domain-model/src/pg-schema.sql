@@ -170,3 +170,39 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
   snapshot    JSONB NOT NULL,
   PRIMARY KEY (provider, account_ref, observed_at)
 );
+
+-- runner 出站网关（ADR-0008 §3）。runner 只存公钥；身份与上限来自登记记录，不来自 runner 自述。
+CREATE TABLE IF NOT EXISTS gateway_runners (
+  runner_id            TEXT PRIMARY KEY,
+  public_key           TEXT NOT NULL UNIQUE CHECK (char_length(public_key) = 43),
+  tenant               TEXT NOT NULL,
+  owner                TEXT NOT NULL,
+  allowed_capabilities TEXT[] NOT NULL,
+  max_risk             TEXT NOT NULL CHECK (max_risk IN ('read-meta','read-sensitive','controlled','mutating')),
+  host                 TEXT NOT NULL,
+  enrolled_at          TIMESTAMPTZ NOT NULL,
+  revoked_at           TIMESTAMPTZ,
+  last_seen_at         TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS gateway_runners_tenant_idx ON gateway_runners (tenant);
+
+-- 网关队列与租约。领取用 FOR UPDATE SKIP LOCKED；过期是 leased 且 expires_at 已过，不可逆，不改派。
+CREATE TABLE IF NOT EXISTS gateway_leases (
+  lease_id       TEXT PRIMARY KEY,
+  runner_id      TEXT NOT NULL,
+  task_id        TEXT NOT NULL,
+  remote_task_id TEXT NOT NULL,
+  dispatch       JSONB NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('queued','leased','closed')),
+  expires_at     TIMESTAMPTZ,
+  accepted       JSONB,
+  status         JSONB,
+  outcome        JSONB,
+  cancel         JSONB,
+  created_at     TIMESTAMPTZ NOT NULL,
+  updated_at     TIMESTAMPTZ NOT NULL,
+  CONSTRAINT gateway_leases_leased_has_expiry CHECK (state = 'queued' OR expires_at IS NOT NULL OR cancel IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS gateway_leases_queue_idx ON gateway_leases (runner_id, created_at, lease_id) WHERE state = 'queued';

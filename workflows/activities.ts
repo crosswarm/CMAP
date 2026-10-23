@@ -317,7 +317,7 @@ export const createActivities = (deps: ActivityDeps) => {
     readonly decider: string | null
   }
 
-  const selectAdapter = async (task: TaskRecord, excluded: readonly string[] = []): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
+  const selectAdapter = async (task: TaskRecord, excluded: readonly string[] = []): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; targetRunnerId?: string; routing: RoutingDecision}> => {
     const envelope = task.envelope as TaskEnvelopeV1
     if (!adapters.length) throw new Error('未注入 Adapter：控制面没有可派发的目标')
     const started = Date.now()
@@ -361,7 +361,7 @@ export const createActivities = (deps: ActivityDeps) => {
         }})
       }
     }
-    const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean; quota: QuotaSnapshotV1 | undefined}> => {
+    const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean; quota: QuotaSnapshotV1 | undefined; targetRunnerId?: string}> => {
       try {
         const descriptor = await candidate.discover()
         if (descriptor.adapter_id !== candidate.adapterId || descriptor.agent_id !== candidate.agentId) return {reason: 'descriptor_mismatch'}
@@ -382,6 +382,12 @@ export const createActivities = (deps: ActivityDeps) => {
           if (!allow.allowed_capabilities.includes(envelope.classification.requested_capability)) return {reason: 'capability_mismatch'}
           if (risks.indexOf(allow.max_risk) < required) return {reason: 'risk_exceeded'}
         }
+        // 动态 runner（出站网关）：按登记记录挑执行方，挑不到就跳过并回落。
+        if (candidate.runnerFor) {
+          const picked = await candidate.runnerFor(envelope)
+          if ('reason' in picked) return {reason: picked.reason}
+          return {supportsWorktreeIsolation: descriptor.supports_worktree_isolation, quota: health.quota, targetRunnerId: picked.runnerId}
+        }
         return {supportsWorktreeIsolation: descriptor.supports_worktree_isolation, quota: health.quota}
       } catch {
         // 仅启动前探测允许转向下一候选；startTask 的不确定结果不得触发替补。
@@ -391,7 +397,7 @@ export const createActivities = (deps: ActivityDeps) => {
     // 只跳过已知额度不足的候选；额度未知（如 Kimi 无零额度探针）不改变首选顺序，否则替补会抢走首选的任务。
     // 配置了调度者（ADR-0009 §4）时探测全部候选，由调度者在合法候选内挑选；否则取第一个合法候选。
     const dispatchers = deps.dispatchers ?? []
-    const eligible: {adapter: AgentAdapter; supportsWorktreeIsolation: boolean; entry: RoutingCandidate; quota: QuotaSnapshotV1 | undefined}[] = []
+    const eligible: {adapter: AgentAdapter; supportsWorktreeIsolation: boolean; entry: RoutingCandidate; quota: QuotaSnapshotV1 | undefined; targetRunnerId?: string}[] = []
     scan: for (const {id, matched} of order) {
       if (!matched.length) {
         skip(id, null, 'not_registered')
@@ -420,7 +426,8 @@ export const createActivities = (deps: ActivityDeps) => {
           entry.reason = 'quota_low'
           continue
         }
-        eligible.push({adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, entry, quota: verdict.quota})
+        eligible.push({adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, entry, quota: verdict.quota,
+          ...(verdict.targetRunnerId !== undefined ? {targetRunnerId: verdict.targetRunnerId} : {})})
         if (!dispatchers.length) break scan
       }
     }
@@ -438,7 +445,8 @@ export const createActivities = (deps: ActivityDeps) => {
         for (const e of eligible) if (e !== pick) e.entry.reason = 'not_chosen'
       }
       pick.entry.verdict = 'selected'
-      return {adapter: pick.adapter, supportsWorktreeIsolation: pick.supportsWorktreeIsolation, routing: decision(pick.adapter, decider)}
+      return {adapter: pick.adapter, supportsWorktreeIsolation: pick.supportsWorktreeIsolation,
+        ...(pick.targetRunnerId !== undefined ? {targetRunnerId: pick.targetRunnerId} : {}), routing: decision(pick.adapter, decider)}
     }
     throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
   }
@@ -726,8 +734,8 @@ export const createActivities = (deps: ActivityDeps) => {
         })
       }
 
-      // 远程 runner Adapter（ADR-0006）的许可受众与 binding 绑定目标 runner，其余仍是本机 runner。
-      const targetRunnerId = selectedAdapter.runnerId ?? runnerId
+      // 远程 runner Adapter（ADR-0006）与出站网关所选 runner（ADR-0008）的许可受众与 binding 绑定目标 runner，其余仍是本机 runner。
+      const targetRunnerId = selection.targetRunnerId ?? selectedAdapter.runnerId ?? runnerId
       const token = deps.signDispatchPermit(envelope,{runnerId:targetRunnerId,adapterId:selectedAdapter.adapterId})
       if (typeof token !== 'string' || token.length === 0) throw new Error('DISPATCH_PERMIT_SIGNER_INVALID')
       const timeoutMs = (envelope.execution_policy?.timeout_seconds ?? 300) * 1000
@@ -866,7 +874,7 @@ export const createActivities = (deps: ActivityDeps) => {
         try { status = await a.getStatus(t.binding, {deadline_at: new Date(deadline).toISOString()}) }
         catch (error) {
           if (!(error instanceof AdapterError) || error.code !== 'BINDING_NOT_FOUND' ||
-            !['codex-adapter','kimi-adapter','remote-runner-adapter'].includes(t.binding.adapter)) throw error
+            !['codex-adapter','kimi-adapter','remote-runner-adapter','gateway-runner-adapter'].includes(t.binding.adapter)) throw error
           const current = await store.getTask(taskId)
           if (!current || !isDeepStrictEqual(current.binding,t.binding)) throw new Error('CLI_RECOVERY_BINDING_CHANGED')
           if (current.result) {

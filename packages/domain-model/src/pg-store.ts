@@ -55,6 +55,8 @@ import type {
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
 import { assertSameMissionInput } from './mission-input.ts'
+import { applyGatewayCancel, applyGatewayReport, canRenewLease, newLease, sameEnqueue } from './runner-gateway.ts'
+import type { EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
 import {
   ArtifactConflictError,
   BindingConflictError,
@@ -62,6 +64,7 @@ import {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  GatewayLeaseConflictError,
   assertSameEventInput,
   assertSameReviewInput,
   assertSameTaskInput,
@@ -217,6 +220,37 @@ const missionEventType = (state: MissionState): EventType => {
       return 'MISSION_STATE_CHANGED'
   }
 }
+
+const toGatewayRunner = (r: Record<string, unknown>): GatewayRunner => ({
+  runner_id: r['runner_id'] as string,
+  public_key: r['public_key'] as string,
+  tenant: r['tenant'] as string,
+  owner: r['owner'] as string,
+  allowed_capabilities: r['allowed_capabilities'] as string[],
+  max_risk: r['max_risk'] as RiskLevel,
+  host: r['host'] as string,
+  enrolled_at: iso(r['enrolled_at']),
+  revoked_at: isoOrNull(r['revoked_at']),
+  last_seen_at: isoOrNull(r['last_seen_at']),
+})
+
+const toGatewayLease = (r: Record<string, unknown>): GatewayLease => ({
+  lease_id: r['lease_id'] as string,
+  runner_id: r['runner_id'] as string,
+  task_id: r['task_id'] as string,
+  remote_task_id: r['remote_task_id'] as string,
+  dispatch: r['dispatch'] as GatewayLease['dispatch'],
+  state: r['state'] as GatewayLease['state'],
+  expires_at: isoOrNull(r['expires_at']),
+  accepted: (r['accepted'] as GatewayLease['accepted']) ?? null,
+  status: (r['status'] as GatewayLease['status']) ?? null,
+  outcome: (r['outcome'] as GatewayLease['outcome']) ?? null,
+  cancel: (r['cancel'] as GatewayLease['cancel']) ?? null,
+  created_at: iso(r['created_at']),
+  updated_at: iso(r['updated_at']),
+})
+
+const json = (v: unknown): string | null => (v === null ? null : JSON.stringify(v))
 
 export class PgStore implements Store {
   readonly #pool: pg.Pool
@@ -910,6 +944,109 @@ export class PgStore implements Store {
        ORDER BY provider, account_ref, observed_at DESC`,
     )
     return rows.map((r) => r.snapshot as QuotaSnapshotV1)
+  }
+
+  // ----------------------------------------------------- Runner 出站网关
+
+  async registerGatewayRunner(runner: GatewayRunner): Promise<GatewayRunner> {
+    const { rows } = await this.#pool.query(
+      `INSERT INTO gateway_runners (runner_id, public_key, tenant, owner, allowed_capabilities, max_risk, host, enrolled_at, revoked_at, last_seen_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [runner.runner_id, runner.public_key, runner.tenant, runner.owner, [...runner.allowed_capabilities], runner.max_risk,
+        runner.host, runner.enrolled_at, runner.revoked_at, runner.last_seen_at],
+    )
+    return toGatewayRunner(rows[0] as Record<string, unknown>)
+  }
+
+  async getGatewayRunner(runnerId: string): Promise<GatewayRunner | null> {
+    const { rows } = await this.#pool.query('SELECT * FROM gateway_runners WHERE runner_id = $1', [runnerId])
+    return rows.length ? toGatewayRunner(rows[0] as Record<string, unknown>) : null
+  }
+
+  async listGatewayRunners(tenant: string): Promise<readonly GatewayRunner[]> {
+    const { rows } = await this.#pool.query('SELECT * FROM gateway_runners WHERE tenant = $1 ORDER BY runner_id', [tenant])
+    return rows.map((r) => toGatewayRunner(r as Record<string, unknown>))
+  }
+
+  async touchGatewayRunner(runnerId: string, at: string): Promise<void> {
+    await this.#pool.query(
+      'UPDATE gateway_runners SET last_seen_at = $2 WHERE runner_id = $1 AND (last_seen_at IS NULL OR last_seen_at < $2)',
+      [runnerId, at],
+    )
+  }
+
+  async enqueueGatewayLease(input: EnqueueGatewayLeaseInput): Promise<GatewayLease> {
+    const lease = newLease(input)
+    const inserted = await this.#pool.query(
+      `INSERT INTO gateway_leases (lease_id, runner_id, task_id, remote_task_id, dispatch, state, expires_at, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$7) ON CONFLICT (lease_id) DO NOTHING RETURNING *`,
+      [lease.lease_id, lease.runner_id, lease.task_id, lease.remote_task_id, JSON.stringify(lease.dispatch), lease.state, lease.created_at],
+    )
+    if (inserted.rows.length) return toGatewayLease(inserted.rows[0] as Record<string, unknown>)
+    const existing = await this.getGatewayLease(input.lease_id)
+    if (!existing || !sameEnqueue(existing, input)) throw new GatewayLeaseConflictError(input.lease_id)
+    return existing
+  }
+
+  async claimGatewayLease(runnerId: string, now: string, expiresAt: string): Promise<GatewayLease | null> {
+    // SKIP LOCKED：同一 runner 的并发领取（或多 API 进程）各拿不同的行，不互相阻塞、不重复。
+    const { rows } = await this.#pool.query(
+      `UPDATE gateway_leases SET state = 'leased', expires_at = $3, updated_at = $2
+       WHERE lease_id = (
+         SELECT lease_id FROM gateway_leases WHERE runner_id = $1 AND state = 'queued'
+         ORDER BY created_at, lease_id LIMIT 1 FOR UPDATE SKIP LOCKED
+       ) RETURNING *`,
+      [runnerId, now, expiresAt],
+    )
+    return rows.length ? toGatewayLease(rows[0] as Record<string, unknown>) : null
+  }
+
+  async renewGatewayLeases(runnerId: string, leaseIds: readonly string[], now: string, expiresAt: string) {
+    return this.#tx(async (c) => {
+      const { rows } = await c.query('SELECT * FROM gateway_leases WHERE lease_id = ANY($1) ORDER BY lease_id FOR UPDATE', [[...leaseIds]])
+      const found = new Map(rows.map((r) => [r['lease_id'] as string, toGatewayLease(r as Record<string, unknown>)]))
+      const renewed: GatewayLease[] = []
+      const expired: string[] = []
+      for (const id of leaseIds) {
+        const lease = found.get(id)
+        if (!canRenewLease(lease, runnerId, Date.parse(now))) { expired.push(id); continue }
+        const upd = await c.query('UPDATE gateway_leases SET expires_at = $2, updated_at = $3 WHERE lease_id = $1 RETURNING *', [id, expiresAt, now])
+        renewed.push(toGatewayLease(upd.rows[0] as Record<string, unknown>))
+      }
+      return { renewed, expired }
+    })
+  }
+
+  async recordGatewayReport(input: { runnerId: string; leaseId: string; body: GatewayReportBody; now: string; expiresAt: string }): Promise<GatewayReportOutcome> {
+    return this.#tx(async (c) => {
+      const { rows } = await c.query('SELECT * FROM gateway_leases WHERE lease_id = $1 FOR UPDATE', [input.leaseId])
+      const out = applyGatewayReport(rows.length ? toGatewayLease(rows[0] as Record<string, unknown>) : null,
+        input.runnerId, input.body, Date.parse(input.now), input.expiresAt)
+      if (!('lease' in out)) return out
+      const l = out.lease
+      const upd = await c.query(
+        `UPDATE gateway_leases SET state = $2, expires_at = $3, accepted = $4, status = $5, outcome = $6, updated_at = $7
+         WHERE lease_id = $1 RETURNING *`,
+        [l.lease_id, l.state, l.expires_at, json(l.accepted), json(l.status), json(l.outcome), l.updated_at],
+      )
+      return { lease: toGatewayLease(upd.rows[0] as Record<string, unknown>) }
+    })
+  }
+
+  async cancelGatewayLease(leaseId: string, cancel: GatewayCancel, now: string): Promise<GatewayLease | null> {
+    return this.#tx(async (c) => {
+      const { rows } = await c.query('SELECT * FROM gateway_leases WHERE lease_id = $1 FOR UPDATE', [leaseId])
+      if (!rows.length) return null
+      const l = applyGatewayCancel(toGatewayLease(rows[0] as Record<string, unknown>), cancel, Date.parse(now))
+      const upd = await c.query('UPDATE gateway_leases SET state = $2, cancel = $3, updated_at = $4 WHERE lease_id = $1 RETURNING *',
+        [l.lease_id, l.state, json(l.cancel), l.updated_at])
+      return toGatewayLease(upd.rows[0] as Record<string, unknown>)
+    })
+  }
+
+  async getGatewayLease(leaseId: string): Promise<GatewayLease | null> {
+    const { rows } = await this.#pool.query('SELECT * FROM gateway_leases WHERE lease_id = $1', [leaseId])
+    return rows.length ? toGatewayLease(rows[0] as Record<string, unknown>) : null
   }
 
   // ------------------------------------------------------------ 自检

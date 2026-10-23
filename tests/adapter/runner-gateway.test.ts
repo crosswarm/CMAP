@@ -1,0 +1,177 @@
+/**
+ * M04 出站网关端到端（同进程）：Worker 侧 GatewayRunnerAdapter + API 网关 + 出站模式 runner（假 codex）。
+ * 判据只认账本状态、租约记录、假 codex 的执行次数与控制面复算的 sha256。
+ */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { access, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+import { issueDispatchPermit, verifyDispatchPermit, type RemoteRunnerDispatchV1, type TaskEnvelopeV1 } from '#domain-model'
+import { gatewayCall } from '../../apps/runner/src/outbound.ts'
+import { GATEWAY_ADAPTER_ID, gatewayLeaseId } from '../../adapters/runner-gateway/src/index.ts'
+import { controlPlaneKey, startGatewayFixture } from './runner-gateway-fixture.ts'
+import { ISSUER, lines, sha256, trust } from './remote-runner-fixture.ts'
+
+const issuePermitFor = (runnerId: string, envelope: TaskEnvelopeV1): string =>
+  issueDispatchPermit({ privateKey: trust.privateKey, issuer: ISSUER, runnerId, adapterId: GATEWAY_ADAPTER_ID, envelope })
+
+const until = async (ok: () => Promise<boolean>, label: string, ms = 10_000): Promise<void> => {
+  for (const deadline = Date.now() + ms; !(await ok()); await new Promise((r) => setTimeout(r, 20))) {
+    if (Date.now() > deadline) throw new Error(`等待超时：${label}`)
+  }
+}
+
+test('出站 runner 领取并完成：许可受众为所选 runner 与网关 Adapter，执行一次，产物由控制面复算后入账', async () => {
+  const f = await startGatewayFixture()
+  try {
+    const lap = await f.startRunner('lap-gw')
+    await until(async () => (await f.store.getGatewayRunner('lap-gw'))!.last_seen_at !== null, 'runner 上线')
+    await f.addTask('tsk-gw-ok')
+    assert.deepEqual(await f.acts.dispatchTask('tsk-gw-ok'), { dispatched: true, remoteTaskId: 'codex:tsk-gw-ok:1' })
+    const task = (await f.store.getTask('tsk-gw-ok'))!
+    assert.deepEqual([task.binding!.adapter, task.binding!.runner_id], [GATEWAY_ADAPTER_ID, 'lap-gw'])
+    const lease = (await f.store.getGatewayLease(gatewayLeaseId(task.binding!)))!
+    // 许可绑定所选 runner 与网关 Adapter：换任一受众都验不过
+    verifyDispatchPermit(lease.dispatch.permit, { publicKey: trust.publicKey, issuer: ISSUER, runnerId: 'lap-gw', adapterId: GATEWAY_ADAPTER_ID, envelope: task.envelope })
+    assert.throws(() => verifyDispatchPermit(lease.dispatch.permit, { publicKey: trust.publicKey, issuer: ISSUER, runnerId: 'other', adapterId: GATEWAY_ADAPTER_ID, envelope: task.envelope }))
+
+    const collected = await f.acts.collectTaskResult('tsk-gw-ok')
+    assert.ok('passed' in collected && collected.passed, JSON.stringify(collected))
+    const [artifact, ...rest] = await f.store.listArtifacts('tsk-gw-ok')
+    assert.equal(rest.length, 0)
+    assert.equal(artifact!.sha256, sha256('ok'))
+    assert.equal(artifact!.provenance['runner_id'], 'lap-gw')
+    await access(join(f.cm, 'tsk-gw-ok', artifact!.uri))
+    assert.equal((await lines(f.codex.launches)).length, 1)
+    assert.equal((await f.store.getGatewayLease(lease.lease_id))!.state, 'closed')
+    lap.stop()
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('dag/v1 attempt：派发后不在 Activity 里等（awaiting_report 带截止），回报落账后再进来即收取', async () => {
+  const f = await startGatewayFixture()
+  try {
+    await f.startRunner('lap-gw')
+    await until(async () => (await f.store.getGatewayRunner('lap-gw'))!.last_seen_at !== null, 'runner 上线')
+    await writeFile(f.codex.hold, '')
+    await f.addTask('tsk-gw-dag')
+    const first = await f.runAttempt({ taskId: 'tsk-gw-dag' })
+    assert.equal(first.outcome, 'awaiting_report')
+    assert.ok(first.deadlineAt && Date.parse(first.deadlineAt) > Date.now())
+    const again = await f.runAttempt({ taskId: 'tsk-gw-dag', deadlineAt: first.deadlineAt! })
+    assert.equal(again.outcome, 'awaiting_report', '仍在执行：再进来也只回读一次就返回')
+    await import('node:fs/promises').then((fs) => fs.rm(f.codex.hold))
+    const binding = (await f.store.getTask('tsk-gw-dag'))!.binding!
+    await until(async () => (await f.store.getGatewayLease(gatewayLeaseId(binding)))!.state === 'closed', '终态回报落账')
+    assert.deepEqual(await f.runAttempt({ taskId: 'tsk-gw-dag', deadlineAt: first.deadlineAt! }), { outcome: 'collected', taskId: 'tsk-gw-dag' })
+    assert.equal((await lines(f.codex.launches)).length, 1)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('执行中断开：租约过期判执行不确定（INPUT_REQUIRED、binding 保留），不改派不重跑，重连的 runner 也领不到它', async () => {
+  const f = await startGatewayFixture({ leaseTtlMs: 300 })
+  try {
+    const lap = await f.startRunner('lap-gw')
+    await until(async () => (await f.store.getGatewayRunner('lap-gw'))!.last_seen_at !== null, 'runner 上线')
+    await writeFile(f.codex.hold, '')
+    await f.addTask('tsk-gw-lost')
+    await f.acts.dispatchTask('tsk-gw-lost')
+    await until(async () => (await lines(f.codex.launches)).length === 1, 'codex 启动')
+    lap.stop()
+    await new Promise((r) => setTimeout(r, 600))
+    const out = await f.acts.collectTaskResult('tsk-gw-lost')
+    assert.deepEqual(out, { executionUncertain: { code: 'BINDING_NOT_FOUND', terminalObserved: false } })
+    const task = (await f.store.getTask('tsk-gw-lost'))!
+    assert.equal(task.state, 'INPUT_REQUIRED')
+    assert.equal(task.binding!.runner_id, 'lap-gw')
+
+    // 同一身份重新上线：过期租约不在队列里，不会被重新领取
+    const back = await f.startRunner('lap-gw', { key: lap.key, register: false })
+    await new Promise((r) => setTimeout(r, 300))
+    assert.deepEqual(back.loop.held(), [])
+    await import('node:fs/promises').then((fs) => fs.rm(f.codex.hold))
+    await new Promise((r) => setTimeout(r, 200))
+    assert.equal((await lines(f.codex.launches)).length, 1, '只执行一次')
+    assert.deepEqual(await f.acts.collectTaskResult('tsk-gw-lost'), { executionUncertain: { code: 'BINDING_NOT_FOUND', terminalObserved: false } })
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('许可受众不是本 runner：runner 执行前拒绝并回报 permit 错误，租约关闭，什么都不执行', async () => {
+  const f = await startGatewayFixture()
+  try {
+    await f.startRunner('lap-gw')
+    await f.addTask('tsk-gw-permit')
+    const task = (await f.store.getTask('tsk-gw-permit'))!
+    const dispatch: RemoteRunnerDispatchV1 = {
+      schema: 'cmap/remote-runner/v1', kind: 'dispatch', runner_id: 'lap-gw', permit: issuePermitFor('someone-else', task.envelope),
+      envelope: task.envelope, trace_id: 't', correlation_id: 'c', deadline_at: new Date(Date.now() + 60_000).toISOString(), inputs: [],
+    }
+    await f.store.enqueueGatewayLease({ lease_id: 'lse-permit', runner_id: 'lap-gw', task_id: task.id, remote_task_id: 'codex:tsk-gw-permit:1', dispatch, created_at: new Date().toISOString() })
+    await until(async () => (await f.store.getGatewayLease('lse-permit'))!.state === 'closed', 'runner 回报拒绝')
+    const lease = (await f.store.getGatewayLease('lse-permit'))!
+    assert.deepEqual(lease.accepted, { schema: 'cmap/remote-runner/v1', kind: 'error', category: 'permit', code: 'CLAIM_MISMATCH', retryable: false })
+    assert.equal((await lines(f.codex.launches)).length, 0)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('runner 自报的产物字节与哈希不符：控制面复算拒收（EVIDENCE_HASH_MISMATCH），不写 artifact 记录', async () => {
+  const f = await startGatewayFixture()
+  try {
+    // 不起真实 runner：用已登记的身份手工回报一份「哈希写的是 ok、字节却是 tampered」的结果
+    const { generateKeyPairSync } = await import('node:crypto')
+    const key = generateKeyPairSync('ed25519')
+    const { gatewayRunnerRecord } = await import('./runner-gateway-fixture.ts')
+    await f.store.registerGatewayRunner(gatewayRunnerRecord('liar', key.publicKey, { last_seen_at: new Date().toISOString() }))
+    await f.addTask('tsk-gw-liar')
+    const client = { controlPlaneUrl: f.apiUrl, signingKey: key.privateKey, controlPlanePublicKey: controlPlaneKey.publicKey, runnerId: 'liar' }
+    const dispatching = f.acts.dispatchTask('tsk-gw-liar')
+    let claimed
+    for (;;) {
+      const { message } = await gatewayCall(client, '/v1/gateway/claim', { schema: 'cmap/runner-gateway/v1', kind: 'claim', runner_id: 'liar', wait_seconds: 1, held_leases: [] }, 5000)
+      if (message.kind === 'claim_result' && message.assignment) { claimed = message.assignment; break }
+    }
+    const report = (body: object) => gatewayCall(client, '/v1/gateway/reports', { schema: 'cmap/runner-gateway/v1', kind: 'report', runner_id: 'liar', lease_id: claimed.lease.lease_id, body }, 5000)
+    await report({ schema: 'cmap/remote-runner/v1', kind: 'dispatch_accepted', runner_id: 'liar', remote_task_id: 'codex:tsk-gw-liar:1' })
+    await dispatching
+    await report({ schema: 'cmap/remote-runner/v1', kind: 'status', remote_task_id: 'codex:tsk-gw-liar:1', status: 'completed', terminal_observed: true })
+    await report({
+      schema: 'cmap/remote-runner/v1', kind: 'result', remote_task_id: 'codex:tsk-gw-liar:1',
+      result: {
+        schema: 'cmap/task-result/v1', mission_id: 'mis-remote', task_id: 'tsk-gw-liar', attempt: 1, status: 'completed', summary: 'ok',
+        criterion_results: [{ criterion_id: 'C1', actual: 'true', passed: true, evidence_artifact_ids: ['a1'] }],
+        artifacts: [{ artifact_id: 'a1', role: 'report', uri: 'evidence/report.txt', media_type: 'text/plain', size_bytes: 2, sha256: sha256('ok') }],
+      },
+      artifacts: [{ uri: 'evidence/report.txt', content_base64: Buffer.from('tampered').toString('base64') }],
+    })
+    const collected = await f.acts.collectTaskResult('tsk-gw-liar')
+    assert.ok('passed' in collected && !collected.passed)
+    assert.match(collected.summary, /EVIDENCE_HASH_MISMATCH/)
+    assert.deepEqual(await f.store.listArtifacts('tsk-gw-liar'), [])
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('出站模式配置：公网只认 https（http 限回环）；控制面秘密出现在 runner 主机即拒绝启动；准入只取自登记记录', async () => {
+  const { readOutboundRunnerConfig, enrolledRunnerEnv } = await import('../../apps/runner/src/outbound.ts')
+  const base = { CMAP_RUNNER_KEY_FILE: '/x/runner.key', CMAP_PERMIT_PUBLIC_KEY_FILE: '/x/permit.pub', CMAP_CODEX_MODEL: 'm' }
+  assert.equal(readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'https://cmap.spux.cn/' }).controlPlaneUrl, 'https://cmap.spux.cn')
+  assert.equal(readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'http://127.0.0.1:8787' }).enrollmentFile, '/x/enrollment.json')
+  assert.throws(() => readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'http://cmap.spux.cn' }), /https/)
+  assert.throws(() => readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'https://cmap.spux.cn', CMAP_PERMIT_KEY_FILE: '/k' }), /CMAP_PERMIT_KEY_FILE/)
+  assert.throws(() => readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'https://cmap.spux.cn', CMAP_DATABASE_URL: 'postgres://x' }), /CMAP_DATABASE_URL/)
+  const { enrolledRecord, gatewayRunnerRecord } = await import('./runner-gateway-fixture.ts')
+  const { generateKeyPairSync } = await import('node:crypto')
+  const env = enrolledRunnerEnv({ RUNNER_ALLOWED_OWNERS: 'everyone', RUNNER_MAX_RISK: 'mutating' },
+    enrolledRecord(gatewayRunnerRecord('lap-gw', generateKeyPairSync('ed25519').publicKey)))
+  assert.deepEqual([env['RUNNER_ID'], env['RUNNER_ALLOWED_OWNERS'], env['RUNNER_MAX_RISK'], env['RUNNER_ALLOWED_TENANTS']], ['lap-gw', 'crosswarm', 'read-meta', 'team-ycc'])
+})

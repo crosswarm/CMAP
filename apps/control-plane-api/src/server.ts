@@ -25,6 +25,7 @@ import { legacyInspectForm, missionFromRequest, validateMissionCancel } from './
 import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/generated/mission-submission.ts'
 import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/generated/control-plane-context.ts'
 import { createOidcVerifier, OidcError, type OidcConfig, type OidcRole } from './oidc.ts'
+import { createRunnerGateway, type RunnerGatewayOptions } from './gateway.ts'
 
 export interface ControlPlaneOptions {
   readonly store: Store
@@ -44,6 +45,10 @@ export interface ControlPlaneOptions {
   readonly cancelMission?: (missionId: string, workflowId: string, reason: string) => Promise<void>
   /** 审批决定落账后向 Mission Workflow 发 approvalDecided 门铃；不带业务数据，Workflow 醒来回读账本。 */
   readonly notifyApprovalDecided?: (missionId: string, workflowId: string) => Promise<void>
+  /** runner 出站网关（ADR-0008 §3）。配置后 /v1/gateway/* 以 runner 登记密钥认证，不走 OIDC。 */
+  readonly runnerGateway?: RunnerGatewayOptions
+  /** runner 终态回报落账后向 Mission Workflow 发 runnerReported 门铃；不带业务数据。 */
+  readonly notifyRunnerReported?: (missionId: string, workflowId: string) => Promise<void>
   /** 配置后进入 OIDC 模式：tenant/owner/角色取自 Bearer JWT，本机 Host 限制与 tenant/owner 配置不再生效。 */
   readonly oidc?: OidcConfig
   /** 反向代理对外的 Origin（如 https://cmap.spux.cn）。仅 OIDC 模式生效：放行其 Host，写入的 Origin 须与之相同。 */
@@ -799,6 +804,9 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
   const verifyToken = opts.oidc ? createOidcVerifier(opts.oidc) : null
   // 公网 Host 只在 OIDC 模式下放行：本机模式没有认证，不能经反向代理暴露。
   const publicOrigin = opts.oidc && opts.publicOrigin ? new URL(opts.publicOrigin) : null
+  const gateway = opts.runnerGateway
+    ? createRunnerGateway({ ...opts.runnerGateway, store: opts.store, ...(opts.notifyRunnerReported ? { notifyRunnerReported: opts.notifyRunnerReported } : {}) })
+    : null
   const server = createServer((req, res) => {
     void (async () => {
       try {
@@ -822,6 +830,8 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
         try { decodeURIComponent(url.pathname) } catch {
           return fail(res, 400, '路径编码无效')
         }
+        // runner 网关用 runner 登记密钥逐请求验签，不带也不认 OIDC token（ADR-0008 §3/§4）。
+        if (gateway?.handles(url.pathname)) return await gateway.handle(req, res, url, shutdown.signal)
         let identity: Pick<Ctx, 'tenant' | 'owner' | 'roles'> = { tenant: opts.tenant, owner: opts.owner, roles: null }
         const staticCtx = { req, res, store: opts.store, ...identity, shutdown: shutdown.signal, config: opts }
         if (await serveStatic(staticCtx, url.pathname)) return

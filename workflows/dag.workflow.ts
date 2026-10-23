@@ -25,6 +25,13 @@ export const cancelMissionSignal=defineSignal<[{readonly reason:string}]>('cance
  */
 const APPROVAL_SIGNAL_PATCH='dag-approval-signal-v1'
 export const approvalDecidedSignal=defineSignal('approvalDecided')
+/**
+ * M04 runner 回报门铃（ADR-0008 §3）：API 把出站 runner 的终态回报落账后发送，只提醒回读，不带业务数据。
+ * 只有回报驱动的 Adapter 会让 attempt 返回 awaiting_report；30 秒超时也回读（兜底门铃丢失、判租约过期）。
+ * 旧历史不会出现 awaiting_report，patched() 为 false 时照旧每秒重入。
+ */
+const RUNNER_REPORT_PATCH='dag-runner-report-signal-v1'
+export const runnerReportedSignal=defineSignal('runnerReported')
 // 旁路回写：失败不改变节点或 Mission 结果。
 const sideEffect=async (run:()=>Promise<void>):Promise<void>=>{
   try{await run()}catch(error){if(isCancellation(error))throw error}
@@ -84,6 +91,8 @@ export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWo
   let draining=false
   let approvalBell=0
   setHandler(approvalDecidedSignal,()=>{approvalBell++})
+  let reportBell=0
+  setHandler(runnerReportedSignal,()=>{reportBell++})
   setHandler(cancelMissionSignal,(signal)=>{
     if(cancelReason!==undefined||!patched(CANCEL_PATCH))return
     cancelReason=typeof signal?.reason==='string'&&signal.reason.trim()?signal.reason.slice(0,500):'MISSION_CANCELED'
@@ -144,13 +153,20 @@ export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWo
           phase='attempt'
         }
         let quotaExhausted=false
+        let deadlineAt:string|undefined
         for(;;) {
           if(stopping) return stopped()
-          const result=await (patched(ATTEMPT_RESUME_PATCH)?resumableAttempt:attempt).runDagAttempt({taskId:current})
+          // 调用前记下门铃：attempt 执行期间到达的回报也能唤醒下一轮等待。
+          const bell=reportBell
+          const result=await (patched(ATTEMPT_RESUME_PATCH)?resumableAttempt:attempt).runDagAttempt({taskId:current,...(deadlineAt?{deadlineAt}:{})})
           if(result.outcome==='collected'){quotaExhausted=result.reason==='QUOTA_EXHAUSTED';break}
           if(result.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'escalated',reason:result.reason??'ATTEMPT_FAILED'})
           if(shouldPark())return park('attempt')
-          await sleep('1 second')
+          if(result.outcome==='awaiting_report'&&patched(RUNNER_REPORT_PATCH)) {
+            deadlineAt=result.deadlineAt
+            await condition(()=>reportBell!==bell||stopping,'30 seconds')
+          }
+          else await sleep('1 second')
         }
         // 取消时不再评审；其余停止原因下，已启动的分支必须完成结果/评审落账。
         if(cancelReason!==undefined)return stopped()

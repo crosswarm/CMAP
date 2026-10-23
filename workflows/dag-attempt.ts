@@ -9,9 +9,12 @@ import { adapterForBinding, createActivities, type ActivityDeps } from './activi
 import { preflightTaskDispatch, readAdmissionDenial, admissionDenialReason } from './runner-admission.ts'
 
 export type DagAttemptOutcome = {
-  readonly outcome: 'collected' | 'waiting_resource' | 'escalated'
+  /** awaiting_report：结果由 runner 回报落账（出站网关），Workflow 等门铃或超时后带 deadlineAt 再进来回读。 */
+  readonly outcome: 'collected' | 'waiting_resource' | 'escalated' | 'awaiting_report'
   readonly taskId: string
   readonly reason?: string
+  /** awaiting_report 时为本轮等待截止：再次进入沿用它，超时不因重入而顺延。 */
+  readonly deadlineAt?: string
 }
 
 const ACTOR = { type: 'system', id: 'dag-attempt' } as const
@@ -37,7 +40,7 @@ const executionUncertainReason = (code: string): string => `EXECUTION_UNCERTAIN:
 const isCliBindingNotFound = (error: unknown, binding: RemoteTaskBinding): error is AdapterError =>
   error instanceof AdapterError &&
   error.code === 'BINDING_NOT_FOUND' &&
-  (binding.adapter === 'codex-adapter' || binding.adapter === 'kimi-adapter' || binding.adapter === 'remote-runner-adapter')
+  ['codex-adapter', 'kimi-adapter', 'remote-runner-adapter', 'gateway-runner-adapter'].includes(binding.adapter)
 
 const heartbeat = (): void => {
   try {
@@ -139,7 +142,7 @@ const observeCancellation = async (
 
 export const createDagAttemptRunner = (
   deps: ActivityDeps & { readonly workRoot: string },
-): ((input: { taskId: string }) => Promise<DagAttemptOutcome>) => {
+): ((input: { taskId: string; deadlineAt?: string }) => Promise<DagAttemptOutcome>) => {
   const { store } = deps
   const runner = snapshotRunnerDescriptor(deps.runner)
   const runnerId = runner.runner_id
@@ -174,7 +177,7 @@ export const createDagAttemptRunner = (
     return { outcome: 'escalated', taskId: binding.remote_task_id, reason: 'LOCK_LOST' }
   }
 
-  return async ({ taskId }) => {
+  return async ({ taskId, deadlineAt }) => {
     const initial = await store.getTask(taskId)
     if (!initial) throw new Error(`任务不存在：${taskId}`)
     if (initial.result) {
@@ -394,7 +397,8 @@ export const createDagAttemptRunner = (
       return taskOutcome(out, out.reason === 'LOCK_LOST' ? confirmedReason : out.reason)
     }
 
-    const deadline = Date.now() + (deps.waitTimeoutMs ?? envelope.execution_policy.timeout_seconds * 1000)
+    const resumedDeadline = deadlineAt === undefined ? Number.NaN : Date.parse(deadlineAt)
+    const deadline = Number.isFinite(resumedDeadline) ? resumedDeadline : Date.now() + (deps.waitTimeoutMs ?? envelope.execution_policy.timeout_seconds * 1000)
     const dispatchOperation = activities.dispatchTask(taskId)
     const dispatch = await awaitWithLockMaintenance(dispatchOperation, deadline)
     if (dispatch.status === 'rejected') {
@@ -558,6 +562,10 @@ export const createDagAttemptRunner = (
           await releaseAll(store, owned)
         }
         return { outcome: 'collected', taskId }
+      }
+      // 回报驱动的 Adapter 不在 Activity 里等：交回 Workflow 等门铃。持有资源锁时仍在这里等，锁要靠本循环续租。
+      if (adapter.reportDriven === true && owned.length === 0) {
+        return { outcome: 'awaiting_report', taskId, deadlineAt: new Date(deadline).toISOString() }
       }
       await sleep(pollIntervalMs)
     }

@@ -187,6 +187,16 @@ export interface AgentAdapter {
    * 失联后的那次 attempt 重试；缺省视为不安全，照旧升级。
    */
   readonly restartSafe?: boolean
+  /**
+   * 结果由 runner 回报落账（出站网关，ADR-0008 §3）：dag/v1 的 attempt 不在 Activity 里轮询等待，
+   * 派发后即返回，由 Workflow 等 runnerReported 门铃或超时再回读。缺省视为 false。
+   */
+  readonly reportDriven?: boolean
+  /**
+   * 动态 runner：执行方不固定（出站网关下按登记记录挑选）。派发前路由调用；返回 runnerId 即以它为许可受众与 binding.runner_id，
+   * 返回 reason 则跳过本候选、按 fallback 回落。只有不设 runnerId 的 Adapter 才实现它。
+   */
+  runnerFor?(envelope: TaskEnvelopeV1): Promise<{ readonly runnerId: string } | { readonly reason: string }>
 
   discover(): Promise<AdapterDescriptor>
 

@@ -30,7 +30,8 @@ import {
   LockUnavailableError,
 } from '#domain-model'
 import { MissionConflictError } from '../../packages/domain-model/src/mission-input.ts'
-import { BindingConflictError, ReviewConflictError, TaskConflictError } from '../../packages/domain-model/src/store.ts'
+import { BindingConflictError, GatewayLeaseConflictError, ReviewConflictError, TaskConflictError } from '../../packages/domain-model/src/store.ts'
+import type { GatewayRunner, EnqueueGatewayLeaseInput, GatewayReportBody } from '../../packages/domain-model/src/runner-gateway.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test-runner' }
 const T0 = '2026-08-02T00:00:00.000Z'
@@ -1584,6 +1585,128 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
       test('没有账号摘要的快照不能落账（无从归属额度池）', async () => {
         const s = await createStore()
         await assert.rejects(s.putQuotaSnapshot(snapshot({ account_ref: null, status: 'unknown' })), /QUOTA_SNAPSHOT_ACCOUNT_REQUIRED/)
+      })
+    })
+
+    describe('runner 出站网关：队列与租约（ADR-0008 §3）', () => {
+      const RT = 'cmap/remote-runner/v1' as const
+      const gwRunner = (runner_id: string, overrides: Partial<GatewayRunner> = {}): GatewayRunner => ({
+        runner_id, public_key: `${runner_id.padEnd(43, 'A')}`.slice(0, 43), tenant: 'team-ycc', owner: 'crosswarm',
+        allowed_capabilities: ['code.analyze'], max_risk: 'read-meta', host: 'lap-host', enrolled_at: T0, revoked_at: null, last_seen_at: null,
+        ...overrides,
+      })
+      const enqueue = (lease_id: string, runner_id = 'r1', created_at = T0): EnqueueGatewayLeaseInput => ({
+        lease_id, runner_id, task_id: `tsk-${lease_id}`, remote_task_id: `codex:tsk-${lease_id}:1`, created_at,
+        dispatch: {
+          schema: RT, kind: 'dispatch', runner_id, permit: 'cmap1.e30.c2ln', envelope: { schema: 'cmap/task-envelope/v1' },
+          trace_id: `tsk-${lease_id}`, correlation_id: 'c', deadline_at: '2099-01-01T00:00:00.000Z', inputs: [],
+        },
+      })
+      const accepted = (leaseId: string, runner_id = 'r1'): GatewayReportBody =>
+        ({ schema: RT, kind: 'dispatch_accepted', runner_id, remote_task_id: `codex:tsk-${leaseId}:1` })
+      const at = (ms: number): string => new Date(ms).toISOString()
+      const now = Date.now()
+
+      test('登记 runner 后可按 id 与租户读回；重复 runner_id 或重复公钥拒绝', async () => {
+        const s = await createStore()
+        await s.registerGatewayRunner(gwRunner('r1'))
+        assert.deepEqual(await s.getGatewayRunner('r1'), gwRunner('r1'))
+        assert.equal(await s.getGatewayRunner('nope'), null)
+        await assert.rejects(s.registerGatewayRunner(gwRunner('r1', { public_key: 'B'.repeat(43) })))
+        await assert.rejects(s.registerGatewayRunner(gwRunner('r2', { public_key: gwRunner('r1').public_key })))
+        await s.registerGatewayRunner(gwRunner('r3', { tenant: 'other' }))
+        assert.deepEqual((await s.listGatewayRunners('team-ycc')).map((r) => r.runner_id), ['r1'])
+        await s.touchGatewayRunner('r1', at(now))
+        await s.touchGatewayRunner('r1', at(now - 1000))
+        assert.equal((await s.getGatewayRunner('r1'))!.last_seen_at, at(now), 'last_seen_at 只前进')
+      })
+
+      test('入队幂等：同内容返回既有记录，不同内容冲突', async () => {
+        const s = await createStore()
+        const first = await s.enqueueGatewayLease(enqueue('l1'))
+        assert.equal(first.state, 'queued')
+        assert.equal(first.expires_at, null)
+        assert.deepEqual(await s.enqueueGatewayLease(enqueue('l1')), first)
+        const changed = enqueue('l1')
+        await assert.rejects(s.enqueueGatewayLease({ ...changed, dispatch: { ...changed.dispatch, permit: 'cmap1.e30.b3RoZXI' } }), GatewayLeaseConflictError)
+      })
+
+      test('领取按入队顺序、只领本 runner 的；并发领取不会重复领到同一条', async () => {
+        const s = await createStore()
+        await s.enqueueGatewayLease(enqueue('l2', 'r1', at(now - 1000)))
+        await s.enqueueGatewayLease(enqueue('l1', 'r1', at(now - 2000)))
+        await s.enqueueGatewayLease(enqueue('lx', 'r2', at(now - 3000)))
+        const claims = await Promise.all([1, 2, 3].map(() => s.claimGatewayLease('r1', at(now), at(now + 60_000))))
+        const got = claims.filter((c) => c !== null).map((c) => c!.lease_id).sort()
+        assert.deepEqual(got, ['l1', 'l2'], '两条各被领取一次，第三个并发领取落空')
+        const l1 = (await s.getGatewayLease('l1'))!
+        assert.equal(l1.state, 'leased')
+        assert.equal(l1.expires_at, at(now + 60_000))
+        assert.equal((await s.getGatewayLease('lx'))!.state, 'queued', '别的 runner 的派发不被领走')
+      })
+
+      test('续租只续本 runner 未过期的 leased；过期、关闭、他人、不存在的列入 expired 且不复活', async () => {
+        const s = await createStore()
+        await s.enqueueGatewayLease(enqueue('live'))
+        await s.claimGatewayLease('r1', at(now), at(now + 60_000))
+        await s.enqueueGatewayLease(enqueue('old'))
+        await s.claimGatewayLease('r1', at(now - 120_000), at(now - 60_000))
+        await s.enqueueGatewayLease(enqueue('theirs', 'r2'))
+        await s.claimGatewayLease('r2', at(now), at(now + 60_000))
+        const out = await s.renewGatewayLeases('r1', ['live', 'old', 'theirs', 'ghost'], at(now), at(now + 90_000))
+        assert.deepEqual(out.renewed.map((l) => [l.lease_id, l.expires_at]), [['live', at(now + 90_000)]])
+        assert.deepEqual([...out.expired].sort(), ['ghost', 'old', 'theirs'])
+        assert.equal((await s.getGatewayLease('old'))!.expires_at, at(now - 60_000), '过期租约不被续回来')
+      })
+
+      test('回报：先 dispatch_accepted 再 status，result 关闭租约；过期、未领取、他人、关闭后均拒绝且不落账', async () => {
+        const s = await createStore()
+        await s.enqueueGatewayLease(enqueue('l1'))
+        assert.deepEqual(await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: accepted('l1'), now: at(now), expiresAt: at(now + 1) }), { error: 'LEASE_UNKNOWN' }, '未领取不能回报')
+        await s.claimGatewayLease('r1', at(now), at(now + 60_000))
+        const status: GatewayReportBody = { schema: RT, kind: 'status', remote_task_id: 'codex:tsk-l1:1', status: 'running', terminal_observed: false }
+        assert.deepEqual(await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: status, now: at(now), expiresAt: at(now + 1) }), { error: 'INVALID_REQUEST' }, '未受理前不收 status')
+        assert.deepEqual(await s.recordGatewayReport({ runnerId: 'r2', leaseId: 'l1', body: accepted('l1', 'r2'), now: at(now), expiresAt: at(now + 1) }), { error: 'LEASE_UNKNOWN' })
+        const ok = await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: accepted('l1'), now: at(now), expiresAt: at(now + 90_000) })
+        assert.ok('lease' in ok)
+        assert.equal(ok.lease.expires_at, at(now + 90_000), '回报同时续租')
+        assert.ok('lease' in await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: status, now: at(now), expiresAt: at(now + 90_000) }))
+        const result: GatewayReportBody = { schema: RT, kind: 'result', remote_task_id: 'codex:tsk-l1:1', result: { schema: 'cmap/task-result/v1' } as never, artifacts: [] }
+        const closed = await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: result, now: at(now), expiresAt: at(now + 90_000) })
+        assert.ok('lease' in closed && closed.lease.state === 'closed')
+        const lease = (await s.getGatewayLease('l1'))!
+        assert.deepEqual([lease.accepted?.kind, lease.status?.kind, lease.outcome?.kind], ['dispatch_accepted', 'status', 'result'])
+        assert.deepEqual(await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: status, now: at(now), expiresAt: at(now + 1) }), { error: 'LEASE_UNKNOWN' })
+
+        await s.enqueueGatewayLease(enqueue('l2'))
+        await s.claimGatewayLease('r1', at(now - 120_000), at(now - 60_000))
+        assert.deepEqual(await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l2', body: accepted('l2'), now: at(now), expiresAt: at(now + 90_000) }), { error: 'LEASE_EXPIRED' })
+        assert.equal((await s.getGatewayLease('l2'))!.accepted, null)
+      })
+
+      test('派发阶段的拒绝（error）直接关闭租约', async () => {
+        const s = await createStore()
+        await s.enqueueGatewayLease(enqueue('l1'))
+        await s.claimGatewayLease('r1', at(now), at(now + 60_000))
+        const denied: GatewayReportBody = { schema: RT, kind: 'error', category: 'permit', code: 'CLAIM_MISMATCH', retryable: false }
+        const out = await s.recordGatewayReport({ runnerId: 'r1', leaseId: 'l1', body: denied, now: at(now), expiresAt: at(now + 90_000) })
+        assert.ok('lease' in out)
+        assert.equal(out.lease.state, 'closed')
+        assert.deepEqual(out.lease.accepted, denied)
+      })
+
+      test('取消：未领取的直接关闭、永不被领取；已领取的记下待下发', async () => {
+        const s = await createStore()
+        const cancel = { schema: RT, kind: 'cancel', remote_task_id: 'codex:tsk-q:1', reason: 'MISSION_CANCELED' } as const
+        await s.enqueueGatewayLease(enqueue('q'))
+        assert.equal((await s.cancelGatewayLease('q', cancel, at(now)))!.state, 'closed')
+        assert.equal(await s.claimGatewayLease('r1', at(now), at(now + 60_000)), null)
+        await s.enqueueGatewayLease(enqueue('l'))
+        await s.claimGatewayLease('r1', at(now), at(now + 60_000))
+        const held = (await s.cancelGatewayLease('l', { ...cancel, remote_task_id: 'codex:tsk-l:1' }, at(now)))!
+        assert.equal(held.state, 'leased')
+        assert.equal(held.cancel?.reason, 'MISSION_CANCELED')
+        assert.equal(await s.cancelGatewayLease('ghost', cancel, at(now)), null)
       })
     })
 

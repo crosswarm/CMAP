@@ -14,9 +14,9 @@ process.env['NO_PROXY'] = 'localhost,127.0.0.1,::1'
 process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
 process.env['grpc_proxy'] = ''
 
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PgStore } from '#domain-model'
+import { PgStore, loadOrCreatePermitKey } from '#domain-model'
 import { Client, Connection, WorkflowExecutionAlreadyStartedError } from '@temporalio/client'
 
 import { getApprovalAdviceFromJev } from './approval-advice.ts'
@@ -44,6 +44,15 @@ const publicOrigin = process.env['CMAP_PUBLIC_ORIGIN']?.trim() || undefined
 if (publicOrigin && !oidc) throw new Error('CMAP_PUBLIC_ORIGIN 只能与 OIDC 一起配置：本机模式没有认证，不能经反向代理对外')
 if (publicOrigin && new URL(publicOrigin).origin !== publicOrigin) throw new Error('CMAP_PUBLIC_ORIGIN 必须是不带路径的 Origin，例如 https://cmap.spux.cn')
 
+// runner 出站网关（ADR-0008 §3）：这把密钥只签网关应答，runner 登记时固定其公钥。不得是派发许可私钥——
+// API 对外，若持有许可私钥，API 被攻破就等于能让所有 runner 执行任意信封。
+const gatewayKeyFile = process.env['CMAP_GATEWAY_KEY_FILE']?.trim() || undefined
+const permitKeyFile = process.env['CMAP_PERMIT_KEY_FILE']?.trim()
+if (gatewayKeyFile && permitKeyFile && resolve(gatewayKeyFile) === resolve(permitKeyFile)) {
+  throw new Error('CMAP_GATEWAY_KEY_FILE 不能是派发许可私钥 CMAP_PERMIT_KEY_FILE')
+}
+const runnerGateway = gatewayKeyFile ? { signingKey: loadOrCreatePermitKey(gatewayKeyFile).privateKey } : undefined
+
 const store = new PgStore({ connectionString, schema })
 // 幂等建表：与 Worker 用同一套 schema，谁先起都能把表建好。
 await store.migrate()
@@ -55,6 +64,7 @@ const getTemporal = () => temporal ??= Connection.connect({
 
 const server = await createControlPlane({
   store, tenant, owner, workRoot, frontendDir, ...(oidc ? { oidc } : {}), ...(publicOrigin ? { publicOrigin } : {}),
+  ...(runnerGateway ? { runnerGateway } : {}),
   getApprovalAdvice: (id) => getApprovalAdviceFromJev(id, { repoRoot, port }),
   startMission: async (missionId, workflowId) => {
     const connection = await getTemporal()
@@ -81,6 +91,11 @@ const server = await createControlPlane({
     const connection = await getTemporal()
     const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
     await connection.withDeadline(Date.now() + 15_000, () => client.workflow.getHandle(workflowId).signal('approvalDecided'))
+  },
+  notifyRunnerReported: async (_missionId, workflowId) => {
+    const connection = await getTemporal()
+    const client = new Client({ connection, namespace: process.env['TEMPORAL_NAMESPACE'] ?? 'default' })
+    await connection.withDeadline(Date.now() + 15_000, () => client.workflow.getHandle(workflowId).signal('runnerReported'))
   },
 })
 await server.listen(port)

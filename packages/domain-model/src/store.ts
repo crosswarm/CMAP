@@ -32,6 +32,7 @@ import type {
   Review,
 } from './entities.ts'
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
+import type { EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
 
 // ------------------------------------------------------------ 写入参数
 
@@ -239,6 +240,13 @@ export const assertSameQuotaSnapshot = (existing: QuotaSnapshotV1, incoming: Quo
   if (!isDeepStrictEqual(existing, incoming)) throw new Error('QUOTA_SNAPSHOT_CONFLICT')
 }
 
+export class GatewayLeaseConflictError extends Error {
+  constructor(leaseId: string) {
+    super(`网关租约 ${leaseId} 已以不同内容入队`)
+    this.name = 'GatewayLeaseConflictError'
+  }
+}
+
 export class LockUnavailableError extends Error {
   readonly resource: string
   readonly heldBy: string
@@ -345,6 +353,38 @@ export interface Store {
   getLatestQuotaSnapshot(provider: QuotaSnapshotV1['provider'], accountRef: string): Promise<QuotaSnapshotV1 | null>
   /** 每个 (provider, account_ref) 的最新一份，按 provider、account_ref 排序；供 WebUI 只读展示。 */
   listLatestQuotaSnapshots(): Promise<QuotaSnapshotV1[]>
+
+  // Runner 出站网关（ADR-0008 §3）
+  /** 登记 runner。runner_id 或公钥已存在即抛错，不覆盖。 */
+  registerGatewayRunner(runner: GatewayRunner): Promise<GatewayRunner>
+  getGatewayRunner(runnerId: string): Promise<GatewayRunner | null>
+  /** 本租户全部 runner（含已吊销）。 */
+  listGatewayRunners(tenant: string): Promise<readonly GatewayRunner[]>
+  /** 记下最近一次通过认证的请求时间；只前进不后退。 */
+  touchGatewayRunner(runnerId: string, at: string): Promise<void>
+  /** 入队一次派发。同 lease_id 同内容幂等返回既有记录，内容不同抛 GatewayLeaseConflictError。 */
+  enqueueGatewayLease(input: EnqueueGatewayLeaseInput): Promise<GatewayLease>
+  /**
+   * 领取该 runner 最早入队的一条：queued → leased，期限 expiresAt。并发领取互不阻塞、不会重复领到同一条
+   * （PostgreSQL 用 FOR UPDATE SKIP LOCKED）。没有可领的返回 null。
+   */
+  claimGatewayLease(runnerId: string, now: string, expiresAt: string): Promise<GatewayLease | null>
+  /** 续租 runner 声称持有的租约：本 runner、leased、未过期的续到 expiresAt；其余（已关闭、过期、他人、不存在）列入 expired。 */
+  renewGatewayLeases(runnerId: string, leaseIds: readonly string[], now: string, expiresAt: string): Promise<{
+    readonly renewed: readonly GatewayLease[]
+    readonly expired: readonly string[]
+  }>
+  /** 记录一次回报（规则见 applyGatewayReport）；拒绝时不写任何东西。 */
+  recordGatewayReport(input: {
+    readonly runnerId: string
+    readonly leaseId: string
+    readonly body: GatewayReportBody
+    readonly now: string
+    readonly expiresAt: string
+  }): Promise<GatewayReportOutcome>
+  /** 取消（规则见 applyGatewayCancel）。租约不存在返回 null。 */
+  cancelGatewayLease(leaseId: string, cancel: GatewayCancel, now: string): Promise<GatewayLease | null>
+  getGatewayLease(leaseId: string): Promise<GatewayLease | null>
 
   /** 自检：能报出「进程活着但存储不可用」。 */
   healthCheck(): Promise<{ ok: boolean; detail?: string }>

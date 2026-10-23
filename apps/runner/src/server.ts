@@ -33,7 +33,7 @@ const SCHEMA = 'cmap/remote-runner/v1'
 const MAX_BODY_BYTES = 64 * 1024 * 1024
 const REMOTE_TASK_ID = /^codex:([A-Za-z0-9][A-Za-z0-9._:-]{0,127}):([1-9][0-9]{0,15})$/
 /** 控制面专属配置出现在 runner 主机上即拒绝启动：lap 不得持有这些秘密或连接信息。 */
-const FORBIDDEN_ENV = ['CMAP_DATABASE_URL', 'MEMROSS_URL', 'MEMROSS_TOKEN', 'CMAP_PERMIT_KEY_FILE', 'TEMPORAL_ADDRESS']
+export const FORBIDDEN_ENV = ['CMAP_DATABASE_URL', 'MEMROSS_URL', 'MEMROSS_TOKEN', 'CMAP_PERMIT_KEY_FILE', 'TEMPORAL_ADDRESS']
 const WILDCARD_HOSTS = new Set(['0.0.0.0', '::', '[::]', '*'])
 
 export const readRunnerDaemonConfig = (env: NodeJS.ProcessEnv) => {
@@ -156,37 +156,31 @@ const stageInputs = async (child: string, envelope: TaskEnvelopeV1, inputs: Remo
   }
 }
 
-export interface RunnerDaemonOptions {
+export interface RunnerCoreOptions {
   readonly env: NodeJS.ProcessEnv
-  /** 固定的 CrossMini 公钥（配置文件，不走网络发现）。 */
+  /** 固定的 CrossMini 派发许可公钥（配置文件，不走网络发现）。 */
   readonly publicKey: KeyObject
   readonly issuer: string
   readonly workRoot: string
-  /** 本机响应签名私钥（loadOrCreatePermitKey 生成的 Ed25519）；公钥由 CrossMini 固定。 */
-  readonly signingKey: KeyObject
+  /** 许可受众里的 Adapter：监听模式为 remote-runner-adapter，出站模式为 gateway-runner-adapter。 */
+  readonly permitAdapterId?: string
   /** 测试注入时钟偏差；生产用本机时钟。 */
   readonly nowMs?: () => number
   /** 本机 Codex 账号的额度快照来源（ADR-0009，带缓存的零额度探针）；设置后随 health 应答上报。 */
   readonly quota?: () => Promise<QuotaSnapshotV1>
 }
 
-export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ server: Server; adapter: CodexAdapter; runner: RunnerDescriptor }> => {
+/**
+ * 两种传输（监听模式的 HTTP 服务、出站模式的网关客户端）共用的执行核心：验许可 → 本机准入 → 落地输入 → CodexAdapter。
+ * 失败一律抛错，由传输层用 toRunnerError 映射成 remote-runner.v1 的 error 体。
+ */
+export const createRunnerCore = async (opts: RunnerCoreOptions) => {
   const codexModel = opts.env['CMAP_CODEX_MODEL']?.trim()
   if (!codexModel) throw new RangeError('CMAP_CODEX_MODEL is required')
   const runnerId = opts.env['RUNNER_ID']?.trim() ?? ''
-  const clock = opts.nowMs ?? Date.now
-  const firstUse = createNonceCache(clock)
-  /** 通过请求认证的响应才签名；签名绑定所答请求的 nonce，旧响应不能冒充新请求的答复。 */
-  const requestNonce = new WeakMap<ServerResponse, string>()
-  const send = (res: ServerResponse, status: number, body?: object): void => {
-    const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8')
-    const nonce = requestNonce.get(res)
-    const signature = nonce === undefined ? undefined : signRunnerResponse({ privateKey: opts.signingKey, audience: runnerId, requestNonce: nonce, status, ...(bytes ? { body: bytes } : {}) })
-    res.writeHead(status, { ...(bytes ? { 'content-type': 'application/json' } : {}), ...(signature ? { [RUNNER_AUTH_HEADERS.signature]: signature } : {}) })
-    res.end(bytes)
-  }
+  const permitAdapterId = opts.permitAdapterId ?? REMOTE_ADAPTER_ID
   const verifyPermit = (token: string, envelope: TaskEnvelopeV1): undefined => verifyDispatchPermit(token, {
-    publicKey: opts.publicKey, issuer: opts.issuer, runnerId, adapterId: REMOTE_ADAPTER_ID, envelope, clockSkewSeconds: 2,
+    publicKey: opts.publicKey, issuer: opts.issuer, runnerId, adapterId: permitAdapterId, envelope, clockSkewSeconds: 2,
     ...(opts.nowMs ? { nowMs: opts.nowMs() } : {}),
   })
   const codexBin = opts.env['CODEX_BIN']
@@ -208,6 +202,77 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
   const runner = buildRunnerDescriptor(opts.env, [await adapter.discover()])
   const bindings = new Map<string, RemoteTaskBinding>()
 
+  const bindingFor = (id: string): RemoteTaskBinding => {
+    if (!REMOTE_TASK_ID.test(id)) throw new ProtocolFault(404, 'NOT_FOUND')
+    // 守护进程重启后内存为空：CodexAdapter 只凭 remote_task_id 与运行记录恢复，记录缺失即 BINDING_NOT_FOUND。
+    return bindings.get(id) ?? { adapter: adapter.adapterId, remote_task_id: id, protocol: 'codex-exec', protocol_version: '0.1.0', runner_id: runnerId }
+  }
+
+  return {
+    adapter,
+    runner,
+    async dispatch(msg: RemoteRunnerDispatchV1) {
+      if (msg.runner_id !== runnerId) throw new DispatchPermitError('CLAIM_MISMATCH')
+      const envelope = msg.envelope as TaskEnvelopeV1
+      verifyPermit(msg.permit, envelope)
+      assertRunnerAdmission(runner, admissionSubject(envelope))
+      const { child } = await safeChildDir(opts.workRoot, envelope.identity.task_id)
+      await stageInputs(child, envelope, msg.inputs)
+      const binding = await adapter.startTask(envelope, {
+        token: msg.permit, runner_id: runnerId, trace_id: msg.trace_id, correlation_id: msg.correlation_id,
+        worktree: child, deadline_at: msg.deadline_at,
+        beforeSend: async () => assertRunnerAdmission(runner, admissionSubject(envelope)),
+      })
+      bindings.set(binding.remote_task_id, binding)
+      return { schema: SCHEMA, kind: 'dispatch_accepted', runner_id: runnerId, remote_task_id: binding.remote_task_id } as const
+    },
+    async status(id: string) {
+      const observed = await adapter.getStatus(bindingFor(id))
+      return { schema: SCHEMA, kind: 'status', remote_task_id: id, status: observed.status, terminal_observed: observed.terminal_observed } as const
+    },
+    /** 产物由控制面复算：这里只按本机工作区读出已复核的字节，哈希仍由控制面独立复算。 */
+    async result(id: string) {
+      const collected = await adapter.collectResult(bindingFor(id))
+      const { child } = await existingChildDir(opts.workRoot, REMOTE_TASK_ID.exec(id)![1]!)
+      const artifacts: { uri: string; content_base64: string }[] = []
+      const described = []
+      for (const art of collected.artifacts) {
+        const { bytes } = await readVerifiedArtifact(child, art)
+        const uri = relative(child, resolve(child, art.uri))
+        artifacts.push({ uri, content_base64: bytes.toString('base64') })
+        described.push({ ...art, uri })
+      }
+      return { schema: SCHEMA, kind: 'result', remote_task_id: id, result: { ...collected, artifacts: described }, artifacts } as const
+    },
+    async cancel(id: string, reason: string) {
+      await adapter.cancel(bindingFor(id), reason)
+    },
+  }
+}
+
+export const toRunnerError = (error: unknown) => toReply(error)
+
+export interface RunnerDaemonOptions extends RunnerCoreOptions {
+  /** 本机响应签名私钥（loadOrCreatePermitKey 生成的 Ed25519）；公钥由 CrossMini 固定。 */
+  readonly signingKey: KeyObject
+}
+
+export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ server: Server; adapter: CodexAdapter; runner: RunnerDescriptor }> => {
+  const core = await createRunnerCore(opts)
+  const { adapter, runner } = core
+  const runnerId = runner.runner_id
+  const clock = opts.nowMs ?? Date.now
+  const firstUse = createNonceCache(clock)
+  /** 通过请求认证的响应才签名；签名绑定所答请求的 nonce，旧响应不能冒充新请求的答复。 */
+  const requestNonce = new WeakMap<ServerResponse, string>()
+  const send = (res: ServerResponse, status: number, body?: object): void => {
+    const bytes = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8')
+    const nonce = requestNonce.get(res)
+    const signature = nonce === undefined ? undefined : signRunnerResponse({ privateKey: opts.signingKey, audience: runnerId, requestNonce: nonce, status, ...(bytes ? { body: bytes } : {}) })
+    res.writeHead(status, { ...(bytes ? { 'content-type': 'application/json' } : {}), ...(signature ? { [RUNNER_AUTH_HEADERS.signature]: signature } : {}) })
+    res.end(bytes)
+  }
+
   /** 先验签再登记 nonce：只有通过验签的请求才占缓存。任何异常都按未认证处理（fail closed）。 */
   const authenticate = (req: IncomingMessage, url: URL): { nonce: string; contentSha256: string } | undefined => {
     try {
@@ -221,54 +286,16 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
     }
   }
 
-  const bindingFor = (id: string): RemoteTaskBinding => {
-    if (!REMOTE_TASK_ID.test(id)) throw new ProtocolFault(404, 'NOT_FOUND')
-    // 守护进程重启后内存为空：CodexAdapter 只凭 remote_task_id 与运行记录恢复，记录缺失即 BINDING_NOT_FOUND。
-    return bindings.get(id) ?? { adapter: adapter.adapterId, remote_task_id: id, protocol: 'codex-exec', protocol_version: '0.1.0', runner_id: runnerId }
-  }
-
   const dispatch = async (raw: Buffer, res: ServerResponse): Promise<void> => {
     const msg = parseJson(raw)
     if (!validateRemoteMessage(msg) || msg.kind !== 'dispatch') throw new ProtocolFault(400, 'MALFORMED_REQUEST')
-    if (msg.runner_id !== runnerId) throw new DispatchPermitError('CLAIM_MISMATCH')
-    const envelope = msg.envelope as TaskEnvelopeV1
-    verifyPermit(msg.permit, envelope)
-    assertRunnerAdmission(runner, admissionSubject(envelope))
-    const { child } = await safeChildDir(opts.workRoot, envelope.identity.task_id)
-    await stageInputs(child, envelope, msg.inputs)
-    const binding = await adapter.startTask(envelope, {
-      token: msg.permit, runner_id: runnerId, trace_id: msg.trace_id, correlation_id: msg.correlation_id,
-      worktree: child, deadline_at: msg.deadline_at,
-      beforeSend: async () => assertRunnerAdmission(runner, admissionSubject(envelope)),
-    })
-    bindings.set(binding.remote_task_id, binding)
-    send(res, 200, { schema: SCHEMA, kind: 'dispatch_accepted', runner_id: runnerId, remote_task_id: binding.remote_task_id })
-  }
-
-  const status = async (id: string, res: ServerResponse): Promise<void> => {
-    const observed = await adapter.getStatus(bindingFor(id))
-    send(res, 200, { schema: SCHEMA, kind: 'status', remote_task_id: id, status: observed.status, terminal_observed: observed.terminal_observed })
-  }
-
-  /** 产物由控制面拉取：这里只按 lap 侧工作区读出已复核的字节，哈希仍由 CrossMini 独立复算。 */
-  const result = async (id: string, res: ServerResponse): Promise<void> => {
-    const collected = await adapter.collectResult(bindingFor(id))
-    const { child } = await existingChildDir(opts.workRoot, REMOTE_TASK_ID.exec(id)![1]!)
-    const artifacts: { uri: string; content_base64: string }[] = []
-    const described = []
-    for (const art of collected.artifacts) {
-      const { bytes } = await readVerifiedArtifact(child, art)
-      const uri = relative(child, resolve(child, art.uri))
-      artifacts.push({ uri, content_base64: bytes.toString('base64') })
-      described.push({ ...art, uri })
-    }
-    send(res, 200, { schema: SCHEMA, kind: 'result', remote_task_id: id, result: { ...collected, artifacts: described }, artifacts })
+    send(res, 200, await core.dispatch(msg))
   }
 
   const cancel = async (id: string, raw: Buffer, res: ServerResponse): Promise<void> => {
     const msg = parseJson(raw)
     if (!validateRemoteMessage(msg) || msg.kind !== 'cancel' || msg.remote_task_id !== id) throw new ProtocolFault(400, 'MALFORMED_REQUEST')
-    await adapter.cancel(bindingFor(id), msg.reason)
+    await core.cancel(id, msg.reason)
     send(res, 204)
   }
 
@@ -294,8 +321,8 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
       if (req.method === 'POST' && path === '/v1/tasks') return await dispatch(raw, res)
       if (task) {
         const id = decodeURIComponent(task[1]!)
-        if (req.method === 'GET' && !task[2]) return await status(id, res)
-        if (req.method === 'GET' && task[2] === '/result') return await result(id, res)
+        if (req.method === 'GET' && !task[2]) return send(res, 200, await core.status(id))
+        if (req.method === 'GET' && task[2] === '/result') return send(res, 200, await core.result(id))
         if (req.method === 'POST' && task[2] === '/cancel') return await cancel(id, raw, res)
       }
       throw new ProtocolFault(404, 'NOT_FOUND')

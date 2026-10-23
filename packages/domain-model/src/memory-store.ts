@@ -42,6 +42,8 @@ import type {
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
 import { assertSameMissionInput } from './mission-input.ts'
+import { applyGatewayCancel, applyGatewayReport, canRenewLease, newLease, sameEnqueue } from './runner-gateway.ts'
+import type { EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
 import {
   ArtifactConflictError,
   BindingConflictError,
@@ -49,6 +51,7 @@ import {
   NotFoundError,
   WriteVerificationError,
   LockUnavailableError,
+  GatewayLeaseConflictError,
   assertSameEventInput,
   assertSameReviewInput,
   assertSameTaskInput,
@@ -85,6 +88,8 @@ export class MemoryStore implements Store {
   readonly #approvals = new Map<string, Approval>()
   readonly #locks = new Map<string, ResourceLock>()
   readonly #quota: QuotaSnapshotV1[] = []
+  readonly #gatewayRunners = new Map<string, GatewayRunner>()
+  readonly #gatewayLeases = new Map<string, GatewayLease>()
   /** idempotencyKey → 已产生的 event_id，用于重复投递去重 */
   readonly #seenKeys = new Map<string, string>()
 
@@ -546,6 +551,85 @@ export class MemoryStore implements Store {
     return [...latest.values()]
       .sort((a, b) => a.provider.localeCompare(b.provider) || a.account_ref!.localeCompare(b.account_ref!))
       .map((q) => structuredClone(q))
+  }
+
+  // ----------------------------------------------------- Runner 出站网关
+
+  async registerGatewayRunner(runner: GatewayRunner): Promise<GatewayRunner> {
+    if (this.#gatewayRunners.has(runner.runner_id) || [...this.#gatewayRunners.values()].some((r) => r.public_key === runner.public_key)) {
+      throw new Error(`runner ${runner.runner_id} 或其公钥已登记`)
+    }
+    this.#gatewayRunners.set(runner.runner_id, structuredClone(runner))
+    return structuredClone(runner)
+  }
+
+  async getGatewayRunner(runnerId: string): Promise<GatewayRunner | null> {
+    const runner = this.#gatewayRunners.get(runnerId)
+    return runner ? structuredClone(runner) : null
+  }
+
+  async listGatewayRunners(tenant: string): Promise<readonly GatewayRunner[]> {
+    return [...this.#gatewayRunners.values()].filter((r) => r.tenant === tenant)
+      .sort((a, b) => (a.runner_id < b.runner_id ? -1 : 1)).map((r) => structuredClone(r))
+  }
+
+  async touchGatewayRunner(runnerId: string, at: string): Promise<void> {
+    const runner = this.#gatewayRunners.get(runnerId)
+    if (!runner || (runner.last_seen_at !== null && Date.parse(runner.last_seen_at) >= Date.parse(at))) return
+    this.#gatewayRunners.set(runnerId, { ...runner, last_seen_at: at })
+  }
+
+  async enqueueGatewayLease(input: EnqueueGatewayLeaseInput): Promise<GatewayLease> {
+    const existing = this.#gatewayLeases.get(input.lease_id)
+    if (existing) {
+      if (!sameEnqueue(existing, input)) throw new GatewayLeaseConflictError(input.lease_id)
+      return structuredClone(existing)
+    }
+    const lease = newLease(structuredClone(input))
+    this.#gatewayLeases.set(lease.lease_id, lease)
+    return structuredClone(lease)
+  }
+
+  async claimGatewayLease(runnerId: string, now: string, expiresAt: string): Promise<GatewayLease | null> {
+    const next = [...this.#gatewayLeases.values()]
+      .filter((l) => l.runner_id === runnerId && l.state === 'queued')
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || (a.lease_id < b.lease_id ? -1 : 1))[0]
+    if (!next) return null
+    const leased: GatewayLease = { ...next, state: 'leased', expires_at: expiresAt, updated_at: now }
+    this.#gatewayLeases.set(leased.lease_id, leased)
+    return structuredClone(leased)
+  }
+
+  async renewGatewayLeases(runnerId: string, leaseIds: readonly string[], now: string, expiresAt: string) {
+    const renewed: GatewayLease[] = []
+    const expired: string[] = []
+    for (const id of leaseIds) {
+      const lease = this.#gatewayLeases.get(id)
+      if (!canRenewLease(lease, runnerId, Date.parse(now))) { expired.push(id); continue }
+      const next: GatewayLease = { ...lease, expires_at: expiresAt, updated_at: now }
+      this.#gatewayLeases.set(id, next)
+      renewed.push(structuredClone(next))
+    }
+    return { renewed, expired }
+  }
+
+  async recordGatewayReport(input: { runnerId: string; leaseId: string; body: GatewayReportBody; now: string; expiresAt: string }): Promise<GatewayReportOutcome> {
+    const out = applyGatewayReport(this.#gatewayLeases.get(input.leaseId), input.runnerId, structuredClone(input.body), Date.parse(input.now), input.expiresAt)
+    if ('lease' in out) this.#gatewayLeases.set(input.leaseId, out.lease)
+    return structuredClone(out)
+  }
+
+  async cancelGatewayLease(leaseId: string, cancel: GatewayCancel, now: string): Promise<GatewayLease | null> {
+    const lease = this.#gatewayLeases.get(leaseId)
+    if (!lease) return null
+    const next = applyGatewayCancel(lease, structuredClone(cancel), Date.parse(now))
+    this.#gatewayLeases.set(leaseId, next)
+    return structuredClone(next)
+  }
+
+  async getGatewayLease(leaseId: string): Promise<GatewayLease | null> {
+    const lease = this.#gatewayLeases.get(leaseId)
+    return lease ? structuredClone(lease) : null
   }
 
   // ------------------------------------------------------------ 自检

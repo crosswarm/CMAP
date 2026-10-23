@@ -335,7 +335,7 @@ export const createDagActivities = (deps: ActivityDeps & {
      * 重试的 attempt 先确认已落账的 binding 属于重启安全的 Adapter，否则不碰它、照旧升级；没有 binding 说明
      * 此前没有启动过 Agent（binding 先于 startTask 落账），照常首次派发。恢复本身靠 runner 对 binding 的幂等。
      */
-    async runDagAttempt(input: { taskId: string }) {
+    async runDagAttempt(input: { taskId: string; deadlineAt?: string }) {
       if (activityAttempt() > 1) {
         const binding = (await store.getTask(input.taskId))?.binding
         if (binding && adapterForBinding(adapters, binding)?.restartSafe !== true) {

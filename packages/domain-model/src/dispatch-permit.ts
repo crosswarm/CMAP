@@ -264,8 +264,17 @@ export const RUNNER_AUTH_HEADERS = {
   signature: 'x-cmap-signature',
 } as const
 
-const REQUEST_DOMAIN = 'cmap-runner-req1\n'
-const RESPONSE_DOMAIN = 'cmap-runner-res1\n'
+/**
+ * 两套签名方案共用同一算法：remote-runner.v1（控制面签请求、lap 签应答，身份头为受众）与
+ * runner-gateway.v1（ADR-0008 §3：runner 签请求、控制面签应答，身份头为发起请求的 runner_id）。
+ * 域前缀不同，一方的签名不能重放到另一方。
+ */
+export type RunnerAuthScheme = 'runner' | 'gateway'
+const SCHEMES = {
+  runner: { request: 'cmap-runner-req1\n', response: 'cmap-runner-res1\n', identity: 'x-cmap-audience' },
+  gateway: { request: 'cmap-gateway-req1\n', response: 'cmap-gateway-res1\n', identity: 'x-cmap-runner-id' },
+} as const
+export const GATEWAY_RUNNER_ID_HEADER = SCHEMES.gateway.identity
 const AUTH_TIMESTAMP = /^[0-9]{10,16}$/
 const AUTH_NONCE = /^[A-Za-z0-9_-]{16,64}$/
 const AUTH_SHA256 = /^[a-f0-9]{64}$/
@@ -282,11 +291,11 @@ const assertLineSafe = (...fields: string[]): void => {
   for (const field of fields) if (field.includes('\n') || field.includes('\r')) authFail()
 }
 
-const requestSigningBytes = (f: { method: string; target: string; contentSha256: string; timestamp: string; nonce: string; audience: string }): Buffer =>
-  Buffer.from(`${REQUEST_DOMAIN}${f.method}\n${f.target}\n${f.contentSha256}\n${f.timestamp}\n${f.nonce}\n${f.audience}`, 'utf8')
+const requestSigningBytes = (scheme: RunnerAuthScheme, f: { method: string; target: string; contentSha256: string; timestamp: string; nonce: string; audience: string }): Buffer =>
+  Buffer.from(`${SCHEMES[scheme].request}${f.method}\n${f.target}\n${f.contentSha256}\n${f.timestamp}\n${f.nonce}\n${f.audience}`, 'utf8')
 
-const responseSigningBytes = (f: { audience: string; requestNonce: string; status: number; bodySha256: string }): Buffer =>
-  Buffer.from(`${RESPONSE_DOMAIN}${f.audience}\n${f.requestNonce}\n${f.status}\n${f.bodySha256}`, 'utf8')
+const responseSigningBytes = (scheme: RunnerAuthScheme, f: { audience: string; requestNonce: string; status: number; bodySha256: string }): Buffer =>
+  Buffer.from(`${SCHEMES[scheme].response}${f.audience}\n${f.requestNonce}\n${f.status}\n${f.bodySha256}`, 'utf8')
 
 /** 返回需要附在请求上的认证头。target 是 `pathname + search`，与服务端从请求行解析出的一致。 */
 export const signRunnerRequest = (input: {
@@ -296,7 +305,9 @@ export const signRunnerRequest = (input: {
   body?: Uint8Array | string
   audience: string
   nowMs?: number
+  scheme?: RunnerAuthScheme
 }): Record<string, string> => {
+  const scheme = input.scheme ?? 'runner'
   assertEd25519(input.privateKey, 'private')
   assertLineSafe(input.method, input.target, input.audience)
   const fields = {
@@ -310,9 +321,9 @@ export const signRunnerRequest = (input: {
   return {
     [RUNNER_AUTH_HEADERS.timestamp]: fields.timestamp,
     [RUNNER_AUTH_HEADERS.nonce]: fields.nonce,
-    [RUNNER_AUTH_HEADERS.audience]: fields.audience,
+    [SCHEMES[scheme].identity]: fields.audience,
     [RUNNER_AUTH_HEADERS.contentSha256]: fields.contentSha256,
-    [RUNNER_AUTH_HEADERS.signature]: b64url(sign(null, requestSigningBytes(fields), input.privateKey)),
+    [RUNNER_AUTH_HEADERS.signature]: b64url(sign(null, requestSigningBytes(scheme, fields), input.privateKey)),
   }
 }
 
@@ -328,7 +339,9 @@ export const verifyRunnerRequest = (input: {
   audience: string
   headers: Record<string, string | string[] | undefined>
   nowMs?: number
+  scheme?: RunnerAuthScheme
 }): { nonce: string; contentSha256: string } => {
+  const scheme = input.scheme ?? 'runner'
   assertEd25519(input.publicKey, 'public')
   const one = (name: string): string => {
     const value = input.headers[name]
@@ -336,7 +349,7 @@ export const verifyRunnerRequest = (input: {
   }
   const timestamp = one(RUNNER_AUTH_HEADERS.timestamp)
   const nonce = one(RUNNER_AUTH_HEADERS.nonce)
-  const audience = one(RUNNER_AUTH_HEADERS.audience)
+  const audience = one(SCHEMES[scheme].identity)
   const contentSha256 = one(RUNNER_AUTH_HEADERS.contentSha256)
   const signature = one(RUNNER_AUTH_HEADERS.signature)
   assertLineSafe(input.method, input.target, input.audience)
@@ -350,7 +363,7 @@ export const verifyRunnerRequest = (input: {
     return authFail()
   }
   if (signatureBytes.length !== 64) authFail()
-  if (!verify(null, requestSigningBytes({ method: input.method, target: input.target, contentSha256, timestamp, nonce, audience }), input.publicKey, signatureBytes)) authFail()
+  if (!verify(null, requestSigningBytes(scheme, { method: input.method, target: input.target, contentSha256, timestamp, nonce, audience }), input.publicKey, signatureBytes)) authFail()
   return { nonce, contentSha256 }
 }
 
@@ -363,10 +376,11 @@ export const signRunnerResponse = (input: {
   requestNonce: string
   status: number
   body?: Uint8Array | string
+  scheme?: RunnerAuthScheme
 }): string => {
   assertEd25519(input.privateKey, 'private')
   assertLineSafe(input.audience, input.requestNonce)
-  return b64url(sign(null, responseSigningBytes({ ...input, bodySha256: bodySha256(input.body) }), input.privateKey))
+  return b64url(sign(null, responseSigningBytes(input.scheme ?? 'runner', { ...input, bodySha256: bodySha256(input.body) }), input.privateKey))
 }
 
 /** CrossMini 对收到的响应验签；失败即不采信（调用方按证据完整性失败处理）。 */
@@ -377,6 +391,7 @@ export const verifyRunnerResponse = (input: {
   status: number
   body?: Uint8Array | string
   signature: string | null | undefined
+  scheme?: RunnerAuthScheme
 }): undefined => {
   assertEd25519(input.publicKey, 'public')
   assertLineSafe(input.audience, input.requestNonce)
@@ -388,6 +403,6 @@ export const verifyRunnerResponse = (input: {
     return authFail()
   }
   if (signatureBytes.length !== 64) authFail()
-  if (!verify(null, responseSigningBytes({ ...input, bodySha256: bodySha256(input.body) }), input.publicKey, signatureBytes)) authFail()
+  if (!verify(null, responseSigningBytes(input.scheme ?? 'runner', { ...input, bodySha256: bodySha256(input.body) }), input.publicKey, signatureBytes)) authFail()
   return undefined
 }

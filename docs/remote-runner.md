@@ -249,6 +249,31 @@ CrossMini 与 lap 均为 `a52251e`（之后 CrossMini 侧补 `2a97549` 修复收
 | `grace`（宽限 30 秒） | ✅ 41 秒；Mission ESCALATED，任务 INPUT_REQUIRED（`EXECUTION_UNCERTAIN:BINDING_NOT_FOUND`），binding 保留，不改派、不重跑。首轮在 `a52251e` 上失败：S03 让任务保持 INPUT_REQUIRED 后，`finalizeDagMission` 仍视其为活跃任务抛错，Workflow 失败、Mission 停在 RUNNING；`2a97549` 修复后通过 |
 | `lap-offline`（生产默认宽限） | ✅ 158 秒；离线 152 秒即判执行不确定（取剩余等待时间的一半，先于 300 秒任务超时），结果同 grace |
 
+## 出站模式（ADR-0008 §3，runner-gateway.v1）
+
+状态：🟡 本机实现与两进程模拟通过（`scripts/e2e-runner-gateway.mjs --simulate`），未经 Temporal 全链路、未在两台机器上实测。
+
+runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gateway/claim`，≤ 50 秒）领取任务、`POST /v1/gateway/reports` 回报受理/状态/结果；控制面从不连 runner。消息体沿用 remote-runner.v1。
+
+- **队列与租约**：Worker 侧 `GatewayRunnerAdapter`（Adapter ID `gateway-runner-adapter`）把派发写入账本的网关队列；API 领取时 `FOR UPDATE SKIP LOCKED` 取最早一条并授予租约（默认 120 秒）。每次领取（`held_leases`）与回报都续租。租约过期即执行不确定（`BINDING_NOT_FOUND` → 任务 `INPUT_REQUIRED`、binding 保留），**不改派、不重跑**；过期不可逆，重新上线的 runner 也领不到它。
+- **认证**：每个请求用 runner 登记的 Ed25519 私钥签名（域前缀 `cmap-gateway-req1`，身份头 `x-cmap-runner-id`）；API 用登记公钥验签，任何失败（含已吊销）都是同一个无签名 401。应答由控制面网关密钥签名，runner 用登记时固定的公钥验签。
+- **许可**：受众是路由所选 runner 与 `gateway-runner-adapter`，由 Worker 的派发许可私钥签发；runner 用固定的许可公钥验签。API 不持有许可私钥：API 被攻破不等于能让 runner 执行任意信封。
+- **结果**：先落账（租约关闭、回报入库），再向 `mission-<id>` 发 `runnerReported` 门铃；dag/v1 的 attempt 派发后返回 `awaiting_report`，Workflow 等门铃或 30 秒超时回读（`patched('dag-runner-report-signal-v1')`）。持有资源锁的任务仍在 Activity 内等待（锁靠它续租）。产物落盘后由 Worker 独立复算 sha256。
+- **路由**：按登记记录挑 runner——同租户、未吊销、能力与风险上限放行、最近 120 秒内领取过；挑不到记 `no_runner` / `capability_mismatch` / `risk_exceeded` / `unhealthy` 并按 fallback 回落。runner 侧准入白名单只取自登记记录。
+
+配置：
+
+| 进程 | 变量 | 说明 |
+|---|---|---|
+| API | `CMAP_GATEWAY_KEY_FILE` | 网关应答签名私钥（不存在则生成 0600）；配置后启用 `/v1/gateway/*`。不得等于 `CMAP_PERMIT_KEY_FILE` |
+| Worker | `CMAP_GATEWAY_AGENT_ID` | 例如 `codex@gateway`；设置后注册网关 Adapter，需 `CMAP_PERMIT_KEY_FILE` |
+| runner | `CMAP_CONTROL_PLANE_URL` | 例如 `https://cmap.spux.cn`；设置即进入出站模式。只认 https，http 仅限回环 |
+| runner | `CMAP_RUNNER_KEY_FILE` | 登记的 runner 私钥（首次启动生成 0600，私钥不离开本机） |
+| runner | `CMAP_RUNNER_ENROLLMENT_FILE` | 登记记录（runner-enrollment.v1 `enrolled`），默认与私钥同目录的 `enrollment.json` |
+| runner | `CMAP_PERMIT_PUBLIC_KEY_FILE`、`CMAP_CODEX_MODEL`、`CMAP_PERMIT_ISSUER`、`CMAP_WORK_ROOT`、`CODEX_BIN` | 同监听模式 |
+
+出站模式下 `RUNNER_ID` / `RUNNER_*` 准入变量被登记记录覆盖；禁止出现在 runner 上的变量与监听模式相同。守护进程重启后不恢复已持有的租约（只在内存），在途任务会在租约过期后判执行不确定。
+
 ## 已知边界
 
 - 所有端点已有应用层请求认证与应答签名；按 ADR-0006 修订 1 **不配置 Tailscale ACL**。残余风险已接受：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求读完头就 401，但仍占连接）。控制面 5433/7233 只监听 127.0.0.1。

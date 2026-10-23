@@ -28,6 +28,7 @@ import { PgStore, issueDispatchPermit, verifyDispatchPermit, DispatchPermitError
 import type { AdapterAuthorization, AgentAdapter, DispatchPermitSigner } from '#adapter-sdk'
 import { CodexAdapter, CODEX_CAPABILITIES } from '../../../adapters/codex-adapter/src/index.ts'
 import { RemoteRunnerAdapter } from '../../../adapters/remote-runner/src/index.ts'
+import { GatewayRunnerAdapter } from '../../../adapters/runner-gateway/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
 import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
@@ -128,6 +129,23 @@ if (remoteRunnerUrl) {
   adapters.push(remoteRunner(remoteRunnerId, remoteRunnerUrl, `codex@${remoteRunnerId}`))
 }
 
+const store = new PgStore({ connectionString, schema })
+
+// runner 出站网关（ADR-0008 §3）：已登记的 runner 主动领取，Worker 只读写与 API 共用的账本；执行方按登记记录逐任务挑选。
+const gatewayAgentId = process.env['CMAP_GATEWAY_AGENT_ID']?.trim()
+if (gatewayAgentId) {
+  if (!permitKeyFile) throw new Error('出站 runner 只认固定的许可公钥：需要 CMAP_PERMIT_KEY_FILE')
+  adapters.push(new GatewayRunnerAdapter({
+    // 许可受众是路由为本任务挑中的 runner：自检只核对许可与该 runner 一致
+    authorization:{mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>
+      verifyDispatchPermit(token,{publicKey,issuer,runnerId:contextRunner,adapterId,envelope})},
+    store,
+    agentId: gatewayAgentId,
+    workRoot,
+    capabilities: CODEX_CAPABILITIES,
+  }))
+}
+
 const descriptors = await Promise.all(adapters.map(adapter => adapter.discover()))
 for (const [index, descriptor] of descriptors.entries()) {
   if(descriptor.agent_id!==adapters[index]!.agentId || descriptor.adapter_id!==adapters[index]!.adapterId)throw new Error('RUNNER_ADAPTER_IDENTITY_MISMATCH')
@@ -137,7 +155,6 @@ const runner = buildRunnerDescriptor(process.env,descriptors)
 // ADR-0009 §4 可切换调度者：CMAP_DISPATCHERS=jev,claude；未配置即纯确定性路由
 const dispatchers = dispatchersFromEnv(process.env['CMAP_DISPATCHERS'])
 
-const store = new PgStore({ connectionString, schema })
 // 幂等建表：空库首次启动即可用，不需要额外的迁移步骤。
 await store.migrate()
 

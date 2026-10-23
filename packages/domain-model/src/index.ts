@@ -54,7 +54,15 @@ export {
   ReviewConflictError,
   EventConflictError,
   BindingConflictError,
+  GatewayLeaseConflictError,
 } from './store.ts'
+export {
+  applyGatewayReport, applyGatewayCancel, canRenewLease, isLeaseExpired, newLease, sameEnqueue,
+  ed25519PublicKeyFromRaw, rawEd25519PublicKey, validateGatewayMessage, validateEnrollmentMessage,
+} from './runner-gateway.ts'
+export type { GatewayRunner, GatewayLease, GatewayLeaseState, GatewayReportBody, GatewayCancel, GatewayReportOutcome, EnqueueGatewayLeaseInput } from './runner-gateway.ts'
+export type { RunnerGatewayMessageV1 } from './generated/runner-gateway.ts'
+export type { RunnerEnrollmentMessageV1 } from './generated/runner-enrollment.ts'
 export type {
   Store,
   CreateMissionInput,
