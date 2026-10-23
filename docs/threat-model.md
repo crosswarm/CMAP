@@ -239,9 +239,9 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 |---|---|
 | 授权来源是真人签发、有期限的委托策略，不是置信度；策略只能收窄 | 🟡 加载与校验已实现（`workflows/jev-shadow.ts`：group/other 可写拒绝、不合契约/过期/租户不符视为无策略、记录 sha256，`tests/workflow/jev-shadow.test.ts`）；enforce 执行未实现 |
 | 有效风险只升不降；高风险、影子模式、Jev 判升级一律不得自动执行 | 🟡 影子模式已实现：dag/v1 审批闸口的 `JEV_DECIDED` 一律 `route=human`，有效风险取声明下限、确定性规则与 Jev 评估的最大值，策略写 enforce 也按影子记录；不改审批或任务状态（测试覆盖）。enforce 未实现 |
-| 确定性兜底规则（允许推送、YonWork 破坏性权限、有写副作用的重做）由代码强制转人工 | ⬜ 未实现 |
+| 确定性兜底规则（允许推送、YonWork 破坏性权限、有写副作用的重做）由代码强制转人工 | 🟡 审批闸口已实现：允许推送分支、`clear_test_data`、`gateway_control` 一律 `route=human`、`deterministic_high_risk`（`tests/workflow/jev-shadow.test.ts`）；执行不确定重做的判定函数已有、尚未接入该路径 |
 | 只把可信字段送给 Jev，Agent 产出的文本不进输入 | 🟡 审批闸口已实现：只送 capability、声明风险、scope、信封权限中的布尔与分支列表、真人撰写的 Mission 目标，不送节点目标、审批理由或任何 Agent 产出（测试断言）；分配与重做未接入 |
-| 当日自动执行预算与一键关闭开关 | ⬜ 未实现 |
+| 当日自动执行预算与一键关闭开关 | 🟡 `CMAP_JEV_AUTODECIDE=off` 已实现（不调用 Jev、不写记录）；预算闸口（按租户与 UTC 日、`budget_exhausted`）已实现并有单测，但 enforce 尚不产生自动执行，计数恒为 0，未在真实链路验证 |
 | 影子模式校准后才启用自动执行 | 🟡 影子模式与一致率统计（`scripts/jev-shadow-stats.mjs`）已实现，尚无真实校准数据，enforce 未开启 |
 
 ## 单用户双主机闸口

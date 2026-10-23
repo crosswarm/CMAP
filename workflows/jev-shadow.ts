@@ -1,6 +1,7 @@
 /**
  * ADR-0007 影子模式：审批首次进入等待时调用 Jev 一次，把结果写成 JEV_DECIDED。
- * 只记录、不执行：一律 route=human，绝不改变 Approval 或 Task 状态。enforce 不在本次范围，策略写 enforce 也按影子处理。
+ * 只记录、不执行：一律 route=human，绝不改变 Approval 或 Task 状态。enforce 不在本次范围，策略写 enforce 也按影子处理；
+ * 但确定性兜底（deterministic_high_risk）与当日预算（budget_exhausted）的闸口已就位，CMAP_JEV_AUTODECIDE=off 一键停用。
  */
 import { createHash } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
@@ -22,6 +23,9 @@ export interface JevShadowDeps {
   readonly policyFile: string
   readonly apiKey?: () => string | undefined
   readonly fetch?: typeof fetch
+  /** 默认 process.env；CMAP_JEV_AUTODECIDE=off 时完全不调用 Jev、不写记录，回到全人工。 */
+  readonly env?: NodeJS.ProcessEnv
+  readonly now?: () => Date
 }
 
 /** 文件对 group/other 可写则拒绝；不合契约、过期或租户不符视为无策略。返回策略与文件字节的 sha256。 */
@@ -66,6 +70,14 @@ const trustedPermissions = (permissions: unknown): Record<string, Record<string,
   return out
 }
 
+/** ADR-0007 确定性兜底：代码强制转人工，策略不能放宽。permissions 为 trustedPermissions 的输出形态。 */
+export const deterministicHighRisk = (input: { decision_type: 'approval' | 'routing' | 'retry_uncertain'; declared_risk: string; permissions: Record<string, Record<string, boolean | string[]>> }): boolean => {
+  if (input.decision_type === 'retry_uncertain') return input.declared_risk !== 'read-meta' && input.declared_risk !== 'read-sensitive'
+  const push = input.permissions['repository']?.['allow_push_branches']
+  const yonwork = input.permissions['yonwork'] ?? {}
+  return (Array.isArray(push) && push.length > 0) || yonwork['clear_test_data'] === true || yonwork['gateway_control'] === true
+}
+
 /** 可信字段：控制面填写的信封字段与真人撰写的 Mission 目标；Agent 产出（含 Planner 节点目标、审批理由）一律不送。 */
 export const trustedJevState = (task: TaskRecord, approval: Approval, mission: Mission) => ({
   capability: task.capability, declared_risk: task.risk, approval_scope: approval.scope,
@@ -75,18 +87,18 @@ export const trustedJevState = (task: TaskRecord, approval: Approval, mission: M
 /** 永不抛错：影子记录失败只打日志，审批照常等真人。同一审批只调用一次（按幂等键先查账本）。 */
 export async function recordJevShadowDecision(store: Store, deps: JevShadowDeps, approval: Approval): Promise<void> {
   try {
+    if ((deps.env ?? process.env)['CMAP_JEV_AUTODECIDE'] === 'off') return
     const key = `jev-decided:${approval.id}`
     if ((await store.listEvents(approval.mission_id)).some((e) => e.idempotency_key === key)) return
     const [mission, task] = await Promise.all([store.getMission(approval.mission_id), store.getTask(approval.task_id)])
     if (!mission || !task) return
-    const loaded = loadDelegationPolicy(deps.policyFile, mission.tenant)
+    const now = (deps.now ?? (() => new Date()))()
+    const loaded = loadDelegationPolicy(deps.policyFile, mission.tenant, now)
     if (!loaded) return
 
     const state = trustedJevState(task, approval, mission)
-    const repository = state.permissions['repository'] ?? {}
-    const yonwork = state.permissions['yonwork'] ?? {}
-    const deterministic: Risk = (Array.isArray(repository['allow_push_branches']) && repository['allow_push_branches'].length > 0) ||
-      yonwork['clear_test_data'] === true || yonwork['gateway_control'] === true ? 'high' : 'low'
+    const forced = deterministicHighRisk({ decision_type: 'approval', declared_risk: task.risk, permissions: state.permissions })
+    const deterministic: Risk = forced ? 'high' : 'low'
     const floor: Risk = task.risk === 'controlled' || task.risk === 'mutating' ? 'medium' : 'low'
 
     const started = performance.now()
@@ -126,6 +138,17 @@ export async function recordJevShadowDecision(store: Store, deps: JevShadowDeps,
       reason = 'jev_unavailable'
     }
 
+    // 兜底与预算只会把 shadow_mode 换成更具体的转人工原因；enforce 未开启，route 恒为 human。
+    if (reason === 'shadow_mode') {
+      if (forced) reason = 'deterministic_high_risk'
+      else if (loaded.policy.mode === 'enforce') {
+        const day = now.toISOString().slice(0, 10)
+        const used = (await store.listTenantEvents(mission.tenant)).filter((e) =>
+          e.event_type === 'JEV_DECIDED' && e.payload['route'] === 'auto' && e.occurred_at.slice(0, 10) === day).length
+        if (used >= loaded.policy.daily_auto_budget) reason = 'budget_exhausted'
+      }
+    }
+
     const record: JevDecisionV1 = {
       schema: 'cmap/jev-decision/v1',
       decision_id: `jvd_${createHash('sha256').update(approval.id).digest('hex').slice(0, 32)}`,
@@ -138,7 +161,7 @@ export async function recordJevShadowDecision(store: Store, deps: JevShadowDeps,
       declared_risk: task.risk, assessed_risk: assessed,
       effective_risk: maxRisk(floor, deterministic, assessed ?? 'low'),
       outcome, route: 'human', reason_code: reason,
-      decided_at: new Date().toISOString(),
+      decided_at: now.toISOString(),
       elapsed_ms: Math.round(performance.now() - started),
     }
     if (!validateDecision(record)) throw new Error('JEV_DECIDED 记录不符合 jev-decision v1')

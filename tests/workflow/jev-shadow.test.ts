@@ -13,7 +13,7 @@ import addFormats from 'ajv-formats'
 import {MemoryStore,type EventActor,type Mission} from '#domain-model'
 import type {MissionPlanV1} from '../../packages/domain-model/src/generated/mission-plan.ts'
 import {createDagActivities} from '../../workflows/dag-activities.ts'
-import {loadDelegationPolicy,trustedJevState} from '../../workflows/jev-shadow.ts'
+import {deterministicHighRisk,loadDelegationPolicy,trustedJevState} from '../../workflows/jev-shadow.ts'
 import {syntheticActivityDeps,syntheticRunner} from './fake-adapter.ts'
 
 const actor:EventActor={type:'system',id:'jev-shadow-test'}
@@ -46,13 +46,14 @@ const jevOk=(disposition='approve',risk='low')=>new Response(JSON.stringify({mod
   answers:{risk:choice(risk,['low','medium','high'],0.95),disposition:choice(disposition,['approve','reject','escalate'],0.97)},
   usage:{input_tokens:10,output_tokens:2}}))
 
-async function setup(t:TestContext,id:string,shadow?:{policy?:unknown;mode?:number;respond?:()=>Promise<Response>;apiKey?:string|undefined}){
+async function setup(t:TestContext,id:string,shadow?:{policy?:unknown;mode?:number;respond?:()=>Promise<Response>;apiKey?:string|undefined;env?:Record<string,string>;now?:Date}){
   const store=new MemoryStore()
   await store.createMission({mission:mission(id),actor})
   const calls:{url:string;body:Record<string,unknown>}[]=[]
   const jevShadow=shadow&&{
     policyFile:await policyFile(t,shadow.policy??policy(),shadow.mode),
     apiKey:()=>'apiKey' in shadow?shadow.apiKey:'synthetic-key',
+    ...(shadow.env?{env:shadow.env}:{}),...(shadow.now?{now:()=>shadow.now!}:{}),
     fetch:(async(url:string|URL|Request,init?:RequestInit)=>{
       calls.push({url:String(url),body:JSON.parse(String(init?.body))})
       return (shadow.respond??(async()=>jevOk()))()
@@ -108,7 +109,7 @@ test('影子记录不改审批：Jev 判通过也只写 JEV_DECIDED（route=huma
 })
 
 test('策略 mode=enforce：本次仍按影子处理，记录 shadow_mode 且不改审批', async t=>{
-  const {store,acts,taskId}=await setup(t,'mis-jev-enforce',{policy:policy({mode:'enforce'})})
+  const {store,acts,taskId}=await setup(t,'mis-jev-enforce',{policy:policy({mode:'enforce',daily_auto_budget:5})})
   assert.deepEqual(await acts.checkDagApproval(taskId),{decision:'pending'})
   const [event]=await jevEvents(store,'mis-jev-enforce')
   assert.equal(event?.payload['route'],'human')
@@ -166,4 +167,67 @@ test('未配置委托策略：完全不调用 Jev，也不写 JEV_DECIDED', asyn
   const {store,acts,taskId}=await setup(t,'mis-jev-off')
   assert.deepEqual(await acts.checkDagApproval(taskId),{decision:'pending'})
   assert.equal((await jevEvents(store,'mis-jev-off')).length,0)
+})
+
+test('确定性高风险：允许推送、YonWork 破坏性权限、重做声明风险高于 read-sensitive',()=>{
+  const approval=(permissions:unknown,declared='mutating')=>deterministicHighRisk({decision_type:'approval',declared_risk:declared as never,permissions:permissions as never})
+  assert.equal(approval({repository:{allow_push_branches:['feat/x']}}),true)
+  assert.equal(approval({repository:{allow_push_branches:[]}}),false,'空列表不算允许推送')
+  assert.equal(approval({repository:{write:true}}),false)
+  assert.equal(approval({yonwork:{clear_test_data:true}},'controlled'),true)
+  assert.equal(approval({yonwork:{gateway_control:true}},'controlled'),true)
+  assert.equal(approval({yonwork:{clear_test_data:false,gateway_control:false,chat_send:true}},'controlled'),false)
+  const retry=(declared:string)=>deterministicHighRisk({decision_type:'retry_uncertain',declared_risk:declared as never,permissions:{}})
+  assert.deepEqual(['read-meta','read-sensitive','controlled','mutating'].map(retry),[false,false,true,true])
+})
+
+test('确定性兜底落到审批闸口：允许推送一律 route=human、deterministic_high_risk、有效风险 high，即便 Jev 判低风险通过',async t=>{
+  const {store,acts,taskId}=await setup(t,'mis-jev-push',{policy:policy({mode:'enforce',daily_auto_budget:5})})
+  const getTask=store.getTask.bind(store)
+  store.getTask=async id=>{const task=await getTask(id);return task&&{...task,envelope:{...task.envelope,permissions:{...task.envelope.permissions,repository:{allow_push_branches:['feat/x']}}}}}
+  assert.deepEqual(await acts.checkDagApproval(taskId),{decision:'pending'})
+  const [event]=await jevEvents(store,'mis-jev-push')
+  assert.ok(validateDecision(event?.payload),JSON.stringify(validateDecision.errors))
+  assert.deepEqual([event?.payload['route'],event?.payload['reason_code'],event?.payload['effective_risk'],event?.payload['outcome']],['human','deterministic_high_risk','high','approve'])
+  assert.equal((await store.getTask(taskId))?.state,'APPROVAL_REQUIRED')
+})
+
+test('当日自动执行预算：按租户与 UTC 日计数 route=auto，达到上限记 budget_exhausted 转人工；确定性兜底优先',async t=>{
+  const now=new Date('2026-10-23T12:00:00.000Z')
+  const seed=async(store:MemoryStore,day:string,n:number,tenant='team-ycc')=>{
+    const id=`mis-seed-${day}-${n}-${tenant}`
+    await store.createMission({mission:{...mission(id),tenant},actor})
+    await store.appendEvent({event:{event_type:'JEV_DECIDED',event_version:1,occurred_at:`${day}T00:00:00.500Z`,mission_id:id,task_id:null,attempt:null,
+      actor:{type:'system',id:'jev:seed'},causation_id:null,correlation_id:id,trace_id:null,idempotency_key:`seed-${id}`,payload:{route:'auto',decided_at:`${day}T00:00:00.500Z`}}})
+  }
+  const reasonFor=async(id:string,budget:number,seeds:[string,number,string?][],mode='enforce')=>{
+    const {store,acts,taskId}=await setup(t,id,{policy:policy({mode,daily_auto_budget:budget}),now})
+    for(const [day,n,tenant] of seeds)for(let i=0;i<n;i++)await seed(store,day,i,tenant)
+    await acts.checkDagApproval(taskId)
+    const [event]=await jevEvents(store,id)
+    assert.equal(event?.payload['route'],'human',id)
+    return event?.payload['reason_code']
+  }
+  assert.equal(await reasonFor('mis-bud-0',0,[]),'budget_exhausted','预算 0 即不自动执行')
+  assert.equal(await reasonFor('mis-bud-hit',2,[['2026-10-23',2]]),'budget_exhausted')
+  assert.equal(await reasonFor('mis-bud-left',3,[['2026-10-23',2]]),'shadow_mode','当日已用 2 < 3，预算内；enforce 未开启仍只记影子')
+  assert.equal(await reasonFor('mis-bud-yesterday',1,[['2026-10-22',5]]),'shadow_mode','前一 UTC 日不计入')
+  assert.equal(await reasonFor('mis-bud-other-tenant',1,[['2026-10-23',5,'other-tenant']]),'shadow_mode','其他租户不计入')
+  assert.equal(await reasonFor('mis-bud-shadow-policy',0,[],'shadow'),'shadow_mode','影子策略不涉及预算')
+  const {store,acts,taskId}=await setup(t,'mis-bud-push',{policy:policy({mode:'enforce',daily_auto_budget:0}),now})
+  const getTask=store.getTask.bind(store)
+  store.getTask=async id=>{const task=await getTask(id);return task&&{...task,envelope:{...task.envelope,permissions:{...task.envelope.permissions,yonwork:{gateway_control:true}}}}}
+  await acts.checkDagApproval(taskId)
+  assert.equal((await jevEvents(store,'mis-bud-push'))[0]?.payload['reason_code'],'deterministic_high_risk')
+})
+
+test('CMAP_JEV_AUTODECIDE=off：一键回到全人工，不调用 Jev、不写 JEV_DECIDED；其他取值照常',async t=>{
+  const off=await setup(t,'mis-jev-kill',{env:{CMAP_JEV_AUTODECIDE:'off'}})
+  assert.deepEqual(await off.acts.checkDagApproval(off.taskId),{decision:'pending'})
+  assert.equal(off.calls.length,0)
+  assert.equal((await jevEvents(off.store,'mis-jev-kill')).length,0)
+  assert.equal((await off.store.listPendingApprovals('mis-jev-kill')).length,1)
+  const on=await setup(t,'mis-jev-kill-on',{env:{CMAP_JEV_AUTODECIDE:'on'}})
+  await on.acts.checkDagApproval(on.taskId)
+  assert.equal(on.calls.length,1)
 })

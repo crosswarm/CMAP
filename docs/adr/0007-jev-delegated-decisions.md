@@ -86,8 +86,11 @@
 - [x] 策略加载与校验（文件权限、过期、租户、sha256）：`workflows/jev-shadow.ts` 的 `loadDelegationPolicy`；未设 `CMAP_DELEGATION_POLICY_FILE` 时 Worker 不注入，完全不调用 Jev
 - [x] Jev 调用 Activity：影子模式在 dag/v1 `checkDagApproval` 首次遇到未决审批时调用一次（按幂等键 `jev-decided:<approval_id>` 去重），客户端抽到 `scripts/jev-client.ts`（与 `jev-approval.mjs` 共用接口、15 秒超时与密钥读取），输入只取可信字段
 - [ ] `JEV_DECIDED` 事件与 `Approval.decided_by = jev:<模型版本>`：`JEV_DECIDED` 已实现（payload 经 `jev-decision.v1` 校验，actor 为 `jev:<模型>`）；`decided_by` 属 enforce，未实现
-- [ ] 审批闸口、`selectAdapter`、执行不确定三处接入，以及兜底规则与当日预算：只接入了 dag/v1 审批闸口（影子）；其余未开始
+- [ ] 审批闸口、`selectAdapter`、执行不确定三处接入：只接入了 dag/v1 审批闸口（影子）；`selectAdapter` 与执行不确定未接入
+- [x] 确定性兜底（审批闸口）：`deterministicHighRisk`（`workflows/jev-shadow.ts`）对允许推送分支（实现不区分审批 scope，比 ADR 文字更严）、YonWork `clear_test_data` / `gateway_control` 强制转人工并记 `deterministic_high_risk`、有效风险 high，Jev 判通过也不改。执行不确定重做（声明风险高于 `read-sensitive`）的判定函数已在同一函数内，但执行不确定路径尚未调用它
+- [x] 当日自动执行预算：策略为 `enforce` 时，按租户与 UTC 日统计 `route=auto` 的 `JEV_DECIDED`，达到 `daily_auto_budget` 记 `budget_exhausted` 转人工。enforce 尚不产生 `route=auto`，所以实际计数恒为 0，只有 `daily_auto_budget=0` 会触发；闸口由单测覆盖，未在真实链路上触发过
+- [x] `CMAP_JEV_AUTODECIDE=off` 一键回到全人工：Worker 不调用 Jev、不写 `JEV_DECIDED`，审批照常等真人（读取 Worker 进程环境，需重启 Worker 生效）
 - [ ] WebUI：区分 Jev 决定与真人决定；人工队列展示 Jev 评估：审批详情已单独显示影子决定（决定、自评风险、置信度、理由码），与「Jev 辅助判断」分开；enforce 下的区分未做
 - [x] 影子模式一致率统计：`node scripts/jev-shadow-stats.mjs`（总数、可比较数、一致数、Jev 通过而真人拒绝数）
 
-影子模式的记录一律 `route=human`、`reason_code=shadow_mode`（策略写 enforce 也如此）；Jev 不可用、超时或缺 key 记 `jev_unavailable`，输出不合法记 `jev_invalid_output`，审批照常等真人。2026-10-22 用一条合成 controlled 审批调用真实 Jev：`jev-1.14.0`，918ms，outcome=approve、自评 low、置信度 0.3（两问取小），审批仍 pending。本机网络下 Node 需 `NODE_USE_ENV_PROXY=1` 走代理，否则 TypeSafe 返回 451（地区不可用），记录为 `jev_unavailable`。
+影子模式的记录一律 `route=human`（策略写 enforce 也如此），`reason_code` 默认 `shadow_mode`；触发确定性兜底时为 `deterministic_high_risk`，enforce 策略下当日预算已用尽时为 `budget_exhausted`；Jev 不可用、超时或缺 key 记 `jev_unavailable`，输出不合法记 `jev_invalid_output`，审批照常等真人。2026-10-22 用一条合成 controlled 审批调用真实 Jev：`jev-1.14.0`，918ms，outcome=approve、自评 low、置信度 0.3（两问取小），审批仍 pending。本机网络下 Node 需 `NODE_USE_ENV_PROXY=1` 走代理，否则 TypeSafe 返回 451（地区不可用），记录为 `jev_unavailable`。
