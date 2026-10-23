@@ -92,9 +92,11 @@ printf 'KC_DB_PASSWORD=%s\nKC_BOOTSTRAP_ADMIN_USERNAME=cmap-admin\nKC_BOOTSTRAP_
 管理入口只在 qcl 回环上：
 
 ```bash
-ssh -o IdentityAgent=none -o BatchMode=yes -N -L 8180:127.0.0.1:8180 qcl
-# 浏览器打开 http://127.0.0.1:8180/auth/admin/
+ssh -o IdentityAgent=none -o BatchMode=yes -N -L 18180:127.0.0.1:8180 qcl
+# 浏览器打开 http://127.0.0.1:18180/auth/admin/
 ```
+
+本地端口用 18180：8180 留给本地开发栈的 Keycloak，两者同时在用时转发会绑不上或连错实例。
 
 建用户（tenant 是用户属性，角色按需授予，互不蕴含）：在 qcl 上用 master realm 的 `admin-cli` 取管理 token（口令从 `/opt/cmap-edge/.env` 读，经 stdin 传给 curl，不上命令行），然后：
 
@@ -102,6 +104,8 @@ ssh -o IdentityAgent=none -o BatchMode=yes -N -L 8180:127.0.0.1:8180 qcl
 - `POST /auth/admin/realms/cmap/users/<id>/role-mappings/realm`：角色对象数组（从 `GET /auth/admin/realms/cmap/roles` 取）
 
 临时口令只写到发给本人的 0600 文件里。
+
+机器账号（服务账号客户端，client credentials）：`aud`、`tenant`、`roles` 三个映射器挂在**客户端**上（见 realm 文件里 `cmap-web` 的 `protocolMappers`），不是 realm 级的。新建客户端不会继承它们，须在该客户端上把三个映射器逐个按同样配置复制一遍；缺 `aud` 或 `tenant` 时 API 拒绝它的 token，缺 `roles` 时 token 能通过但没有任何角色（所有需要角色的操作都被拒）。
 
 ## CrossMini：一次性准备
 
@@ -125,6 +129,7 @@ CMAP_OIDC_ISSUER=https://cmap.spux.cn/auth/realms/cmap
 CMAP_OIDC_AUDIENCE=cmap-api
 CMAP_OIDC_JWKS_URL=https://cmap.spux.cn/auth/realms/cmap/protocol/openid-connect/certs
 CMAP_PUBLIC_ORIGIN=https://cmap.spux.cn
+CMAP_GATEWAY_KEY_FILE=/Users/<you>/.cmap/edge/gateway.key
 TEMPORAL_ADDRESS=localhost:7233
 TEMPORAL_NAMESPACE=default
 TEMPORAL_TASK_QUEUE=cmap-main
@@ -146,7 +151,11 @@ RUNNER_ALLOWED_OWNERS=<cross 在 Keycloak 的用户 ID，即 token 的 sub>
 RUNNER_ALLOWED_CAPABILITIES=code.analyze
 RUNNER_MAX_RISK=read-sensitive
 CODEX_BIN=/Users/<you>/.homebrew/bin/codex
+CMAP_PERMIT_KEY_FILE=/Users/<you>/.cmap/edge/permit.key
+CMAP_GATEWAY_AGENT_ID=codex@gateway
 ```
+
+- `CMAP_GATEWAY_KEY_FILE`（API）签网关应答，配置后才启用 `/v1/gateway/*`；`CMAP_PERMIT_KEY_FILE`（Worker）签派发许可，两者必须是不同文件。不存在时首次启动各自生成（0600）。出站 runner 登记时自动拿到网关公钥，许可公钥则要手动导出给它：按 [remote-runner.md](remote-runner.md) 的导出命令生成 `permit.pub`，拷到 runner 主机并设为其 `CMAP_PERMIT_PUBLIC_KEY_FILE`。轮换 `permit.key` 后须同步更新所有出站 runner 上的 `permit.pub`。
 
 - OIDC 模式下 Mission 的 owner 是 token 的 `sub`，不是用户名；准入白名单里写用户名会让本人的任务全部 `OWNER_DENIED`。
 - `CMAP_WORK_ROOT` 必须在发布目录之外，否则切换发布会丢掉运行记录与产物。
