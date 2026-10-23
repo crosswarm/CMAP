@@ -14,7 +14,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
 import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import type {
@@ -337,9 +337,10 @@ export class CodexAdapter implements AgentAdapter {
     // TMPDIR 与 -C 都可能含 macOS 卷别名；沙箱可写根必须是物理路径。
     const physicalWorkDir = await realpath(workDir)
     // -o 由沙箱外的 codex 进程写入且会跟随符号链接：结果文件不能放在 Agent 可写的工作区。
-    // 无 runsDir（standalone）时用本进程独有的临时目录（0700），cleanup 时删除。
+    // 无 runsDir（standalone）时用本进程独有的目录（0700），cleanup 时删除。它必须在沙箱不可写的位置：
+    // workspace-write 通常放行 TMPDIR，放那里 Agent 能抢先替换结果文件，所以放 HOME 下 CMAP 自有目录。
     const physicalTmpDir = await realpath(tmpdir())
-    const resultDir = this.#runsDir ?? (await mkdtemp(join(physicalTmpDir, 'cmap-codex-result-')))
+    const resultDir = this.#runsDir ?? (await makeStandaloneResultDir())
     const resultFile = join(resultDir, `.cmap-result-${envelope.identity.task_id}.json`)
     const prompt = renderTaskPrompt(envelope)
     const binding = this.prepareBinding(envelope, ctx)
@@ -802,6 +803,12 @@ const uncertainRun = (binding: RemoteTaskBinding): AdapterError =>
     false,
     'binding-not-found',
   )
+
+const makeStandaloneResultDir = async (): Promise<string> => {
+  const root = join(homedir(), '.cmap', 'codex-results')
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  return mkdtemp(join(root, 'result-'))
+}
 
 const readRecord = async (runsDir: string, taskId: string): Promise<RunRecord | null> => {
   try {

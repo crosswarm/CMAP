@@ -20,6 +20,7 @@ import { normalizeAgentOutput } from '../../packages/adapter-sdk/src/structured-
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter, syntheticRunner, syntheticActivityDeps, syntheticAdapterAuthorization } from './fake-adapter.ts'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
+import '../adapter/isolated-home.ts'
 
 const ACTOR = { type: 'system', id: 'test' } as const
 const SYNTHETIC_SECRET = ['AKIA', '1234567890ABCDEF'].join('')

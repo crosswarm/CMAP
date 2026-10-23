@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import type { TaskEnvelopeV1 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
+import './isolated-home.ts'
 
 const envelope = (taskId: string): TaskEnvelopeV1 => ({
   schema: 'cmap/task-envelope/v1',

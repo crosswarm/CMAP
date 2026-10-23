@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import type { QuotaSnapshotV1 } from '#domain-model'
 import { cachedQuotaProbe, probeClaudeQuota, probeCodexQuota, probeKimiQuota } from '../../packages/adapter-sdk/src/quota-probe.ts'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
+import './isolated-home.ts'
 
 const RAW_ACCOUNT = 'acct-0000-raw-id'
 const RAW_EMAIL = 'someone@example.invalid'

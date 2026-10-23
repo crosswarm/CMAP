@@ -9,6 +9,7 @@ import type { AgentAdapter } from '#adapter-sdk'
 import type { TaskEnvelopeV1 } from '#domain-model'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
+import './isolated-home.ts'
 
 const envelope = (taskId: string): TaskEnvelopeV1 => ({
   schema: 'cmap/task-envelope/v1',

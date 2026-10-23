@@ -74,7 +74,7 @@ spawn 出的 worker **不继承任何上下文**——所以任务信封必须�
 | `review-decision.v1` | 返工契约 | ✅ 已实现 |
 | `codex-output.v1` | 传给 Agent 的输出格式 | ✅ 已实现 |
 | `dispatch-permit.v1` | 本机受管启动的短期签名凭据 | ✅ 本机契约；远程身份仍未实现，见 [派发凭据](dispatch-permit.md) |
-| `remote-runner.v1` | CrossMini ↔ lap runner 守护进程的派发/状态/结果/取消消息（ADR-0006） | 🟡 已实现，本机双端口模拟验证；两机未部署，见 [远程 runner](remote-runner.md) |
+| `remote-runner.v1` | CrossMini ↔ lap runner 守护进程的派发/状态/结果/取消消息（ADR-0006） | ✅ 已实现；本机双端口模拟与 2026-10-22 两机（CrossMini + lap）7 个场景复测通过，见 [远程 runner](remote-runner.md#发布复测2026-10-22) |
 
 ### 为什么 Agent 输出与账本格式必须分开
 

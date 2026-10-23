@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import type { DispatchContext } from '#adapter-sdk'
 import type { RemoteTaskBinding, TaskEnvelopeV1 } from '#domain-model'
 import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
+import './isolated-home.ts'
 
 const SCHEMA = join(process.cwd(), 'schemas/codex-output.v1.schema.json')
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex')

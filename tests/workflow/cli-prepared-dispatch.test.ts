@@ -12,6 +12,7 @@ import { CodexAdapter } from '../../adapters/codex-adapter/src/index.ts'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { syntheticRunner, syntheticActivityDeps, syntheticAdapterAuthorization } from './fake-adapter.ts'
+import '../adapter/isolated-home.ts'
 
 const ACTOR = { type: 'system', id: 'cli-prepared-test' } as const
 const NODE = '/Users/cfone/.nvm/versions/node/v24.13.0/bin/node'
