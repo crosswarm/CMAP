@@ -37,6 +37,7 @@ import {
   renderTaskPrompt,
 } from '../../../packages/adapter-sdk/src/structured-output.ts'
 import { providerBaseEnv } from '../../../packages/adapter-sdk/src/provider-env.ts'
+import { pushGuardEnv } from '../../../packages/adapter-sdk/src/push-guard.ts'
 import { prepareKimiRun, resolveKimiBin } from './runtime.ts'
 
 const ADAPTER_ID = 'kimi-adapter'
@@ -520,6 +521,9 @@ const childEnv = (
   return providerBaseEnv(process.env, {
     KIMI_CODE_HOME: runtime.homeDir,
     TMPDIR: runtime.runtimeDir,
+    // 沙箱拒读 HOME：~/.gitconfig 得 EPERM 时 git 直接 fatal（实测），任务也不该继承个人 git 配置
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    ...pushGuardEnv(envelope),
     CMAP_TASK_ID: envelope.identity.task_id,
     CMAP_TRACE_ID: ctx.trace_id,
   })

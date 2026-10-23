@@ -47,6 +47,7 @@ import {
   renderTaskPrompt,
 } from '../../../packages/adapter-sdk/src/structured-output.ts'
 import { codexProviderEnv } from '../../../packages/adapter-sdk/src/provider-env.ts'
+import { GIT_HOOKS_DIR, pushGuardEnv } from '../../../packages/adapter-sdk/src/push-guard.ts'
 
 const ADAPTER_ID = 'codex-adapter'
 const AGENT_ID = 'codex'
@@ -188,6 +189,10 @@ export const buildCodexArgs = (
     '--ephemeral',
     '--json',
     ...permissionArgs(chooseSandbox(envelope), opts.homeDenials ?? ['~']),
+    // 沙箱内命令的环境只认 shell_environment_policy（实测 codex 不透传进程环境里的任意变量）。
+    // GIT_CONFIG_GLOBAL：权限档拒读 HOME，git 读 ~/.gitconfig 得 EPERM 会直接 fatal；任务也不该继承个人 git 配置。
+    '-c', `shell_environment_policy.set={${Object.entries({ GIT_CONFIG_GLOBAL: '/dev/null', ...pushGuardEnv(envelope) })
+      .map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(',')}}`,
     '-C', opts.workDir,
     '--skip-git-repo-check',
     '--output-schema', opts.outputSchemaPath,
@@ -399,7 +404,7 @@ export class CodexAdapter implements AgentAdapter {
     const physicalTmpDir = await realpath(tmpdir())
     const home = await realpath(homedir())
     const homeDenials = await homeReadDenials(home, [
-      physicalWorkDir, physicalTmpDir, ...(await homeToolchainRoots(home, process.env['PATH'])),
+      physicalWorkDir, physicalTmpDir, GIT_HOOKS_DIR, ...(await homeToolchainRoots(home, process.env['PATH'])),
     ])
     const resultDir = this.#runsDir ?? (await makeStandaloneResultDir())
     const resultFile = join(resultDir, `.cmap-result-${envelope.identity.task_id}.json`)
@@ -485,8 +490,6 @@ export class CodexAdapter implements AgentAdapter {
           // 导致连接看似成功却永远等不到有效响应（静默挂起）。
           NO_PROXY: 'localhost,127.0.0.1,::1',
           no_proxy: 'localhost,127.0.0.1,::1',
-          // 权限档拒绝读 HOME，git 读 ~/.gitconfig 得 EPERM 会直接 fatal（实测）；任务也不该继承个人 git 配置
-          GIT_CONFIG_GLOBAL: '/dev/null',
           CMAP_TASK_ID: envelope.identity.task_id,
           CMAP_TRACE_ID: ctx.trace_id,
         }),

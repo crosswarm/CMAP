@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 
 import type { RemoteTaskBinding, TaskEnvelopeV1 } from '#domain-model'
 import { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit } from '#domain-model'
+import { GIT_HOOKS_DIR } from '../../packages/adapter-sdk/src/push-guard.ts'
 import type { DispatchContext } from '#adapter-sdk'
 import { AdapterError } from '#adapter-sdk'
 import { KimiAdapter } from '../../adapters/kimi-adapter/src/index.ts'
@@ -245,7 +246,12 @@ test('sets only runtime env needed by Kimi and does not leak host secrets', asyn
   KIMI_CODE_HOME: process.env.KIMI_CODE_HOME,
   TMPDIR: process.env.TMPDIR,
   LEAK: process.env.CMAP_SHOULD_NOT_LEAK,
-  MODEL_OVERRIDE: process.env.KIMI_MODEL_OVERRIDE
+  MODEL_OVERRIDE: process.env.KIMI_MODEL_OVERRIDE,
+  GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+  GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
+  GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+  CMAP_PUSH_ALLOW: process.env.CMAP_PUSH_ALLOW,
+  PROFILE_READS_HOOKS: process.env.FAKE_SANDBOX_PROFILE.includes('(allow file-read-data (subpath ' + JSON.stringify(${JSON.stringify(GIT_HOOKS_DIR)}) + '))')
 }))
 console.log(JSON.stringify({ role: 'assistant', content: JSON.stringify({
   status: 'completed',
@@ -275,6 +281,12 @@ console.log(JSON.stringify({ role: 'assistant', content: JSON.stringify({
   assert.match(String(seen['TMPDIR']), /cmap-kimi-/)
   assert.equal(seen['LEAK'], undefined)
   assert.equal(seen['MODEL_OVERRIDE'], undefined)
+  // P4-06：推送限制 hook；git 不读个人配置（沙箱拒读 HOME 时 ~/.gitconfig 会让 git 直接 fatal）
+  assert.equal(seen['GIT_CONFIG_GLOBAL'], '/dev/null')
+  assert.equal(seen['GIT_CONFIG_KEY_0'], 'core.hooksPath')
+  assert.equal(seen['GIT_CONFIG_VALUE_0'], GIT_HOOKS_DIR)
+  assert.equal(seen['CMAP_PUSH_ALLOW'], '')
+  assert.equal(seen['PROFILE_READS_HOOKS'], true, '沙箱拒读 HOME，hook 目录须单独放行读取（不放行写）')
 })
 
 test('nonzero exit cannot return completed even when output is valid', async () => {

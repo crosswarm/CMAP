@@ -75,7 +75,7 @@ A 成员派发一个 `mutating` 任务到 B 的 runner，任务内容是"读取 
 |---|---|
 | runner 准入策略：`RunnerAdmission` 声明接受哪些 tenant/owner/capability，**默认拒绝、白名单放行** | 🟡 本机复制/加锁/派发前强制检查及真实拒绝已验证；远程身份仍待 P4，见 [验证](verification-runner-admission-2026-09-22.md) |
 | Adapter 显式指定沙箱档，绝不继承本机 `danger-full-access` | ✅ 已实现（Codex 自 P4-05b 起用显式 `default_permissions` 权限档代替 `-s`，见 T7） |
-| 每个代码任务独立 git worktree，禁止推 `main`/`release/*` | 🟡 信封字段已定义，强制待 P1 |
+| 每个代码任务独立 git worktree，禁止推 `main`/`release/*` | 🟡 独立 worktree 未实现（工作区是 `<CMAP_WORK_ROOT>/<taskId>` 普通目录）。推送限制（P4-06）：Codex 与 Kimi 的 Agent 进程经命令级 git 配置（Codex 走 `shell_environment_policy.set`，Kimi 走子进程环境）把 `core.hooksPath` 指向随代码发布的 `packages/adapter-sdk/git-hooks/pre-push`，沙箱对它只读；仓库自己的 `core.hooksPath` 盖不住。规则：信封无 `allow_push_branches` 一律拒绝；须推到 `refs/heads/<分支>`、匹配 allow 且不匹配 `deny_push`（缺省 `main`、`release/*`）。实测（2026-10-23）——改动前：Codex `-s workspace-write` 推工作区外的本地 bare 远端失败（不可写）、推 GitHub 失败（沙箱无网络），但推沙箱可写位置（工作区、TMPDIR、`/tmp`）的远端 `main`/`release/*` 成功；Kimi 沙箱推工作区外 bare 远端失败（git 先因 `~/.gitconfig` 不可读 fatal，绕开后写入被拒），网络可达（`git push` 到 GitHub 走到要用户名一步），`~/.ssh` 不可读、子进程环境无 `SSH_AUTH_SOCK`；keychain 能否取到凭据**未能判定**（本会话在沙箱外也无权访问 keychain，-25308）。改动后：真实 `codex exec` 与真实 Kimi 各一次，工作区内 bare 远端的 `main`、`release/1.0` 被 hook 拒绝、`feat/x`（allow `feat/*`）推送成功、hook 目录不可写。CI：`tests/adapter/push-guard.test.ts`、`tests/api/p4-acceptance.test.ts` P4-06（macOS 上真实 `sandbox-exec` / `codex sandbox`）。**残余**：hook 只防失控但非恶意的推送——`git push --no-verify`（两种 Agent 均实测可推）或清掉环境变量即可绕过；硬边界仍是沙箱（Codex 无网络、两者不能写工作区外的仓库）与 Agent 拿不到推送凭据，Kimi 网络开放，若凭据可得（keychain 未判定）即可推任意分支；服务端分支保护未纳入 CMAP。Kimi 因 `GIT_CONFIG_GLOBAL=/dev/null` 在沙箱内恢复可用 git |
 | `permissions.forbidden` 显式禁止项 | ✅ Schema 已实现 |
 | 跨租户任务强制覆盖为受限沙箱档 | ⬜ P4 |
 
@@ -156,7 +156,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 |---|---|
 | `context.paths` 禁绝对路径与 `..`（Schema pattern 强制） | ✅ 已实现 + 测试 |
 | `context.ref` 必须 40 位 commit SHA，杜绝分支名歧义 | ✅ 已实现 + 测试 |
-| 沙箱限制文件系统可达范围 | 🟡 只限 HOME 内。实测（2026-10-23，codex 0.159.2）：旧做法 `codex exec -s workspace-write` 与 `-s read-only` 都能列出 `~/.ssh`、读到 `~/.codex/auth.json`。现 Codex 改用 `-c default_permissions="cmap"` 权限档（继承 `:workspace` / `:read-only`），拒绝 HOME 下除工作区、TMPDIR、PATH 中 HOME 下的工具链目录（Homebrew 前缀整体）及其祖先目录以外的全部条目（`homeReadDenials`）；不整个拒绝 `~`，因为工作区在 HOME 下时祖先目录元数据不可读会让 `sh` 的 cd 与 node 的 realpath 失败。子进程设 `GIT_CONFIG_GLOBAL=/dev/null`（`~/.gitconfig` 不可读时 git 直接 fatal）。真实 `codex exec`（HOME 下工作区）：`~/.ssh`、`~/.codex/auth.json`、`~/.gitconfig`、其他仓库、相邻目录均拒绝，工作区读写、TMPDIR、git status、node 正常，控制面 8785/5433 与外网仍不可达；`scripts/e2e-single-hop.mjs` 真实跑通。Kimi seatbelt 早已拒绝读 HOME 数据（工作区、运行时、凭据、`kimi` 所在目录除外），`sandbox-exec` 实测同上。CI 断言见 `tests/api/p4-acceptance.test.ts` P4-05b（macOS 上真实跑 `sandbox-exec` 与 `codex sandbox`，不调用模型）。**残余**：HOME 以外全部可读（`/tmp`、其他卷、`/etc` 等）；TMPDIR 整体可读写，同一 TMPDIR 下其他任务的临时工作区可见；HOME 根与祖先目录可列出条目名；启动后新建的 HOME 条目不在拒绝清单内；Kimi 可读自身凭据目录；HOME 下工具链只放行 PATH 所列目录，其他位置的工具在沙箱内不可用 |
+| 沙箱限制文件系统可达范围 | 🟡 只限 HOME 内。实测（2026-10-23，codex 0.159.2）：旧做法 `codex exec -s workspace-write` 与 `-s read-only` 都能列出 `~/.ssh`、读到 `~/.codex/auth.json`。现 Codex 改用 `-c default_permissions="cmap"` 权限档（继承 `:workspace` / `:read-only`），拒绝 HOME 下除工作区、TMPDIR、PATH 中 HOME 下的工具链目录（Homebrew 前缀整体）及其祖先目录以外的全部条目（`homeReadDenials`）；不整个拒绝 `~`，因为工作区在 HOME 下时祖先目录元数据不可读会让 `sh` 的 cd 与 node 的 realpath 失败。沙箱内命令设 `GIT_CONFIG_GLOBAL=/dev/null`（`~/.gitconfig` 不可读时 git 直接 fatal；Codex 经 `shell_environment_policy.set` 注入，实测 codex 不透传进程环境中的任意变量）。真实 `codex exec`（HOME 下工作区）：`~/.ssh`、`~/.codex/auth.json`、`~/.gitconfig`、其他仓库、相邻目录均拒绝，工作区读写、TMPDIR、git status、node 正常，控制面 8785/5433 与外网仍不可达；`scripts/e2e-single-hop.mjs` 真实跑通。Kimi seatbelt 早已拒绝读 HOME 数据（工作区、运行时、凭据、`kimi` 所在目录除外），`sandbox-exec` 实测同上。CI 断言见 `tests/api/p4-acceptance.test.ts` P4-05b（macOS 上真实跑 `sandbox-exec` 与 `codex sandbox`，不调用模型）。**残余**：HOME 以外全部可读（`/tmp`、其他卷、`/etc` 等）；TMPDIR 整体可读写，同一 TMPDIR 下其他任务的临时工作区可见；HOME 根与祖先目录可列出条目名；启动后新建的 HOME 条目不在拒绝清单内；Kimi 可读自身凭据目录；HOME 下工具链只放行 PATH 所列目录，其他位置的工具在沙箱内不可用 |
 | runner 侧校验实际读取未超出声明范围 | ⬜ P4 |
 
 ### T8 — 资源耗尽与成本失控
@@ -291,7 +291,7 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 - [x] Agent 尝试自批授权（P4-03：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 与 Codex（workspace-write、read-only）均已实测挡住回环端口，见 T4；YonWork 不在本机执行任意命令）
 - [x] `controlled` 的批准放行了同批次 `mutating` 任务（P4-04：mutating 无自身审批或审批 scope 不符即 `APPROVAL_INVALID`）
 - [ ] 任务读取 `context.paths` 声明外的路径（P4-05a：契约拒绝绝对路径与 `..`；P4-05b **部分覆盖**：Codex 权限档与 Kimi seatbelt 拒绝读取 HOME 下工作区以外的路径，真实 codex exec 与 sandbox-exec 已验证；仍未按 `context.paths` 逐路径校验，HOME 以外与 TMPDIR 仍可读，见 T7）
-- [ ] Agent 推送 `main` 或 `release/*`（P4-06 **未覆盖**：`deny_push` 只是信封字段，CMAP 无强制执行点，见 T1）
+- [ ] Agent 推送 `main` 或 `release/*`（P4-06 **部分覆盖**：CMAP pre-push hook 按 `allow_push_branches` / `deny_push` 拒绝，真实 Codex 与 Kimi 各验证一次；`--no-verify` 可绕过，硬边界靠沙箱与无推送凭据，Kimi 网络开放且 keychain 未判定，见 T1）
 - [x] 结果中的 `task_id` 与派发信封不符（P4-07：Agent 输出带身份字段 `RESULT_INVALID`，身份取自信封；网关回报他任务 `INVALID_REQUEST`、他 runner `LEASE_UNKNOWN`）
 - [x] Agent 自报哈希与文件实际内容不符（P4-08：`EVIDENCE_HASH_MISMATCH`）
 - [x] 声明的证据文件不存在却判定成功（P4-09：`EVIDENCE_FILE_MISSING`；缺必需角色改判 failed）

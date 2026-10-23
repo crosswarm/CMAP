@@ -1,0 +1,20 @@
+#!/bin/sh
+# CMAP 托管的 pre-push（P4-06）：按任务信封 permissions.repository 拒绝推送。
+# 由 Adapter 经 GIT_CONFIG_* 注入 core.hooksPath；规则见 packages/adapter-sdk/src/push-guard.ts。
+# CMAP_PUSH_ALLOW / CMAP_PUSH_DENY 是空白分隔的 glob 模式；未设置 allow 即一律拒绝。
+set -f
+deny=${CMAP_PUSH_DENY-main release/*}
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  branch=${remote_ref#refs/heads/}
+  ok=
+  if [ "$branch" != "$remote_ref" ]; then
+    for p in $CMAP_PUSH_ALLOW; do case $branch in $p) ok=1 ;; esac; done
+    for p in $deny; do case $branch in $p) ok= ;; esac; done
+  fi
+  if [ -z "$ok" ]; then
+    echo "cmap: 拒绝推送 $remote_ref（任务信封 permissions.repository 未允许）" >&2
+    status=1
+  fi
+done
+exit $status

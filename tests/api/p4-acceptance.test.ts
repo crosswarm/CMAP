@@ -12,7 +12,7 @@ import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:cryp
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { Ajv2020 } from 'ajv/dist/2020.js'
@@ -31,7 +31,8 @@ import { assertCurrentTaskApproval } from '../../workflows/runner-admission.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { FileFakeAdapter, syntheticActivityDeps, syntheticRunner } from '../workflow/fake-adapter.ts'
 import { scanZeroHit } from '../../scripts/p4-zero-hit.ts'
-import { buildCodexArgs, homeReadDenials } from '../../adapters/codex-adapter/src/index.ts'
+import { buildCodexArgs, homeReadDenials, homeToolchainRoots } from '../../adapters/codex-adapter/src/index.ts'
+import { GIT_HOOKS_DIR, pushGuardEnv } from '../../packages/adapter-sdk/src/push-guard.ts'
 import { buildKimiSandbox } from '../../adapters/kimi-adapter/src/runtime.ts'
 
 const execFileP = promisify(execFile)
@@ -385,7 +386,55 @@ describe('P4 安全验收清单：12 项拒绝用例', () => {
     }
   })
 
-  test.todo('P4-06 Agent 推送 main 或 release/*——未覆盖：信封 deny_push 只是字段，CMAP 无强制执行点；是否能推取决于 Agent 沙箱网络与凭据，未核实（威胁模型 T1 第 3 行 🟡）')
+  test('P4-06 Agent 推送 main 或 release/* 被 CMAP pre-push hook 拒绝，允许的分支照常（本地 bare 远端；既有：adapter/push-guard.test）', async (t) => {
+    const base = await realpath(tmpdir())
+    const ws = await mkdtemp(join(base, 'p4-06-'))
+    const probeFile = join(GIT_HOOKS_DIR, '.p4-06-probe')
+    t.after(() => Promise.all([rm(ws, { recursive: true, force: true }), rm(probeFile, { force: true })]))
+    const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' }
+    const git = (cwd: string, ...args: string[]) => execFileP('git', args, { cwd, env: gitEnv })
+    // 远端放在工作区内：沙箱允许写它，被拒只能是 hook 所致（工作区外的远端两种沙箱本就写不了）
+    const setup = async () => {
+      await rm(join(ws, 'repo'), { recursive: true, force: true })
+      await rm(join(ws, 'remote.git'), { recursive: true, force: true })
+      await git(ws, 'init', '-q', '--bare', 'remote.git')
+      await git(ws, 'init', '-q', '-b', 'main', 'repo')
+      await git(join(ws, 'repo'), '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init')
+      await git(join(ws, 'repo'), 'remote', 'add', 'origin', join(ws, 'remote.git'))
+    }
+    const probe = `cd repo; for r in main release/1.0 feat/x; do git push -q origin HEAD:$r 2>&1 | grep -q 'cmap: 拒绝推送' && echo "REJECTED $r" || echo "PUSHED $r"; done; ` +
+      `: > '${probeFile}' 2>/dev/null && echo HOOK_DIR_WRITABLE || echo HOOK_DIR_READONLY`
+    const lines = (out: string) => out.split('\n').filter((l) => /^(REJECTED|PUSHED|HOOK_DIR)/.test(l))
+    const envFor = (repository: Record<string, unknown>) => ({ ...task('t-06', 'mis-06').envelope, permissions: { forbidden: [], repository } }) as TaskEnvelopeV1
+    const guard = pushGuardEnv(envFor({ allow_push_branches: ['feat/*'] }))
+
+    // 无沙箱：信封未允许推送（缺省）时三者全拒；允许 feat/* 时只放行 feat/x
+    await setup()
+    assert.deepEqual(lines((await execFileP('/bin/sh', ['-c', probe], { cwd: ws, env: { ...gitEnv, ...pushGuardEnv(envFor({})) } })).stdout).slice(0, 3),
+      ['REJECTED main', 'REJECTED release/1.0', 'REJECTED feat/x'])
+    await rm(probeFile, { force: true })
+    const sandboxed = ['REJECTED main', 'REJECTED release/1.0', 'PUSHED feat/x', 'HOOK_DIR_READONLY']
+    if (process.platform !== 'darwin') return t.diagnostic('非 macOS：只验证 hook 本身')
+
+    // Kimi：真实 sandbox-exec 跑 buildKimiSandbox 生成的 profile（hook 目录只读放行）
+    await setup()
+    const rt = join(ws, 'rt')
+    await mkdir(rt)
+    const profile = buildKimiSandbox({ workDir: ws, runtimeDir: rt, credentialDir: rt, oauthDir: rt, userHome: await realpath(homedir()), bin: '/bin/sh' }, [], [GIT_HOOKS_DIR])
+    const kimi = await execFileP('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', probe], { cwd: ws, env: { ...gitEnv, ...guard, PATH: '/usr/bin:/bin' } })
+    assert.deepEqual(lines(kimi.stdout), sandboxed, 'Kimi')
+
+    // Codex：真实 `codex sandbox` 套用 Adapter 的权限档与 shell 环境（hook 规则只经参数注入，不靠进程环境）；本机无 codex 则跳过
+    try { await execFileP('codex', ['--version']) } catch { return t.diagnostic('无 codex CLI：跳过 Codex 沙箱') }
+    await setup()
+    const home = await realpath(homedir())
+    const args = buildCodexArgs(envFor({ allow_push_branches: ['feat/*'] }), { workDir: ws, resultFile: '/r', outputSchemaPath: '/s', prompt: 'p',
+      homeDenials: await homeReadDenials(home, [ws, base, GIT_HOOKS_DIR, ...(await homeToolchainRoots(home, process.env['PATH']))]) })
+    const perms = args.filter((a, i) => args[i - 1] === '-c' && /^(permissions\.cmap\.|shell_environment_policy\.)/.test(a)).flatMap((a) => ['-c', a])
+    const codex = await execFileP('codex', ['sandbox', ...perms, '-P', 'cmap', '-C', ws, '--', '/bin/sh', '-c', probe],
+      { cwd: ws, env: { ...process.env, TMPDIR: base } })
+    assert.deepEqual(lines(codex.stdout), sandboxed, 'Codex')
+  })
 
   test('P4-07 结果中的 task_id 与派发信封不符（既有：contract/codex-output.test「不含身份字段」、workflow/dispatch.test「身份字段由控制面填充」、remote-runner.test）', async () => {
     const env = { identity: { mission_id: 'mis-a', task_id: 't-a', idempotency_key: 'k', revision: 1 },

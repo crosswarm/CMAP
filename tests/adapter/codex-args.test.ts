@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 import { buildCodexArgs, homeReadDenials, homeToolchainRoots, InvalidEffortError } from '../../adapters/codex-adapter/src/index.ts'
+import { GIT_HOOKS_DIR } from '../../packages/adapter-sdk/src/push-guard.ts'
 
 const SHA40 = 'e35a48a1b2c3d4e5f60718293a4b5c6d7e8f9012'
 
@@ -167,6 +168,15 @@ describe('读取范围（P4-05b / T7）', () => {
   test('拒绝清单按路径逐条落成 TOML 键（JSON 字符串转义即 TOML 基本字符串）', () => {
     const c = configs(buildCodexArgs(envelope(), { ...opts, homeDenials: ['/h/.ssh', '/h/a "b"'] }))
     assert.ok(c.includes('permissions.cmap.filesystem={"/h/.ssh"="deny","/h/a \\"b\\""="deny"}'), JSON.stringify(c))
+  })
+})
+
+describe('沙箱内 git 环境（P4-05b / P4-06）', () => {
+  test('经 shell_environment_policy.set 注入：不读个人 git 配置，hooksPath 指向 CMAP pre-push，信封推送规则', () => {
+    const withRepo = { ...envelope(), permissions: { forbidden: [], repository: { allow_push_branches: ['feat/*'] } } } as TaskEnvelopeV1
+    const set = configs(buildCodexArgs(withRepo, opts)).find((c) => c.startsWith('shell_environment_policy.set='))
+    assert.equal(set, `shell_environment_policy.set={GIT_CONFIG_GLOBAL="/dev/null",GIT_CONFIG_COUNT="1",` +
+      `GIT_CONFIG_KEY_0="core.hooksPath",GIT_CONFIG_VALUE_0=${JSON.stringify(GIT_HOOKS_DIR)},CMAP_PUSH_ALLOW="feat/*",CMAP_PUSH_DENY="main release/*"}`)
   })
 })
 

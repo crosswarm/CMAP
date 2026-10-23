@@ -12,6 +12,7 @@ import { constants } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { AdapterError } from '#adapter-sdk'
+import { GIT_HOOKS_DIR } from '../../../packages/adapter-sdk/src/push-guard.ts'
 
 /** 控制面本机端口：API、账本库、Temporal、Temporal UI（compose 固定 8088）。 */
 export const controlPlanePorts = (env: NodeJS.ProcessEnv): number[] => {
@@ -33,7 +34,7 @@ export const buildKimiSandbox = (paths: {
   oauthDir: string
   userHome: string
   bin: string
-}, deniedPorts: readonly number[]): string => {
+}, deniedPorts: readonly number[], readOnly: readonly string[] = []): string => {
   const subpath = (path: string) => `(subpath ${JSON.stringify(path)})`
   const writable = [
     paths.workDir,
@@ -55,6 +56,7 @@ ${denyNet}(deny file-write*)
 (allow file-write* ${writable} (literal "/dev/null"))
 (deny file-read-data ${subpath(paths.userHome)})
 (allow file-read-data ${writable} ${subpath(dirname(paths.bin))})
+${readOnly.map((p) => `(allow file-read-data ${subpath(p)})\n`).join('')}
 (deny file-read-data file-write* (regex #"/\\.mcp\\.json$") (regex #"/\\.kimi-code/mcp\\.json$") (literal ${JSON.stringify(join(paths.runtimeDir, 'home/mcp.json'))}))`
 }
 
@@ -162,7 +164,7 @@ export const prepareKimiRun = async (
       oauthDir,
       userHome: await realpath(homedir()),
       bin: executable,
-    }, controlPlanePorts(process.env))
+    }, controlPlanePorts(process.env), [GIT_HOOKS_DIR])
     return {
       workDir,
       runtimeDir,
