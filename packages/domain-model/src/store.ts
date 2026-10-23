@@ -15,6 +15,7 @@
 import { isDeepStrictEqual } from 'node:util'
 
 import type { TaskResultV1 } from './generated/task-result.ts'
+import type { QuotaSnapshotV1 } from './generated/quota-snapshot.ts'
 import type { TaskState } from './task-state.ts'
 import type {
   Mission,
@@ -222,6 +223,15 @@ export const assertSameEventInput = (
   }
 }
 
+/** 两个实现共用的快照写入前置检查与同键比对。 */
+export const assertQuotaSnapshotAccount = (s: QuotaSnapshotV1): string => {
+  if (s.account_ref === null) throw new RangeError('QUOTA_SNAPSHOT_ACCOUNT_REQUIRED')
+  return s.account_ref
+}
+export const assertSameQuotaSnapshot = (existing: QuotaSnapshotV1, incoming: QuotaSnapshotV1): void => {
+  if (!isDeepStrictEqual(existing, incoming)) throw new Error('QUOTA_SNAPSHOT_CONFLICT')
+}
+
 export class LockUnavailableError extends Error {
   readonly resource: string
   readonly heldBy: string
@@ -312,6 +322,15 @@ export interface Store {
 
   releaseLock(lockId: string, at: string): Promise<void>
   listActiveLocks(now: string): Promise<readonly ResourceLock[]>
+
+  // Quota Snapshot（ADR-0009，账号级）
+  /**
+   * 落账一份额度快照，键为 (provider, account_ref, observed_at)：同键同内容幂等，内容不同抛 QUOTA_SNAPSHOT_CONFLICT。
+   * account_ref 为 null 的快照无从归属额度池，拒绝写入（QUOTA_SNAPSHOT_ACCOUNT_REQUIRED）。
+   */
+  putQuotaSnapshot(s: QuotaSnapshotV1): Promise<QuotaSnapshotV1>
+  /** 该账号 observed_at 最新的一份；没有返回 null。 */
+  getLatestQuotaSnapshot(provider: QuotaSnapshotV1['provider'], accountRef: string): Promise<QuotaSnapshotV1 | null>
 
   /** 自检：能报出「进程活着但存储不可用」。 */
   healthCheck(): Promise<{ ok: boolean; detail?: string }>

@@ -22,6 +22,7 @@ import type {
   TaskResultV1,
   RemoteTaskBinding,
   RiskLevel,
+  QuotaSnapshotV1,
 } from '#domain-model'
 import type {
   AgentAdapter,
@@ -241,6 +242,8 @@ export interface CodexAdapterOptions {
   readonly runsDir?: string
   /** 见 CodexArgsOptions.defaultModel。 */
   readonly defaultModel?: string
+  /** 额度快照来源（ADR-0009，通常是带缓存的零额度探针）；设置后 health 附带快照。 */
+  readonly quota?: () => Promise<QuotaSnapshotV1>
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -257,6 +260,7 @@ export class CodexAdapter implements AgentAdapter {
   readonly #idempotency: Map<string, RemoteTaskBinding>
   readonly #runsDir: string | undefined
   readonly #defaultModel: string | undefined
+  readonly #quota: (() => Promise<QuotaSnapshotV1>) | undefined
   readonly #pending = new Map<string, Promise<RemoteTaskBinding>>()
 
   constructor(opts: CodexAdapterOptions) {
@@ -268,6 +272,7 @@ export class CodexAdapter implements AgentAdapter {
     this.#runsDir = opts.runsDir
     this.restartSafe = opts.runsDir !== undefined
     this.#defaultModel = opts.defaultModel
+    this.#quota = opts.quota
   }
 
   async discover(): Promise<AdapterDescriptor> {
@@ -678,6 +683,11 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async health(): Promise<AdapterHealth> {
+    const [health, quota] = await Promise.all([this.#versionHealth(), this.#quota?.()])
+    return quota ? { ...health, quota } : health
+  }
+
+  async #versionHealth(): Promise<AdapterHealth> {
     const at = new Date().toISOString()
     return await new Promise((resolve) => {
       const probe = spawn(this.#bin, ['--version'], {

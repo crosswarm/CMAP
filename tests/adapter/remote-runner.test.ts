@@ -177,6 +177,33 @@ test('lap 自有准入白名单拒绝 owner → OWNER_DENIED，执行 0 次', as
   }
 })
 
+test('lap 在已签名 health 里附带额度快照（ADR-0009），CrossMini 原样取得；不带快照的旧 lap 仍健康', async () => {
+  const { root, codex, cm } = await setup()
+  const quota = {
+    schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: 'e'.repeat(64),
+    windows: [{ kind: 'primary', used_percent: 84, window_minutes: 10080, resets_at: '2026-10-29T00:00:00.000Z' }],
+    ordinary_usage_allowed: true, observed_at: '2026-10-23T00:00:00.000Z', status: 'ok',
+  } as const
+  const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap'), quota: async () => structuredClone(quota) as any })
+  const old = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'old') })
+  const garbled = await startTamperProxy(lap.url, { resign: true, mutate: (path, text) => path === '/v1/health' ? JSON.stringify({ ...JSON.parse(text), quota: { ...quota, account_ref: 'raw-id' } }) : text })
+  try {
+    const health = await adapterFor(lap.url, cm).health()
+    assert.equal(health.state, 'healthy')
+    assert.deepEqual(health.quota, quota)
+    const legacy = await adapterFor(old.url, cm).health()
+    assert.equal(legacy.state, 'healthy')
+    assert.equal(legacy.quota, undefined)
+    // 快照不合契约（例如带原始账号 id）：整条应答不合 remote-runner.v1，按不可用处理
+    assert.equal((await adapterFor(garbled.url, cm).health()).state, 'unavailable')
+  } finally {
+    await close(garbled.server)
+    await close(lap.server)
+    await close(old.server)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('health 应答缺准入白名单（旧版 lap）即使 lap 自己签名也判 unavailable，不退回静态能力声明', async () => {
   const { root, codex, cm } = await setup()
   const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap') })

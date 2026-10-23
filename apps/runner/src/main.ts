@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadOrCreatePermitKey, loadPinnedPublicKey } from '#domain-model'
+import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
 import { createRunnerDaemon, readRunnerDaemonConfig } from './server.ts'
 
 const config = readRunnerDaemonConfig(process.env)
@@ -20,6 +21,8 @@ const { server, runner } = await createRunnerDaemon({
   signingKey: loadOrCreatePermitKey(config.signingKeyFile).privateKey,
   issuer: config.issuer,
   workRoot,
+  // 额度快照（ADR-0009）：5 分钟缓存；health 最多等 1.5 秒，留在控制面 3 秒健康超时之内，等不到先报旧值或 unknown
+  quota: cachedQuotaProbe('codex', () => probeCodexQuota(), { waitMs: 1_500 }),
 })
 
 const stop = (): void => {

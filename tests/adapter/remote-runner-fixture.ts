@@ -8,7 +8,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 
-import { issueDispatchPermit, verifyDispatchPermit, DispatchPermitError, type TaskEnvelopeV1 } from '#domain-model'
+import { issueDispatchPermit, verifyDispatchPermit, DispatchPermitError, type QuotaSnapshotV1, type TaskEnvelopeV1 } from '#domain-model'
 import type { AdapterAuthorization, DispatchPermitSigner } from '#adapter-sdk'
 import { REMOTE_ADAPTER_ID } from '../../adapters/remote-runner/src/index.ts'
 import { signRunnerRequest, signRunnerResponse } from '../../packages/domain-model/src/dispatch-permit.ts'
@@ -113,7 +113,7 @@ export const close = async (server: Server): Promise<void> => {
 }
 
 /** 本机端口上的模拟 lap。clockOffsetMs 模拟两机时钟偏差。 */
-export const startLap = async (opts: { env: NodeJS.ProcessEnv; workRoot: string; clockOffsetMs?: number }) => {
+export const startLap = async (opts: { env: NodeJS.ProcessEnv; workRoot: string; clockOffsetMs?: number; quota?: () => Promise<QuotaSnapshotV1> }) => {
   const daemon = await createRunnerDaemon({
     env: opts.env,
     publicKey: trust.publicKey,
@@ -121,6 +121,7 @@ export const startLap = async (opts: { env: NodeJS.ProcessEnv; workRoot: string;
     issuer: ISSUER,
     workRoot: opts.workRoot,
     ...(opts.clockOffsetMs ? { nowMs: () => Date.now() + opts.clockOffsetMs! } : {}),
+    ...(opts.quota ? { quota: opts.quota } : {}),
   })
   const url = await listen(daemon.server)
   return { ...daemon, url }

@@ -51,7 +51,10 @@ import {
   assertSameEventInput,
   assertSameReviewInput,
   assertSameTaskInput,
+  assertQuotaSnapshotAccount,
+  assertSameQuotaSnapshot,
 } from './store.ts'
+import type { QuotaSnapshotV1 } from './generated/quota-snapshot.ts'
 
 const missionEventType = (state: MissionState): EventType => {
   switch (state) {
@@ -79,6 +82,7 @@ export class MemoryStore implements Store {
   readonly #reviews: Review[] = []
   readonly #approvals = new Map<string, Approval>()
   readonly #locks = new Map<string, ResourceLock>()
+  readonly #quota: QuotaSnapshotV1[] = []
   /** idempotencyKey → 已产生的 event_id，用于重复投递去重 */
   readonly #seenKeys = new Map<string, string>()
 
@@ -495,6 +499,26 @@ export class MemoryStore implements Store {
     return [...this.#locks.values()].filter(
       (l) => l.released_at === null && Date.parse(l.expires_at) > t,
     )
+  }
+
+  // ---------------------------------------------------- Quota Snapshot
+
+  async putQuotaSnapshot(s: QuotaSnapshotV1): Promise<QuotaSnapshotV1> {
+    const account = assertQuotaSnapshotAccount(s)
+    const existing = this.#quota.find((q) => q.provider === s.provider && q.account_ref === account &&
+      Date.parse(q.observed_at) === Date.parse(s.observed_at))
+    if (existing) {
+      assertSameQuotaSnapshot(existing, s)
+      return structuredClone(existing)
+    }
+    this.#quota.push(structuredClone(s))
+    return structuredClone(s)
+  }
+
+  async getLatestQuotaSnapshot(provider: QuotaSnapshotV1['provider'], accountRef: string): Promise<QuotaSnapshotV1 | null> {
+    const latest = this.#quota.filter((q) => q.provider === provider && q.account_ref === accountRef)
+      .sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at))[0]
+    return latest ? structuredClone(latest) : null
   }
 
   // ------------------------------------------------------------ 自检

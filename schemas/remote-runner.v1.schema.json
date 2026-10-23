@@ -146,7 +146,7 @@
     },
     "health": {
       "title": "RemoteRunnerHealthV1",
-      "description": "Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates. admission publishes the runner's own allowlist (the same RUNNER_ALLOWED_* / RUNNER_MAX_RISK it enforces at dispatch) so the control plane can skip the runner before dispatch when tenant, owner, capability or risk would be denied, and fall back to local candidates instead of collecting an admission denial. It is advisory for routing only: the runner still enforces admission on every dispatch (defence in depth). It is signed with the rest of the response; a health reply without it is invalid and the runner is treated as unavailable.",
+      "description": "Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates. admission publishes the runner's own allowlist (the same RUNNER_ALLOWED_* / RUNNER_MAX_RISK it enforces at dispatch) so the control plane can skip the runner before dispatch when tenant, owner, capability or risk would be denied, and fall back to local candidates instead of collecting an admission denial. It is advisory for routing only: the runner still enforces admission on every dispatch (defence in depth). It is signed with the rest of the response; a health reply without it is invalid and the runner is treated as unavailable. quota (optional, ADR-0009) is the runner's latest account-level quota snapshot for the wrapped agent, read by a zero-quota probe on the runner host; older runners omit it and the control plane treats the quota as unknown.",
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "kind", "runner_id", "state", "checked_at", "admission"],
@@ -156,7 +156,8 @@
         "runner_id": { "$ref": "#/$defs/identifier" },
         "state": { "enum": ["healthy", "degraded", "unavailable"] },
         "checked_at": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "admission": { "$ref": "#/$defs/admission" }
+        "admission": { "$ref": "#/$defs/admission" },
+        "quota": { "$ref": "quota-snapshot.v1.schema.json" }
       }
     },
     "allowlist": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },

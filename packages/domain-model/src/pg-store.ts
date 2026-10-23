@@ -64,7 +64,10 @@ import {
   assertSameEventInput,
   assertSameReviewInput,
   assertSameTaskInput,
+  assertQuotaSnapshotAccount,
+  assertSameQuotaSnapshot,
 } from './store.ts'
+import type { QuotaSnapshotV1 } from './generated/quota-snapshot.ts'
 
 const { Pool } = pg
 type PoolClient = pg.PoolClient
@@ -852,6 +855,37 @@ export class PgStore implements Store {
       [now],
     )
     return rows.map((r) => toLock(r as Record<string, unknown>))
+  }
+
+  // ---------------------------------------------------- Quota Snapshot
+
+  async putQuotaSnapshot(s: QuotaSnapshotV1): Promise<QuotaSnapshotV1> {
+    const account = assertQuotaSnapshotAccount(s)
+    return this.#tx(async (c) => {
+      const inserted = await c.query(
+        `INSERT INTO quota_snapshots (provider, account_ref, observed_at, snapshot)
+         VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+        [s.provider, account, s.observed_at, JSON.stringify(s)],
+      )
+      if (inserted.rowCount === 1) return structuredClone(s)
+      const { rows } = await c.query(
+        'SELECT snapshot FROM quota_snapshots WHERE provider = $1 AND account_ref = $2 AND observed_at = $3',
+        [s.provider, account, s.observed_at],
+      )
+      if (rows.length !== 1) throw new WriteVerificationError('QuotaSnapshot', account, '冲突后回读为空')
+      const existing = rows[0].snapshot as QuotaSnapshotV1
+      assertSameQuotaSnapshot(existing, s)
+      return existing
+    })
+  }
+
+  async getLatestQuotaSnapshot(provider: QuotaSnapshotV1['provider'], accountRef: string): Promise<QuotaSnapshotV1 | null> {
+    const { rows } = await this.#pool.query(
+      `SELECT snapshot FROM quota_snapshots WHERE provider = $1 AND account_ref = $2
+       ORDER BY observed_at DESC LIMIT 1`,
+      [provider, accountRef],
+    )
+    return rows.length ? (rows[0].snapshot as QuotaSnapshotV1) : null
   }
 
   // ------------------------------------------------------------ 自检

@@ -22,6 +22,7 @@ import type {
   Artifact,
   Review,
   TaskResultV1,
+  QuotaSnapshotV1,
 } from '#domain-model'
 import {
   ConcurrentModificationError,
@@ -1512,6 +1513,41 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
           ]),
           EventConflictError,
         )
+      })
+    })
+
+    describe('额度快照（ADR-0009，账号级）', () => {
+      const ACCOUNT = 'c'.repeat(64)
+      const snapshot = (overrides: Partial<QuotaSnapshotV1> = {}): QuotaSnapshotV1 => ({
+        schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: ACCOUNT,
+        windows: [{ kind: 'primary', used_percent: 84, window_minutes: 10080, resets_at: '2026-10-29T00:00:00.000Z' }],
+        ordinary_usage_allowed: true, observed_at: '2026-10-23T00:00:00.000Z', status: 'ok', ...overrides,
+      })
+
+      test('按 (provider, account_ref) 读出最新快照，与写入顺序无关', async () => {
+        const s = await createStore()
+        assert.equal(await s.getLatestQuotaSnapshot('codex', ACCOUNT), null)
+        const later = snapshot({ observed_at: '2026-10-23T00:05:00.000Z', windows: [{ kind: 'primary', used_percent: 91, window_minutes: 10080, resets_at: null }] })
+        await s.putQuotaSnapshot(later)
+        await s.putQuotaSnapshot(snapshot())
+        await s.putQuotaSnapshot(snapshot({ provider: 'claude', observed_at: '2026-10-23T01:00:00.000Z' }))
+        await s.putQuotaSnapshot(snapshot({ account_ref: 'd'.repeat(64), observed_at: '2026-10-23T02:00:00.000Z' }))
+        assert.deepEqual(await s.getLatestQuotaSnapshot('codex', ACCOUNT), later)
+        assert.equal((await s.getLatestQuotaSnapshot('claude', ACCOUNT))?.provider, 'claude')
+        assert.equal(await s.getLatestQuotaSnapshot('kimi', ACCOUNT), null)
+      })
+
+      test('同一时刻重复写入幂等；内容不同即冲突', async () => {
+        const s = await createStore()
+        assert.deepEqual(await s.putQuotaSnapshot(snapshot()), snapshot())
+        assert.deepEqual(await s.putQuotaSnapshot(snapshot()), snapshot())
+        await assert.rejects(s.putQuotaSnapshot(snapshot({ ordinary_usage_allowed: false })), /QUOTA_SNAPSHOT_CONFLICT/)
+        assert.deepEqual(await s.getLatestQuotaSnapshot('codex', ACCOUNT), snapshot())
+      })
+
+      test('没有账号摘要的快照不能落账（无从归属额度池）', async () => {
+        const s = await createStore()
+        await assert.rejects(s.putQuotaSnapshot(snapshot({ account_ref: null, status: 'unknown' })), /QUOTA_SNAPSHOT_ACCOUNT_REQUIRED/)
       })
     })
 

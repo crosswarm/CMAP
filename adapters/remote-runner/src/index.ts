@@ -47,6 +47,8 @@ const INPUT_URI = /^inputs\/[A-Za-z][A-Za-z0-9_-]{0,63}\/[a-f0-9]{64}\/payload$/
 const ajv = new Ajv2020({ strict: true })
 const readSchema = (name: string): object =>
   JSON.parse(readFileSync(new URL(`../../../schemas/${name}`, import.meta.url), 'utf8'))
+// health.quota 引用同目录的 quota-snapshot 契约（相对 remote-runner 的 $id 解析）
+ajv.addSchema(readSchema('quota-snapshot.v1.schema.json'), 'https://cmap.local/schemas/remote-runner/quota-snapshot.v1.schema.json')
 export const validateRemoteMessage = ajv.compile<RemoteRunnerMessageV1>(readSchema('remote-runner.v1.schema.json'))
 const validateTaskResult = ajv.compile<TaskResultV1>(readSchema('task-result.v1.schema.json'))
 
@@ -305,7 +307,7 @@ export class RemoteRunnerAdapter implements AgentAdapter {
     try {
       const body = this.#expect(await this.#call('GET', '/v1/health', undefined, this.#healthTimeoutMs), 'health')
       if (body.runner_id !== this.runnerId) return { state: 'unavailable', checked_at, detail: 'RUNNER_ID_MISMATCH' }
-      return { state: body.state, checked_at, admission: body.admission }
+      return { state: body.state, checked_at, admission: body.admission, ...(body.quota ? { quota: body.quota } : {}) }
     } catch (error) {
       return { state: 'unavailable', checked_at, detail: error instanceof AdapterError ? error.code : 'REMOTE_HEALTH_FAILED' }
     }

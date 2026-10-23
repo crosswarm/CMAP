@@ -159,3 +159,17 @@ test('没有可用执行者时也先记录决策与原因再报错', async () =>
   assert.equal((event!.payload as any).chosen_agent, null)
   assert.deepEqual((event!.payload as any).candidates.map((c: any) => c.reason), ['unhealthy'])
 })
+
+// ADR-0009 §1：health 带来的额度快照落账（账号级），供路由与审计。
+test('派发前健康探测拿到的额度快照落账', async () => {
+  const quota = {
+    schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: 'b'.repeat(64),
+    windows: [{ kind: 'primary', used_percent: 12, window_minutes: 10080, resets_at: null }],
+    ordinary_usage_allowed: true, observed_at: new Date().toISOString(), status: 'ok',
+  } as const
+  const a = candidate('primary')
+  a.health = async () => ({ state: 'healthy', checked_at: new Date().toISOString(), quota: structuredClone(quota) as any })
+  const { acts, store, taskId } = await fixture([a])
+  await acts.dispatchTask(taskId)
+  assert.deepEqual(await store.getLatestQuotaSnapshot('codex', 'b'.repeat(64)), quota)
+})

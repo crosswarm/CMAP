@@ -4,7 +4,9 @@ import { describe, test } from 'node:test'
 import Ajv from 'ajv/dist/2020.js'
 
 const schema = JSON.parse(readFileSync(new URL('../../schemas/remote-runner.v1.schema.json', import.meta.url), 'utf8'))
-const validate = new Ajv({ strict: true, allErrors: true }).compile(schema)
+const quotaSchema = JSON.parse(readFileSync(new URL('../../schemas/quota-snapshot.v1.schema.json', import.meta.url), 'utf8'))
+const withQuota = (ajv) => ajv.addSchema(quotaSchema, new URL('quota-snapshot.v1.schema.json', schema.$id).href)
+const validate = withQuota(new Ajv({ strict: true, allErrors: true })).compile(schema)
 
 const S = 'cmap/remote-runner/v1'
 const H = 'a'.repeat(64)
@@ -70,10 +72,17 @@ describe('remote-runner schema', () => {
       patch('health', (v) => { v.admission.max_risk = 'root' }),
       patch('health', (v) => { delete v.admission.allowed_tenants }),
       patch('health', (v) => { v.admission.host = 'cross-m1mx' }),
+      patch('health', (v) => { v.quota = { schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: 'raw-account-id', windows: [], ordinary_usage_allowed: null, observed_at: '2026-10-18T00:00:00.000Z', status: 'ok' } }),
       patch('error', (v) => { v.category = 'internal' }),
       patch('error', (v) => { v.code = 'lowercase' }),
       patch('error', (v) => { v.message = 'provider stderr' }),
     ]) assert.equal(validate(value), false, `${kind}: ${JSON.stringify(value)}`)
+  })
+
+  test('health 可选附带额度快照（ADR-0009），旧 runner 不带也有效', () => {
+    const quota = { schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: H, windows: [{ kind: 'primary', used_percent: 84, window_minutes: 10080, resets_at: '2026-10-29T00:00:00.000Z' }], ordinary_usage_allowed: true, observed_at: '2026-10-18T00:00:00.000Z', status: 'ok' }
+    assert.equal(validate({ ...valid.health, quota }), true, JSON.stringify(validate.errors))
+    assert.equal(validate(valid.health), true)
   })
 
   test('error 允许无细节的 UNAUTHORIZED（401 体）', () => {
@@ -82,7 +91,7 @@ describe('remote-runner schema', () => {
 })
 
 describe('remote-runner 请求/响应认证头', () => {
-  const ajv = new Ajv({ strict: true, allErrors: true })
+  const ajv = withQuota(new Ajv({ strict: true, allErrors: true }))
   ajv.addSchema(schema)
   const headers = (name) => ajv.getSchema(`${schema.$id}#/$defs/${name}`)
   const SIG = 'A'.repeat(86)

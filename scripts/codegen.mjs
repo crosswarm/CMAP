@@ -26,6 +26,7 @@ const outDir = join(root, 'packages/domain-model/src/generated')
 const TARGETS = [
   { schema: 'review-application.v1.schema.json', out: 'review-application.ts' },
   { schema: 'dispatch-permit.v1.schema.json', out: 'dispatch-permit.ts' },
+  { schema: 'quota-snapshot.v1.schema.json', out: 'quota-snapshot.ts' },
   { schema: 'remote-runner.v1.schema.json', out: 'remote-runner.ts' },
   { schema: 'runner-admission.v1.schema.json', out: 'runner-admission.ts' },
   { schema: 'runner-gateway.v1.schema.json', out: 'runner-gateway.ts' },

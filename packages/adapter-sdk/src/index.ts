@@ -19,6 +19,7 @@ import type {
   RiskLevel,
   HealthState,
   RunnerDescriptor,
+  QuotaSnapshotV1,
 } from '#domain-model'
 
 // ------------------------------------------------------------ 描述与发现
@@ -54,6 +55,8 @@ export interface AdapterHealth {
    * 路由据此在派发前跳过、按 fallback 回落；runner 派发时仍自行复核，这里只是提前判断。
    */
   readonly admission?: RunnerDescriptor['admission']
+  /** 该 Agent 账号的额度快照（ADR-0009）。缺省表示未知，路由按未知处理（排在已知充足之后，不排除）。 */
+  readonly quota?: QuotaSnapshotV1
 }
 
 // ------------------------------------------------------------ 派发上下文

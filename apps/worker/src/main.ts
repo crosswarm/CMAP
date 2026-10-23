@@ -30,6 +30,7 @@ import { CodexAdapter, CODEX_CAPABILITIES } from '../../../adapters/codex-adapte
 import { RemoteRunnerAdapter } from '../../../adapters/remote-runner/src/index.ts'
 import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
+import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
 import { parseAdapterNames } from './adapter-config.ts'
 import { buildRunnerDescriptor } from './runner-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
@@ -95,6 +96,8 @@ const localCodex = (): AgentAdapter => {
     outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
     // 运行记录：Worker 重启后据此恢复对 Codex 子进程的观察，且绝不重跑（S1）。
     runsDir: join(workRoot, '.runs'),
+    // 额度快照（ADR-0009）：零额度探针 + 5 分钟缓存，随 health 进入路由
+    quota: cachedQuotaProbe('codex', () => probeCodexQuota()),
   })
   // 只接受回环地址：本机 runner 不是第二台机器，不得借此接入 ADR-0006 范围外的主机。
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(localRunnerUrl).hostname)) throw new Error('CMAP_LOCAL_RUNNER_URL 只能是回环地址')

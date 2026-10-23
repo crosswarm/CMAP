@@ -161,3 +161,12 @@ CREATE TABLE IF NOT EXISTS resource_locks (
 );
 
 CREATE INDEX IF NOT EXISTS locks_resource_idx ON resource_locks (resource) WHERE released_at IS NULL;
+
+-- ADR-0009：账号级额度快照，供路由与审计。键是账号而非机器；account_ref 是不可逆摘要，不存原始账号 id。
+CREATE TABLE IF NOT EXISTS quota_snapshots (
+  provider    TEXT NOT NULL CHECK (provider IN ('codex','claude','kimi')),
+  account_ref TEXT NOT NULL CHECK (account_ref ~ '^[a-f0-9]{64}$'),
+  observed_at TIMESTAMPTZ NOT NULL,
+  snapshot    JSONB NOT NULL,
+  PRIMARY KEY (provider, account_ref, observed_at)
+);

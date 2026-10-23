@@ -29,6 +29,7 @@ import type {
   ReviewDecisionV1,
   ProgressSnapshot,
   RunnerDescriptor,
+  QuotaSnapshotV1,
 } from '#domain-model'
 import { needsApproval, ApprovalDecisionConflictError } from '#domain-model'
 import { recomputeCriterionPassed, yonWorkProfileFromRoute, snapshotRunnerDescriptor, RunnerAdmissionError, DispatchPermitError } from '#domain-model'
@@ -295,6 +296,11 @@ export const createActivities = (deps: ActivityDeps) => {
       runner_id: runnerId,
     })
     const risks = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
+    // health 带回的账号级额度快照落账（ADR-0009），供路由与审计；没有账号摘要的无从归属，不落账
+    const quotaSeen: QuotaSnapshotV1[] = []
+    const persistQuota = async (): Promise<void> => {
+      for (const q of quotaSeen) if (q.account_ref) await store.putQuotaSnapshot(q)
+    }
     const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean}> => {
       try {
         const descriptor = await candidate.discover()
@@ -304,6 +310,7 @@ export const createActivities = (deps: ActivityDeps) => {
         const ceiling = risks.indexOf(descriptor.risk_ceiling)
         if (required < 0 || ceiling < required) return {reason: 'risk'}
         const health = await candidate.health()
+        if (health.quota) quotaSeen.push(health.quota)
         if (health.state !== 'healthy') return {reason: 'unhealthy'}
         // 远程 runner 公布的准入白名单：不放行就跳过并回落，而不是派过去再收准入拒绝。runner 仍会复核。
         const allow = health.admission
@@ -335,9 +342,11 @@ export const createActivities = (deps: ActivityDeps) => {
           continue
         }
         candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'selected', reason: null})
+        await persistQuota()
         return {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, routing: decision(candidate)}
       }
     }
+    await persistQuota()
     throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
   }
 

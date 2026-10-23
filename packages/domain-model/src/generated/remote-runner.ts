@@ -94,7 +94,7 @@ export interface RemoteRunnerCancelV1 {
   reason: string
 }
 /**
- * Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates. admission publishes the runner's own allowlist (the same RUNNER_ALLOWED_* / RUNNER_MAX_RISK it enforces at dispatch) so the control plane can skip the runner before dispatch when tenant, owner, capability or risk would be denied, and fall back to local candidates instead of collecting an admission denial. It is advisory for routing only: the runner still enforces admission on every dispatch (defence in depth). It is signed with the rest of the response; a health reply without it is invalid and the runner is treated as unavailable.
+ * Response to GET /v1/health. The control plane probes with a 3 second timeout before routing; anything but healthy falls back to local candidates. admission publishes the runner's own allowlist (the same RUNNER_ALLOWED_* / RUNNER_MAX_RISK it enforces at dispatch) so the control plane can skip the runner before dispatch when tenant, owner, capability or risk would be denied, and fall back to local candidates instead of collecting an admission denial. It is advisory for routing only: the runner still enforces admission on every dispatch (defence in depth). It is signed with the rest of the response; a health reply without it is invalid and the runner is treated as unavailable. quota (optional, ADR-0009) is the runner's latest account-level quota snapshot for the wrapped agent, read by a zero-quota probe on the runner host; older runners omit it and the control plane treats the quota as unknown.
  */
 export interface RemoteRunnerHealthV1 {
   schema: SchemaTag
@@ -103,6 +103,7 @@ export interface RemoteRunnerHealthV1 {
   state: 'healthy' | 'degraded' | 'unavailable'
   checked_at: string
   admission: RemoteRunnerAdmissionV1
+  quota?: QuotaSnapshotV1
 }
 /**
  * The runner's dispatch allowlist, same semantics as runner-admission.v1: explicit empty lists deny all.
@@ -112,6 +113,32 @@ export interface RemoteRunnerAdmissionV1 {
   allowed_owners: Allowlist
   allowed_capabilities: Allowlist
   max_risk: 'read-meta' | 'read-sensitive' | 'controlled' | 'mutating'
+}
+/**
+ * ADR-0009 §1 account-level quota snapshot. Quota is counted per provider account on the provider side, so the same account seen from two runners is one pool. Read by a zero-quota probe on the runner host that holds the provider login (Codex app-server account/rateLimits/read, Claude stream-json control request get_usage); Kimi is unknown. account_ref is an irreversible sha256 digest of the provider account identity, never the raw id, email or token. status ok means the provider answered; unknown means nothing could be read (timeout, spawn failure, unparsable reply, unsupported provider); error means the provider answered with an explicit error. Unknown and error are never treated as sufficient. ordinary_usage_allowed is the provider's own flag (Codex ordinaryUsageAllowed); null means the provider did not say and must not be inferred.
+ */
+export interface QuotaSnapshotV1 {
+  schema: 'cmap/quota-snapshot/v1'
+  provider: 'codex' | 'claude' | 'kimi'
+  /**
+   * sha256 hex of a provider-scoped account identity; null when the account could not be identified.
+   */
+  account_ref: string | null
+  /**
+   * @maxItems 32
+   */
+  windows: {
+    /**
+     * Codex primary/secondary; Claude five_hour/seven_day.
+     */
+    kind: string
+    used_percent: number
+    window_minutes: number | null
+    resets_at: string | null
+  }[]
+  ordinary_usage_allowed: boolean | null
+  observed_at: string
+  status: 'ok' | 'unknown' | 'error'
 }
 /**
  * permit: DispatchPermitErrorCode, no execution happened. admission: RunnerAdmissionErrorCode from the runner's own allowlist, no execution happened. adapter: AdapterError code from the wrapped adapter. protocol: malformed request, unknown task or oversized body, or UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure).

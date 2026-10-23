@@ -11,6 +11,7 @@
 export type { TaskEnvelopeV1 } from './generated/task-envelope.ts'
 export type { DispatchPermitV1 } from './generated/dispatch-permit.ts'
 export type { RemoteRunnerMessageV1, RemoteRunnerDispatchV1, RemoteRunnerResultV1 } from './generated/remote-runner.ts'
+export type { QuotaSnapshotV1 } from './generated/quota-snapshot.ts'
 export { DispatchPermitError, issueDispatchPermit, verifyDispatchPermit, loadOrCreatePermitKey, loadPinnedPublicKey } from './dispatch-permit.ts'
 export type { DispatchPermitErrorCode } from './dispatch-permit.ts'
 export type { MissionPlanV1 } from './generated/mission-plan.ts'

@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   DispatchPermitError, RunnerAdmissionError, assertRunnerAdmission, verifyDispatchPermit,
-  type RemoteTaskBinding, type RunnerAdmissionSubject, type RunnerDescriptor, type TaskEnvelopeV1, type RemoteRunnerDispatchV1,
+  type QuotaSnapshotV1, type RemoteTaskBinding, type RunnerAdmissionSubject, type RunnerDescriptor, type TaskEnvelopeV1, type RemoteRunnerDispatchV1,
 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
@@ -166,6 +166,8 @@ export interface RunnerDaemonOptions {
   readonly signingKey: KeyObject
   /** 测试注入时钟偏差；生产用本机时钟。 */
   readonly nowMs?: () => number
+  /** 本机 Codex 账号的额度快照来源（ADR-0009，带缓存的零额度探针）；设置后随 health 应答上报。 */
+  readonly quota?: () => Promise<QuotaSnapshotV1>
 }
 
 export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ server: Server; adapter: CodexAdapter; runner: RunnerDescriptor }> => {
@@ -201,6 +203,7 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
     outputSchemaPath: fileURLToPath(new URL('../../../schemas/codex-output.v1.schema.json', import.meta.url)),
     runsDir: join(opts.workRoot, '.runs'),
     defaultModel: codexModel,
+    ...(opts.quota ? { quota: opts.quota } : {}),
   })
   const runner = buildRunnerDescriptor(opts.env, [await adapter.discover()])
   const bindings = new Map<string, RemoteTaskBinding>()
@@ -272,7 +275,7 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
   const health = async (res: ServerResponse): Promise<void> => {
     const observed = await adapter.health()
     // 公布本机准入白名单，CrossMini 派发前据此回落；派发时 assertRunnerAdmission 仍是最后一道闸。
-    send(res, 200, { schema: SCHEMA, kind: 'health', runner_id: runnerId, state: observed.state, checked_at: observed.checked_at, admission: runner.admission })
+    send(res, 200, { schema: SCHEMA, kind: 'health', runner_id: runnerId, state: observed.state, checked_at: observed.checked_at, admission: runner.admission, ...(observed.quota ? { quota: observed.quota } : {}) })
   }
 
   const server = createServer(async (req, res) => {
