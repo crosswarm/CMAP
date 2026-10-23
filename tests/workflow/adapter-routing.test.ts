@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '#domain-model'
-import type { Mission, RiskLevel, TaskEnvelopeV1 } from '#domain-model'
+import type { Mission, QuotaSnapshotV1, RiskLevel, TaskEnvelopeV1 } from '#domain-model'
 import type { AdapterHealth } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
@@ -16,12 +16,12 @@ const candidate = (id: string, caps = ['code.analyze'], state: AdapterHealth['st
   adapter.health = async () => ({ state, checked_at: new Date().toISOString() })
   return adapter
 }
-async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['execution_policy']> = {}, risk: RiskLevel = 'read-meta') {
+async function fixture(adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['execution_policy']> = {}, risk: RiskLevel = 'read-meta', extra: object = {}) {
   const store = new MemoryStore()
   const now = new Date().toISOString()
   const mission: Mission = { id: 'routing-mission', tenant: 'local', owner: 'test', type: 'inspect', goal: 'routing', constraints: {}, acceptance: [{ criterion_id: 'C1', metric: 'ok', operator: 'eq', expected: true, hard_gate: true }], workflow_template: 'inspect/v1', state: 'DRAFT', revision: 1, created_at: now, updated_at: now }
   await store.createMission({ mission, actor: ACTOR })
-  const acts = createActivities(syntheticActivityDeps({ store, adapters, runner: syntheticRunner(), pollIntervalMs: 1 }))
+  const acts = createActivities(syntheticActivityDeps({ store, adapters, runner: syntheticRunner(), pollIntervalMs: 1, ...extra }))
   const taskId = 'routing-task'
   const envelope: TaskEnvelopeV1 = {
     schema:'cmap/task-envelope/v1',
@@ -172,4 +172,148 @@ test('派发前健康探测拿到的额度快照落账', async () => {
   const { acts, store, taskId } = await fixture([a])
   await acts.dispatchTask(taskId)
   assert.deepEqual(await store.getLatestQuotaSnapshot('codex', 'b'.repeat(64)), quota)
+})
+
+// ---------------------------------------------------------------- ADR-0009 §2 额度维度
+
+let accounts = 0
+const quotaOf = (used: number, overrides: Partial<QuotaSnapshotV1> = {}): QuotaSnapshotV1 => ({
+  schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: (++accounts % 16).toString(16).repeat(64),
+  windows: [{ kind: 'primary', used_percent: used, window_minutes: 10080, resets_at: null }],
+  ordinary_usage_allowed: true, observed_at: new Date().toISOString(), status: 'ok', ...overrides,
+})
+const withQuota = (adapter: FakeAdapter, ...snapshots: (QuotaSnapshotV1 | undefined)[]) => {
+  let calls = 0
+  adapter.health = async () => {
+    const quota = snapshots[Math.min(calls, snapshots.length - 1)]
+    calls += 1
+    return { state: 'healthy', checked_at: new Date().toISOString(), ...(quota ? { quota } : {}) }
+  }
+  return () => calls
+}
+const routed = async (store: MemoryStore) => {
+  const [event] = (await store.listEvents('routing-mission')).filter(e => e.event_type === 'ROUTING_DECIDED')
+  return event!.payload as any
+}
+const qfixture = (adapters: FakeAdapter[], policy: Partial<TaskEnvelopeV1['execution_policy']> = {}) =>
+  fixture(adapters, policy, 'read-meta', { runner: syntheticRunner({ agents: adapters.map((a) => a.agentId) }) })
+const verdicts = (payload: any) => payload.candidates.map((c: any) => [c.agent_id, c.verdict, c.reason])
+
+test('额度低（已用 ≥ 90%）的首选记 skipped(quota_low)，新任务派给替补；判定与快照时刻落 ROUTING_DECIDED', async () => {
+  const a = candidate('a')
+  const b = candidate('b')
+  const low = quotaOf(95)
+  const ok = quotaOf(40)
+  withQuota(a, low)
+  withQuota(b, ok)
+  const { acts, store, taskId } = await qfixture([a, b], { preferred_agent: 'a', fallback_agents: ['b'] })
+  await acts.dispatchTask(taskId)
+  assert.equal(a.startCalls.length, 0)
+  assert.equal(b.startCalls.length, 1)
+  const payload = await routed(store)
+  assert.deepEqual(verdicts(payload), [['a', 'skipped', 'quota_low'], ['b', 'selected', null]])
+  assert.deepEqual(payload.candidates.map((c: any) => [c.quota, c.quota_observed_at]), [['low', low.observed_at], ['sufficient', ok.observed_at]])
+  assert.equal(payload.fallback, true)
+})
+
+test('提供方明确不允许普通用量（ordinary_usage_allowed=false）同样记 quota_low', async () => {
+  const a = candidate('a')
+  const b = candidate('b')
+  withQuota(a, quotaOf(10, { ordinary_usage_allowed: false }))
+  withQuota(b, quotaOf(10))
+  const { acts, store, taskId } = await qfixture([a, b])
+  await acts.dispatchTask(taskId)
+  assert.equal(b.startCalls.length, 1)
+  assert.deepEqual(verdicts(await routed(store)), [['a', 'skipped', 'quota_low'], ['b', 'selected', null]])
+})
+
+test('额度未知排在已知充足之后，但不排除：没有已知充足的候选时仍派给未知者', async () => {
+  const unknown = candidate('u')
+  const known = candidate('k')
+  withQuota(unknown, undefined)
+  withQuota(known, quotaOf(20))
+  const first = await qfixture([unknown, known])
+  await first.acts.dispatchTask(first.taskId)
+  assert.equal(unknown.startCalls.length, 0)
+  assert.equal(known.startCalls.length, 1)
+  assert.deepEqual(verdicts(await routed(first.store)), [['u', 'skipped', 'quota_unknown'], ['k', 'selected', null]])
+
+  const u2 = candidate('u')
+  const errored = candidate('e')
+  const lowest = candidate('l')
+  withQuota(u2, quotaOf(0, { status: 'unknown', windows: [], account_ref: null }))
+  withQuota(errored, quotaOf(0, { status: 'error', windows: [], account_ref: null }))
+  withQuota(lowest, quotaOf(99))
+  const second = await qfixture([lowest, u2, errored])
+  await second.acts.dispatchTask(second.taskId)
+  assert.equal(u2.startCalls.length, 1, '未知不等于充足，但也不排除')
+  assert.deepEqual(verdicts(await routed(second.store)), [['l', 'skipped', 'quota_low'], ['u', 'selected', null], ['e', 'skipped', 'quota_unknown']])
+})
+
+test('快照过期（默认 5 分钟）时以 health 重新获取；仍过期则按未知处理', async () => {
+  const stale = new Date(Date.now() - 6 * 60_000).toISOString()
+  const a = candidate('a')
+  const b = candidate('b')
+  const aCalls = withQuota(a, quotaOf(10, { observed_at: stale }), quotaOf(97))
+  withQuota(b, quotaOf(10))
+  const { acts, store, taskId } = await qfixture([a, b])
+  await acts.dispatchTask(taskId)
+  assert.equal(aCalls(), 2, '过期快照触发一次重新获取')
+  assert.equal(b.startCalls.length, 1)
+  assert.deepEqual(verdicts(await routed(store)), [['a', 'skipped', 'quota_low'], ['b', 'selected', null]])
+
+  const c = candidate('c')
+  const d = candidate('d')
+  withQuota(c, quotaOf(10, { observed_at: stale }))
+  withQuota(d, quotaOf(10))
+  const second = await qfixture([c, d])
+  await second.acts.dispatchTask(second.taskId)
+  assert.equal(d.startCalls.length, 1)
+  assert.deepEqual((await routed(second.store)).candidates.map((x: any) => x.quota), ['unknown', 'sufficient'])
+})
+
+test('阈值可由 CMAP_QUOTA_LOW_PERCENT 配置', async () => {
+  const a = candidate('a')
+  const b = candidate('b')
+  withQuota(a, quotaOf(85))
+  withQuota(b, quotaOf(10))
+  process.env['CMAP_QUOTA_LOW_PERCENT'] = '80'
+  try {
+    const { acts, store, taskId } = await qfixture([a, b])
+    await acts.dispatchTask(taskId)
+    assert.equal(b.startCalls.length, 1)
+    assert.deepEqual(verdicts(await routed(store)), [['a', 'skipped', 'quota_low'], ['b', 'selected', null]])
+  } finally {
+    delete process.env['CMAP_QUOTA_LOW_PERCENT']
+  }
+  const c = candidate('c')
+  withQuota(c, quotaOf(85))
+  const { acts, taskId } = await qfixture([c])
+  await acts.dispatchTask(taskId)
+  assert.equal(c.startCalls.length, 1, '默认阈值 90%，85% 仍可派')
+})
+
+test('所有候选额度都低时不派发，先记决策再报错', async () => {
+  const a = candidate('a')
+  withQuota(a, quotaOf(100))
+  const { acts, store, taskId } = await qfixture([a])
+  await assert.rejects(acts.dispatchTask(taskId), /没有可用 Adapter/)
+  assert.equal(a.startCalls.length, 0)
+  assert.deepEqual(verdicts(await routed(store)), [['a', 'skipped', 'quota_low']])
+})
+
+test('已绑定任务不因额度变化迁移：额度转低后重试派发仍复用原 binding', async () => {
+  const a = candidate('a')
+  const b = candidate('b')
+  withQuota(a, quotaOf(10), quotaOf(99))
+  withQuota(b, quotaOf(10))
+  const { acts, store, taskId } = await qfixture([a, b])
+  const first = await acts.dispatchTask(taskId)
+  const again = await acts.dispatchTask(taskId)
+  assert.equal(again.dispatched, false)
+  assert.equal((again as any).remoteTaskId, (first as any).remoteTaskId)
+  assert.equal(a.startCalls.length, 1)
+  assert.equal(b.startCalls.length, 0)
+  assert.equal((await store.getTask(taskId))!.binding!.adapter, 'a-adapter')
+  assert.equal((await store.listEvents('routing-mission')).filter(e => e.event_type === 'ROUTING_DECIDED').length, 1)
 })

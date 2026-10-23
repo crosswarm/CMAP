@@ -112,6 +112,9 @@ const failedResultFromCollectError = (
   },
 })
 
+type QuotaVerdict = 'sufficient' | 'low' | 'unknown'
+const QUOTA_STALE_MS = 5 * 60_000
+
 /** 默认返工预算。绝不无限重试——耗尽即升级给人。 */
 const DEFAULT_MAX_CYCLES = 2
 
@@ -240,6 +243,18 @@ export const createActivities = (deps: ActivityDeps) => {
   const runnerId = runner.runner_id
   const pollIntervalMs = deps.pollIntervalMs ?? 2_000
   const approvalPollIntervalMs = deps.approvalPollIntervalMs ?? 5_000
+  // ADR-0009 §2：已用比例 ≥ 阈值（默认 90%）或提供方不允许普通用量即额度低；快照超过 5 分钟视为过期
+  const quotaLowPercent = Number(process.env['CMAP_QUOTA_LOW_PERCENT'] ?? 90)
+  if (!(quotaLowPercent > 0 && quotaLowPercent <= 100)) throw new Error('CMAP_QUOTA_LOW_PERCENT 须在 (0, 100] 之间')
+  const isQuotaStale = (q: QuotaSnapshotV1): boolean => !(Date.now() - Date.parse(q.observed_at) <= QUOTA_STALE_MS)
+  const quotaVerdict = (q: QuotaSnapshotV1 | undefined): QuotaVerdict => {
+    if (!q || isQuotaStale(q)) return 'unknown'
+    if (q.ordinary_usage_allowed === false) return 'low'
+    if (q.status !== 'ok') return 'unknown'
+    if (q.windows.some((w) => w.used_percent >= quotaLowPercent)) return 'low'
+    // 只有窗口数据或提供方明确允许，才算已知充足；什么都没说不能推断为充足
+    return q.windows.length > 0 || q.ordinary_usage_allowed === true ? 'sufficient' : 'unknown'
+  }
   const executionUncertain = {code:'BINDING_NOT_FOUND',terminalObserved:false} as const
   const hasExecutionUncertainty = async (task: TaskRecord): Promise<boolean> => {
     const receipts = (await store.listEvents(task.mission_id))
@@ -265,13 +280,18 @@ export const createActivities = (deps: ActivityDeps) => {
     return selected
   }
 
+  /** quota / quota_observed_at：额度判定与所用快照时刻（ADR-0009）；未走到额度判定的候选为 null。 */
+  interface RoutingCandidate {
+    agent_id: string; adapter_id: string | null; verdict: 'selected' | 'skipped'; reason: string | null
+    quota: QuotaVerdict | null; quota_observed_at: string | null
+  }
   /** 一次选择的完整记录：各候选按评估顺序的判定与原因，供 ROUTING_DECIDED 事件与路由效率评测。 */
   interface RoutingDecision {
     readonly preferred_agent: string | null
     readonly chosen_agent: string | null
     readonly chosen_adapter: string | null
     readonly fallback: boolean
-    readonly candidates: readonly {agent_id: string; adapter_id: string | null; verdict: 'selected' | 'skipped'; reason: string | null}[]
+    readonly candidates: readonly RoutingCandidate[]
     readonly decision_ms: number
     readonly runner_id: string
   }
@@ -285,7 +305,10 @@ export const createActivities = (deps: ActivityDeps) => {
     const order = ids.length
       ? [...new Set(ids)].map((id) => ({id, matched: adapters.filter((a) => a.agentId === id)}))
       : adapters.map((a) => ({id: a.agentId, matched: [a]}))
-    const candidates: {agent_id: string; adapter_id: string | null; verdict: 'selected' | 'skipped'; reason: string | null}[] = []
+    const candidates: RoutingCandidate[] = []
+    const skip = (agent_id: string, adapter_id: string | null, reason: string): void => {
+      candidates.push({agent_id, adapter_id, verdict: 'skipped', reason, quota: null, quota_observed_at: null})
+    }
     const decision = (chosen: AgentAdapter | null): RoutingDecision => ({
       preferred_agent: policy.preferred_agent ?? null,
       chosen_agent: chosen?.agentId ?? null,
@@ -301,7 +324,7 @@ export const createActivities = (deps: ActivityDeps) => {
     const persistQuota = async (): Promise<void> => {
       for (const q of quotaSeen) if (q.account_ref) await store.putQuotaSnapshot(q)
     }
-    const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean}> => {
+    const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean; quota: QuotaSnapshotV1 | undefined}> => {
       try {
         const descriptor = await candidate.discover()
         if (descriptor.adapter_id !== candidate.adapterId || descriptor.agent_id !== candidate.agentId) return {reason: 'descriptor_mismatch'}
@@ -309,7 +332,9 @@ export const createActivities = (deps: ActivityDeps) => {
         const required = risks.indexOf(envelope.classification.risk_level)
         const ceiling = risks.indexOf(descriptor.risk_ceiling)
         if (required < 0 || ceiling < required) return {reason: 'risk'}
-        const health = await candidate.health()
+        let health = await candidate.health()
+        // 快照过期即以 health 重新获取一次；仍过期则按未知处理（见 quotaVerdict）
+        if (health.quota && isQuotaStale(health.quota)) health = await candidate.health()
         if (health.quota) quotaSeen.push(health.quota)
         if (health.state !== 'healthy') return {reason: 'unhealthy'}
         // 远程 runner 公布的准入白名单：不放行就跳过并回落，而不是派过去再收准入拒绝。runner 仍会复核。
@@ -320,33 +345,53 @@ export const createActivities = (deps: ActivityDeps) => {
           if (!allow.allowed_capabilities.includes(envelope.classification.requested_capability)) return {reason: 'capability_mismatch'}
           if (risks.indexOf(allow.max_risk) < required) return {reason: 'risk_exceeded'}
         }
-        return {supportsWorktreeIsolation: descriptor.supports_worktree_isolation}
+        return {supportsWorktreeIsolation: descriptor.supports_worktree_isolation, quota: health.quota}
       } catch {
         // 仅启动前探测允许转向下一候选；startTask 的不确定结果不得触发替补。
         return {reason: 'probe_error'}
       }
     }
+    // 额度未知的候选不排除，但排在已知充足者之后：先记为 skipped(quota_unknown)，没有已知充足者时取第一个未知者
+    let unknownPick: {adapter: AgentAdapter; supportsWorktreeIsolation: boolean; entry: RoutingCandidate} | undefined
     for (const {id, matched} of order) {
       if (!matched.length) {
-        candidates.push({agent_id: id, adapter_id: null, verdict: 'skipped', reason: 'not_registered'})
+        skip(id, null, 'not_registered')
         continue
       }
       for (const candidate of matched) {
         if (!runner.agents.includes(candidate.agentId)) {
-          candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'skipped', reason: 'not_on_runner'})
+          skip(id, candidate.adapterId, 'not_on_runner')
           continue
         }
         const verdict = await probe(candidate)
         if ('reason' in verdict) {
-          candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'skipped', reason: verdict.reason})
+          skip(id, candidate.adapterId, verdict.reason)
           continue
         }
-        candidates.push({agent_id: id, adapter_id: candidate.adapterId, verdict: 'selected', reason: null})
+        const quota = quotaVerdict(verdict.quota)
+        const entry: RoutingCandidate = {agent_id: id, adapter_id: candidate.adapterId, verdict: 'skipped', reason: null,
+          quota, quota_observed_at: verdict.quota?.observed_at ?? null}
+        candidates.push(entry)
+        if (quota === 'low') {
+          entry.reason = 'quota_low'
+          continue
+        }
+        if (quota === 'unknown') {
+          entry.reason = 'quota_unknown'
+          unknownPick ??= {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, entry}
+          continue
+        }
+        entry.verdict = 'selected'
         await persistQuota()
         return {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, routing: decision(candidate)}
       }
     }
     await persistQuota()
+    if (unknownPick) {
+      unknownPick.entry.verdict = 'selected'
+      unknownPick.entry.reason = null
+      return {adapter: unknownPick.adapter, supportsWorktreeIsolation: unknownPick.supportsWorktreeIsolation, routing: decision(unknownPick.adapter)}
+    }
     throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
   }
 
