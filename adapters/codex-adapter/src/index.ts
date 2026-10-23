@@ -7,15 +7,15 @@
  *
  * 安全基线：本机 codex 默认 sandbox_mode=danger-full-access +
  * approval_policy=never。那是单机自用的设置，一旦接入多人总线等于把机器
- * 交给别人派发的任务。本 Adapter 一律显式传 -s，绝不继承默认档。
+ * 交给别人派发的任务。本 Adapter 一律显式指定权限档（见 permissionArgs），绝不继承默认档。
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { terminateOwnedProcessGroup, type OwnedProcessGroupTermination } from '../../../packages/adapter-sdk/src/process-group.ts'
-import { mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join, sep } from 'node:path'
 
 import type {
   TaskEnvelopeV1,
@@ -83,6 +83,61 @@ const chooseSandbox = (envelope: TaskEnvelopeV1): CodexSandbox =>
     ? 'workspace-write'
     : 'read-only'
 
+/**
+ * 沙箱档位落成 codex 权限档（permission profile），而不是 `-s`。
+ *
+ * 实测 codex 0.159.2：`-s read-only/workspace-write`（旧沙箱设置）可读整个磁盘，包括 ~/.ssh 与
+ * ~/.codex/auth.json（T7 / P4-05b）。权限档能拒绝读写 HOME 下的路径（deny 同时挡元数据）。
+ * `-s` 与权限档互斥（传了 -s codex 就用旧设置），所以这里不再传 -s。
+ * codex 自身（沙箱外）读认证、写 -o、apply_patch 不受影响；被拒绝的只是模型生成的命令。
+ */
+const permissionArgs = (sandbox: CodexSandbox, homeDenials: readonly string[]): string[] => [
+  '-c', 'default_permissions="cmap"',
+  '-c', `permissions.cmap.extends="${sandbox === 'workspace-write' ? ':workspace' : ':read-only'}"`,
+  // :read-only 不含工作区专门条目；整个 ~ 被拒时会盖住 HOME 下的工作区，须显式更具体地授予读取
+  '-c', `permissions.cmap.filesystem={${[
+    ...homeDenials.map((p) => `${JSON.stringify(p)}="deny"`),
+    ...(sandbox === 'read-only' ? ['":workspace_roots"={"."="read"}'] : []),
+  ].join(',')}}`,
+]
+
+/**
+ * HOME 下要拒绝的路径：除 keep（工作区、TMPDIR、HOME 下的工具链）及其祖先目录外的全部条目。
+ *
+ * 不直接拒绝整个 ~：实测工作区在 HOME 下（生产 CMAP_WORK_ROOT 即是）时，祖先目录元数据不可读会让
+ * `sh` 的 cd 与 node 的 realpathSync 失败。所以只放行祖先目录本身（可列出名字），拒绝其余兄弟条目。
+ * 符号链接跳过：seatbelt 按解析后的路径判定，指回 HOME 的链接由目标的真实位置覆盖。
+ * keep 须是物理路径。shortcut: 启动后新建的 HOME 条目不在拒绝清单内，需要时改为 seatbelt 外层包装。
+ */
+export const homeReadDenials = async (home: string, keep: readonly string[]): Promise<string[]> => {
+  const within = (k: string, p: string) => k === p || k.startsWith(p + sep)
+  if (!keep.some((k) => within(k, home) && k !== home)) return keep.includes(home) ? [] : ['~']
+  const denied: string[] = []
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue
+      const path = join(dir, entry.name)
+      if (!keep.some((k) => within(k, path))) denied.push(path)
+      else if (!keep.includes(path)) await walk(path)
+    }
+  }
+  await walk(home)
+  return denied
+}
+
+/** PATH 中位于 HOME 下的目录；Homebrew 前缀（<prefix>/bin 旁有 Cellar）整体放行，否则 bin 里的链接解析不了。 */
+export const homeToolchainRoots = async (home: string, path = ''): Promise<string[]> => {
+  const roots = new Set<string>()
+  for (const entry of path.split(delimiter)) {
+    const real = await realpath(entry).catch(() => null)
+    if (!real || !real.startsWith(home + sep)) continue
+    const prefix = dirname(real)
+    const brew = prefix !== home && (await stat(join(prefix, 'Cellar')).catch(() => null))?.isDirectory()
+    roots.add(brew ? prefix : real)
+  }
+  return [...roots]
+}
+
 /** 契约允许的四档。codex 恰好原生支持全部，无需降级映射。 */
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
 
@@ -113,6 +168,8 @@ export interface CodexArgsOptions {
   readonly prompt: string
   /** runner 侧默认模型（lap 上 codex 内置默认不可用）。仅在信封无 model_policy 时以 -m 显式传入。 */
   readonly defaultModel?: string
+  /** 沙箱内拒绝读写的 HOME 路径（见 homeReadDenials）；缺省拒绝整个 ~。 */
+  readonly homeDenials?: readonly string[]
 }
 
 /**
@@ -130,7 +187,7 @@ export const buildCodexArgs = (
     '--ignore-user-config',
     '--ephemeral',
     '--json',
-    '-s', chooseSandbox(envelope),
+    ...permissionArgs(chooseSandbox(envelope), opts.homeDenials ?? ['~']),
     '-C', opts.workDir,
     '--skip-git-repo-check',
     '--output-schema', opts.outputSchemaPath,
@@ -340,18 +397,25 @@ export class CodexAdapter implements AgentAdapter {
     // 无 runsDir（standalone）时用本进程独有的目录（0700），cleanup 时删除。它必须在沙箱不可写的位置：
     // workspace-write 通常放行 TMPDIR，放那里 Agent 能抢先替换结果文件，所以放 HOME 下 CMAP 自有目录。
     const physicalTmpDir = await realpath(tmpdir())
+    const home = await realpath(homedir())
+    const homeDenials = await homeReadDenials(home, [
+      physicalWorkDir, physicalTmpDir, ...(await homeToolchainRoots(home, process.env['PATH'])),
+    ])
     const resultDir = this.#runsDir ?? (await makeStandaloneResultDir())
     const resultFile = join(resultDir, `.cmap-result-${envelope.identity.task_id}.json`)
     const prompt = renderTaskPrompt(envelope)
     const binding = this.prepareBinding(envelope, ctx)
 
-    const args = buildCodexArgs(envelope, {
+    const argOpts: CodexArgsOptions = {
       workDir: physicalWorkDir,
       resultFile,
       outputSchemaPath: this.#outputSchemaPath,
       prompt,
       ...(this.#defaultModel ? { defaultModel: this.#defaultModel } : {}),
-    })
+    }
+    const args = buildCodexArgs(envelope, { ...argOpts, homeDenials })
+    // 启动意图的哈希不含拒绝清单：清单随 HOME 内容（如其他任务的工作区）变化，重启后重派同一任务不应判冲突
+    const intentArgs = buildCodexArgs(envelope, argOpts)
 
     try {
       await ctx.beforeSend?.(binding)
@@ -377,7 +441,7 @@ export class CodexAdapter implements AgentAdapter {
         pid: null,
         process_start: null,
         started_at: new Date().toISOString(),
-        args_sha256: createHash('sha256').update(JSON.stringify(args)).digest('hex'),
+        args_sha256: createHash('sha256').update(JSON.stringify(intentArgs)).digest('hex'),
         work_dir: workDir,
         owns_work_dir: ownsWorkDir,
         result_file: resultFile,
@@ -421,6 +485,8 @@ export class CodexAdapter implements AgentAdapter {
           // 导致连接看似成功却永远等不到有效响应（静默挂起）。
           NO_PROXY: 'localhost,127.0.0.1,::1',
           no_proxy: 'localhost,127.0.0.1,::1',
+          // 权限档拒绝读 HOME，git 读 ~/.gitconfig 得 EPERM 会直接 fatal（实测）；任务也不该继承个人 git 配置
+          GIT_CONFIG_GLOBAL: '/dev/null',
           CMAP_TASK_ID: envelope.identity.task_id,
           CMAP_TRACE_ID: ctx.trace_id,
         }),

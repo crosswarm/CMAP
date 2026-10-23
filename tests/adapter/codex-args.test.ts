@@ -10,7 +10,11 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import type { TaskEnvelopeV1 } from '#domain-model'
-import { buildCodexArgs, InvalidEffortError } from '../../adapters/codex-adapter/src/index.ts'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { delimiter, join } from 'node:path'
+
+import { buildCodexArgs, homeReadDenials, homeToolchainRoots, InvalidEffortError } from '../../adapters/codex-adapter/src/index.ts'
 
 const SHA40 = 'e35a48a1b2c3d4e5f60718293a4b5c6d7e8f9012'
 
@@ -129,7 +133,73 @@ describe('既有参数不受影响', () => {
 
   test('声明了证据产物就要能写工作区，绝不使用 danger-full-access', () => {
     const args = buildCodexArgs(envelope(), opts)
-    assert.equal(valueOf(args, '-s'), 'workspace-write')
-    assert.ok(!args.includes('danger-full-access'))
+    assert.ok(configs(args).includes('default_permissions="cmap"'), '必须显式选定 CMAP 权限档，不继承本机默认')
+    assert.ok(configs(args).includes('permissions.cmap.extends=":workspace"'))
+    assert.ok(!args.some((a) => a.includes('danger-full-access')))
+  })
+})
+
+/** 所有 -c 的值 */
+const configs = (args: readonly string[]): string[] =>
+  args.flatMap((a, i) => (args[i - 1] === '-c' ? [a] : []))
+
+/** 契约要求至少一个证据角色；只读档只在旧信封/直接调用时出现，这里绕过类型构造。 */
+const readOnlyEnvelope = (): TaskEnvelopeV1 =>
+  ({ ...envelope(), evidence_requirements: { required_artifact_roles: [] } }) as unknown as TaskEnvelopeV1
+
+describe('读取范围（P4-05b / T7）', () => {
+  test('不传 -s：-s 会让 codex 退回旧沙箱设置，旧设置可读整个磁盘', () => {
+    for (const e of [envelope(), readOnlyEnvelope()]) {
+      assert.equal(buildCodexArgs(e, opts).includes('-s'), false)
+    }
+  })
+
+  test('workspace-write 档默认拒绝读写整个 ~，工作区与 TMPDIR 由 :workspace 更具体的条目放行', () => {
+    assert.ok(configs(buildCodexArgs(envelope(), opts)).includes('permissions.cmap.filesystem={"~"="deny"}'))
+  })
+
+  test('read-only 档同样拒绝 HOME，并显式授予工作区读取（工作区可能在 HOME 下）', () => {
+    const c = configs(buildCodexArgs(readOnlyEnvelope(), opts))
+    assert.ok(c.includes('permissions.cmap.extends=":read-only"'))
+    assert.ok(c.includes('permissions.cmap.filesystem={"~"="deny",":workspace_roots"={"."="read"}}'))
+  })
+
+  test('拒绝清单按路径逐条落成 TOML 键（JSON 字符串转义即 TOML 基本字符串）', () => {
+    const c = configs(buildCodexArgs(envelope(), { ...opts, homeDenials: ['/h/.ssh', '/h/a "b"'] }))
+    assert.ok(c.includes('permissions.cmap.filesystem={"/h/.ssh"="deny","/h/a \\"b\\""="deny"}'), JSON.stringify(c))
+  })
+})
+
+describe('homeReadDenials：只放行 keep 及其祖先目录', () => {
+  const tree = async () => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'cmap-home-')))
+    for (const d of ['.ssh', 'work/t1', 'work/t2', 'work/.runs', 'tools/bin']) await mkdir(join(home, d), { recursive: true })
+    await writeFile(join(home, '.netrc'), 'x')
+    await writeFile(join(home, 'work', 'note'), 'x')
+    await symlink(join(home, '.ssh'), join(home, 'link-ssh'))
+    return home
+  }
+
+  test('工作区在 HOME 下：兄弟条目（含其他任务工作区、运行记录、HOME 根下文件）全拒，祖先目录与符号链接不列入', async (t) => {
+    const home = await tree()
+    t.after(() => rm(home, { recursive: true, force: true }))
+    const denied = await homeReadDenials(home, [join(home, 'work/t1'), join(home, 'tools')])
+    assert.deepEqual(denied.sort(), ['.netrc', '.ssh', 'work/.runs', 'work/note', 'work/t2'].map((p) => join(home, p)).sort())
+  })
+
+  test('keep 都不在 HOME 下：直接拒绝整个 ~', async (t) => {
+    const home = await tree()
+    t.after(() => rm(home, { recursive: true, force: true }))
+    assert.deepEqual(await homeReadDenials(home, ['/private/tmp/x']), ['~'])
+  })
+})
+
+describe('homeToolchainRoots：PATH 中 HOME 下的目录', () => {
+  test('Homebrew 前缀整体放行，其他 bin 目录只放行自身，HOME 外与不存在的目录忽略', async (t) => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'cmap-path-')))
+    t.after(() => rm(home, { recursive: true, force: true }))
+    for (const d of ['.homebrew/bin', '.homebrew/Cellar', '.codex/bin', 'bin']) await mkdir(join(home, d), { recursive: true })
+    const path = [join(home, '.homebrew/bin'), join(home, '.codex/bin'), join(home, 'bin'), '/usr/bin', join(home, 'missing')].join(delimiter)
+    assert.deepEqual(await homeToolchainRoots(home, path), [join(home, '.homebrew'), join(home, '.codex/bin'), join(home, 'bin')])
   })
 })

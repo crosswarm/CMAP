@@ -9,7 +9,9 @@ import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
@@ -29,6 +31,10 @@ import { assertCurrentTaskApproval } from '../../workflows/runner-admission.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { FileFakeAdapter, syntheticActivityDeps, syntheticRunner } from '../workflow/fake-adapter.ts'
 import { scanZeroHit } from '../../scripts/p4-zero-hit.ts'
+import { buildCodexArgs, homeReadDenials } from '../../adapters/codex-adapter/src/index.ts'
+import { buildKimiSandbox } from '../../adapters/kimi-adapter/src/runtime.ts'
+
+const execFileP = promisify(execFile)
 
 const ISSUER = 'http://idp.test/realms/cmap'
 const AUDIENCE = 'cmap-api'
@@ -331,7 +337,53 @@ describe('P4 安全验收清单：12 项拒绝用例', () => {
     assert.ok(validate(env(['docs/a.md'])), JSON.stringify(validate.errors))
     for (const p of ['/Users/x/.ssh/id_rsa', '../../.ssh/id_rsa', 'docs/../../x']) assert.equal(validate(env([p])), false, p)
   })
-  test.todo('P4-05b 任务运行时读取 context.paths 声明外的路径——未覆盖：没有 runner 侧读取校验，codex -s read-only/workspace-write 不限制读取范围（威胁模型 T7 第 4 行 ⬜）')
+  test('P4-05b 任务运行时读取 HOME 下工作区外的路径被沙箱拒绝，工作区仍可读（Codex 权限档 + Kimi seatbelt；既有：adapter/codex-args.test「读取范围」、adapter/kimi-runtime.test）', async (t) => {
+    const base = await realpath(tmpdir())
+    const home = await mkdtemp(join(base, 'p4-05b-home-'))
+    const runtime = await mkdtemp(join(base, 'p4-05b-rt-'))
+    t.after(() => Promise.all([home, runtime].map((d) => rm(d, { recursive: true, force: true }))))
+    const work = join(home, 'work')
+    await mkdir(join(home, '.ssh'), { recursive: true })
+    await mkdir(work)
+    await writeFile(join(home, '.ssh', 'id_probe'), 'not-a-key')
+    await writeFile(join(work, 'in.txt'), 'ok')
+    await mkdir(join(work, 'sub'))
+    // sh 的 cd 与 node 的 realpathSync 需要祖先目录元数据：工作区在 HOME 下时不能整个拒绝 ~（生产 CMAP_WORK_ROOT 即如此）
+    const probe = `ls '${home}/.ssh' >/dev/null 2>&1 && echo OUTSIDE_READABLE || echo OUTSIDE_DENIED; ` +
+      `cat in.txt >/dev/null 2>&1 && echo WORKSPACE_READABLE || echo WORKSPACE_DENIED; ` +
+      `(cd sub && '${process.execPath}' -e 'require("fs").realpathSync(".")') >/dev/null 2>&1 && echo WORKSPACE_CD_OK || echo WORKSPACE_CD_FAIL`
+    const expected = ['OUTSIDE_DENIED', 'WORKSPACE_READABLE', 'WORKSPACE_CD_OK']
+    const lines = (out: string) => out.split('\n').filter((l) => /^(OUTSIDE|WORKSPACE)_/.test(l))
+
+    // 参数级（任何平台）：两档都不传 -s（会退回可读全盘的旧设置），都拒绝 HOME 下工作区以外的条目
+    const homeDenials = await homeReadDenials(home, [work])
+    assert.deepEqual(homeDenials, [join(home, '.ssh')])
+    const envFor = (roles: string[]) => ({ ...task('t-05b', 'mis-05b').envelope, evidence_requirements: { required_artifact_roles: roles } }) as TaskEnvelopeV1
+    const argSets = [['report'], []].map((roles) => buildCodexArgs(envFor(roles), { workDir: work, resultFile: '/r', outputSchemaPath: '/s', prompt: 'p', homeDenials }))
+    for (const args of argSets) {
+      assert.equal(args.includes('-s'), false)
+      assert.ok(args.some((a) => a.startsWith(`permissions.cmap.filesystem={${JSON.stringify(join(home, '.ssh'))}="deny"`)), JSON.stringify(args))
+    }
+    if (process.platform !== 'darwin') return t.diagnostic('非 macOS：只做参数级断言')
+
+    // Kimi：真实 sandbox-exec 跑 buildKimiSandbox 生成的 profile（不调用 Kimi）
+    const cred = join(runtime, 'cred')
+    const oauth = join(runtime, 'oauth')
+    await mkdir(cred)
+    await mkdir(oauth)
+    const profile = buildKimiSandbox({ workDir: work, runtimeDir: runtime, credentialDir: cred, oauthDir: oauth, userHome: home, bin: '/bin/sh' }, [])
+    const kimi = await execFileP('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', probe], { cwd: work })
+    assert.deepEqual(lines(kimi.stdout), expected, 'Kimi')
+
+    // Codex：真实 `codex sandbox` 套用 buildCodexArgs 给出的同一权限档（不调用模型）；本机无 codex 则跳过
+    try { await execFileP('codex', ['--version']) } catch { return t.diagnostic('无 codex CLI：Codex 只做参数级断言') }
+    for (const args of argSets) {
+      const perms = args.filter((a, i) => args[i - 1] === '-c' && a.startsWith('permissions.cmap.')).flatMap((a) => ['-c', a])
+      const out = await execFileP('codex', ['sandbox', ...perms, '-P', 'cmap', '-C', work, '--', '/bin/sh', '-c', probe],
+        { cwd: work, env: { ...process.env, HOME: home, TMPDIR: base } })
+      assert.deepEqual(lines(out.stdout), expected, `Codex ${perms.join(' ')}`)
+    }
+  })
 
   test.todo('P4-06 Agent 推送 main 或 release/*——未覆盖：信封 deny_push 只是字段，CMAP 无强制执行点；是否能推取决于 Agent 沙箱网络与凭据，未核实（威胁模型 T1 第 3 行 🟡）')
 
