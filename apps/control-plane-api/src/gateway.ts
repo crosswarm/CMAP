@@ -11,10 +11,13 @@
  *
  * 结果先落账（租约关闭、结果入库）再向 Workflow 按门铃；门铃丢了 Workflow 靠超时回读兜底，所以发送失败只记录。
  */
-import type { KeyObject } from 'node:crypto'
+import { createHash, createPublicKey, randomBytes, type KeyObject } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
-import { ed25519PublicKeyFromRaw, validateGatewayMessage, type GatewayLease, type Store, type RunnerGatewayMessageV1 } from '#domain-model'
+import {
+  ed25519PublicKeyFromRaw, rawEd25519PublicKey, validateEnrollmentMessage, validateGatewayMessage, verifyEnrollmentProof,
+  type GatewayLease, type Store, type RunnerGatewayMessageV1,
+} from '#domain-model'
 import {
   GATEWAY_RUNNER_ID_HEADER, RUNNER_AUTH_HEADERS, RUNNER_AUTH_MAX_SKEW_MS, runnerBodySha256, signRunnerResponse, verifyRunnerRequest,
 } from '../../../packages/domain-model/src/dispatch-permit.ts'
@@ -24,6 +27,9 @@ const CLAIM_MAX_BYTES = 64 * 1024
 /** 结果随回报内联产物字节（与 remote-runner.v1 同样的 base64 上限）。 */
 const REPORT_MAX_BYTES = 64 * 1024 * 1024
 const UNAUTHORIZED_BODY = JSON.stringify({ schema: SCHEMA, kind: 'error', code: 'UNAUTHORIZED', retryable: false })
+const ENROLLMENT = 'cmap/runner-enrollment/v1'
+/** 登记失败的唯一对外形态：未知、过期、已用的令牌，错误的持钥证明，已登记的公钥，一律同一个 403。 */
+const ENROLLMENT_DENIED_BODY = JSON.stringify({ schema: ENROLLMENT, kind: 'error', code: 'ENROLLMENT_DENIED', retryable: false })
 
 export interface RunnerGatewayOptions {
   /** 控制面网关签名私钥（Ed25519）；runner 在登记时固定其公钥，用来验网关应答。 */
@@ -113,14 +119,15 @@ export const createRunnerGateway = (opts: RunnerGatewayOptions & {
     const held = renewed.map((lease) => lease.lease_id)
     const until = at + msg.wait_seconds * 1000
     for (;;) {
-      // 连接已断就不再领取：领走却送不到的派发只能等租约过期判不确定。
-      const assigned = signal.aborted ? null : await store.claimGatewayLease(msg.runner_id, new Date(now()).toISOString(), new Date(now() + ttl).toISOString())
+      // 连接已断就不再领取：领走却送不到的派发只能等租约过期判不确定。长轮询期间被吊销的 runner 也不再领取。
+      const revoked = (await store.getGatewayRunner(msg.runner_id))?.revoked_at !== null
+      const assigned = signal.aborted || revoked ? null : await store.claimGatewayLease(msg.runner_id, new Date(now()).toISOString(), new Date(now() + ttl).toISOString())
       const cancels = []
       for (const id of held) {
         const lease = await store.getGatewayLease(id)
         if (lease?.state === 'leased' && lease.cancel) cancels.push({ lease_id: id, cancel: lease.cancel })
       }
-      if (assigned || cancels.length || now() >= until || signal.aborted) {
+      if (assigned || cancels.length || revoked || now() >= until || signal.aborted) {
         return {
           schema: SCHEMA, kind: 'claim_result', runner_id: msg.runner_id,
           renewed: renewed.map(leaseView), expired,
@@ -155,10 +162,41 @@ export const createRunnerGateway = (opts: RunnerGatewayOptions & {
     return { schema: SCHEMA, kind: 'report_ack', lease_id: msg.lease_id, lease: closed ? null : leaseView(out.lease) }
   }
 
+  const controlPlanePublicKey = rawEd25519PublicKey(createPublicKey(opts.signingKey))
+
+  /**
+   * POST /v1/runners/enroll（ADR-0008 §4）：注册令牌就是凭据，不走 OIDC。持钥证明通过后，按令牌记录登记、消耗令牌，
+   * 应答带 runner_id 与控制面网关公钥（runner 固定它来验网关应答）。runner 的 tenant/owner/上限只来自令牌记录。
+   */
+  const enroll = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const reply = (status: number, text: string): void => {
+      res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(text) }).end(text)
+    }
+    const raw = await readRaw(req, CLAIM_MAX_BYTES)
+    let msg: unknown
+    try { msg = raw === undefined ? undefined : JSON.parse(raw.toString('utf8')) } catch { msg = undefined }
+    if (!validateEnrollmentMessage(msg) || msg.kind !== 'enroll') {
+      return reply(400, JSON.stringify({ schema: ENROLLMENT, kind: 'error', code: 'INVALID_REQUEST', retryable: false }))
+    }
+    if (!verifyEnrollmentProof({ token: msg.token, publicKey: msg.public_key, host: msg.host, proof: msg.proof })) return reply(403, ENROLLMENT_DENIED_BODY)
+    const runner = await store.enrollGatewayRunner({
+      token_sha256: createHash('sha256').update(msg.token).digest('hex'),
+      runner_id: `rnr_${randomBytes(12).toString('base64url')}`,
+      public_key: msg.public_key, host: msg.host, now: new Date(now()).toISOString(),
+    })
+    if (!runner) return reply(403, ENROLLMENT_DENIED_BODY)
+    reply(201, JSON.stringify({
+      schema: ENROLLMENT, kind: 'enrolled', runner_id: runner.runner_id, tenant: runner.tenant, owner: runner.owner,
+      allowed_capabilities: runner.allowed_capabilities, max_risk: runner.max_risk, control_plane_public_key: controlPlanePublicKey,
+      enrolled_at: runner.enrolled_at,
+    }))
+  }
+
   return {
-    handles: (path: string): boolean => path === '/v1/gateway/claim' || path === '/v1/gateway/reports',
+    handles: (path: string): boolean => path === '/v1/gateway/claim' || path === '/v1/gateway/reports' || path === '/v1/runners/enroll',
 
     async handle(req: IncomingMessage, res: ServerResponse, url: URL, shutdown: AbortSignal): Promise<void> {
+      if (url.pathname === '/v1/runners/enroll') return req.method === 'POST' ? enroll(req, res) : sendUnauthorized(res)
       const auth = await authenticate(req, url.pathname + url.search)
       if (!auth) return sendUnauthorized(res)
       const send = (status: number, body: object): void => {

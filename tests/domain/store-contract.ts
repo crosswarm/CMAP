@@ -31,7 +31,7 @@ import {
 } from '#domain-model'
 import { MissionConflictError } from '../../packages/domain-model/src/mission-input.ts'
 import { BindingConflictError, GatewayLeaseConflictError, ReviewConflictError, TaskConflictError } from '../../packages/domain-model/src/store.ts'
-import type { GatewayRunner, EnqueueGatewayLeaseInput, GatewayReportBody } from '../../packages/domain-model/src/runner-gateway.ts'
+import type { GatewayRunner, EnqueueGatewayLeaseInput, GatewayReportBody, EnrollmentToken } from '../../packages/domain-model/src/runner-gateway.ts'
 
 const ACTOR: EventActor = { type: 'system', id: 'test-runner' }
 const T0 = '2026-08-02T00:00:00.000Z'
@@ -1707,6 +1707,60 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.equal(held.state, 'leased')
         assert.equal(held.cancel?.reason, 'MISSION_CANCELED')
         assert.equal(await s.cancelGatewayLease('ghost', cancel, at(now)), null)
+      })
+    })
+
+    describe('runner 注册与吊销（ADR-0008 §4）', () => {
+      const H = (c: string) => c.repeat(64)
+      const token = (token_sha256: string, overrides: Partial<EnrollmentToken> = {}): EnrollmentToken => ({
+        token_id: `enr-${token_sha256.slice(0, 4)}`, token_sha256, tenant: 'team-ycc', owner: 'crosswarm', allowed_capabilities: ['code.analyze'],
+        max_risk: 'read-meta', issued_by: 'admin-sub', expires_at: new Date(Date.now() + 3_600_000).toISOString(), created_at: T0,
+        used_at: null, runner_id: null, ...overrides,
+      })
+      const enroll = (token_sha256: string, runner_id: string, public_key: string) =>
+        ({ token_sha256, runner_id, public_key, host: 'lap', now: new Date().toISOString() })
+
+      test('令牌登记一次：runner 身份与上限取自令牌；同一令牌第二次、不存在的令牌均返回 null', async () => {
+        const s = await createStore()
+        await s.createEnrollmentToken(token(H('a'), { owner: 'alice', allowed_capabilities: ['code.analyze', 'code.modify'], max_risk: 'controlled' }))
+        const runner = await s.enrollGatewayRunner(enroll(H('a'), 'r1', 'K'.repeat(43)))
+        assert.ok(runner)
+        assert.deepEqual([runner.runner_id, runner.tenant, runner.owner, [...runner.allowed_capabilities], runner.max_risk, runner.revoked_at],
+          ['r1', 'team-ycc', 'alice', ['code.analyze', 'code.modify'], 'controlled', null])
+        assert.deepEqual(await s.getGatewayRunner('r1'), runner)
+        assert.equal(await s.enrollGatewayRunner(enroll(H('a'), 'r2', 'L'.repeat(43))), null, '令牌只能用一次')
+        assert.equal(await s.enrollGatewayRunner(enroll(H('z'), 'r3', 'M'.repeat(43))), null)
+        assert.equal(await s.getGatewayRunner('r2'), null)
+      })
+
+      test('过期令牌拒绝；公钥已登记时拒绝且令牌不被消耗', async () => {
+        const s = await createStore()
+        await s.createEnrollmentToken(token(H('b'), { expires_at: new Date(Date.now() - 1000).toISOString() }))
+        assert.equal(await s.enrollGatewayRunner(enroll(H('b'), 'r1', 'K'.repeat(43))), null)
+        await s.createEnrollmentToken(token(H('c')))
+        await s.createEnrollmentToken(token(H('d')))
+        assert.ok(await s.enrollGatewayRunner(enroll(H('c'), 'r1', 'K'.repeat(43))))
+        assert.equal(await s.enrollGatewayRunner(enroll(H('d'), 'r2', 'K'.repeat(43))), null, '同一把公钥不能登记两次')
+        assert.ok(await s.enrollGatewayRunner(enroll(H('d'), 'r2', 'L'.repeat(43))), '失败的登记不消耗令牌')
+      })
+
+      test('并发使用同一令牌只有一个成功', async () => {
+        const s = await createStore()
+        await s.createEnrollmentToken(token(H('e')))
+        const out = await Promise.all(['K', 'L', 'M'].map((c, i) => s.enrollGatewayRunner(enroll(H('e'), `r${i}`, c.repeat(43)))))
+        assert.equal(out.filter(Boolean).length, 1)
+      })
+
+      test('吊销：只吊销本租户的 runner；重复吊销保留首次时间；他租户返回 null', async () => {
+        const s = await createStore()
+        await s.createEnrollmentToken(token(H('f')))
+        await s.enrollGatewayRunner(enroll(H('f'), 'r1', 'K'.repeat(43)))
+        assert.equal(await s.revokeGatewayRunner('r1', 'other-tenant', T0), null)
+        assert.equal((await s.getGatewayRunner('r1'))!.revoked_at, null)
+        const at = '2026-10-23T02:00:00.000Z'
+        assert.equal((await s.revokeGatewayRunner('r1', 'team-ycc', at))!.revoked_at, at)
+        assert.equal((await s.revokeGatewayRunner('r1', 'team-ycc', '2026-10-23T03:00:00.000Z'))!.revoked_at, at)
+        assert.equal(await s.revokeGatewayRunner('ghost', 'team-ycc', at), null)
       })
     })
 

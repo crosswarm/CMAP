@@ -42,8 +42,8 @@ import type {
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
 import { assertSameMissionInput } from './mission-input.ts'
-import { applyGatewayCancel, applyGatewayReport, canRenewLease, newLease, sameEnqueue } from './runner-gateway.ts'
-import type { EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
+import { applyGatewayCancel, applyGatewayReport, canRenewLease, enrollmentTokenUsable, newLease, runnerFromToken, sameEnqueue } from './runner-gateway.ts'
+import type { EnrollGatewayRunnerInput, EnrollmentToken, EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
 import {
   ArtifactConflictError,
   BindingConflictError,
@@ -89,6 +89,7 @@ export class MemoryStore implements Store {
   readonly #locks = new Map<string, ResourceLock>()
   readonly #quota: QuotaSnapshotV1[] = []
   readonly #gatewayRunners = new Map<string, GatewayRunner>()
+  readonly #enrollmentTokens = new Map<string, EnrollmentToken>()
   readonly #gatewayLeases = new Map<string, GatewayLease>()
   /** idempotencyKey → 已产生的 event_id，用于重复投递去重 */
   readonly #seenKeys = new Map<string, string>()
@@ -561,6 +562,32 @@ export class MemoryStore implements Store {
     }
     this.#gatewayRunners.set(runner.runner_id, structuredClone(runner))
     return structuredClone(runner)
+  }
+
+  async createEnrollmentToken(token: EnrollmentToken): Promise<EnrollmentToken> {
+    if (this.#enrollmentTokens.has(token.token_sha256) || [...this.#enrollmentTokens.values()].some((t) => t.token_id === token.token_id)) {
+      throw new Error(`注册令牌 ${token.token_id} 已存在`)
+    }
+    this.#enrollmentTokens.set(token.token_sha256, structuredClone(token))
+    return structuredClone(token)
+  }
+
+  async enrollGatewayRunner(input: EnrollGatewayRunnerInput): Promise<GatewayRunner | null> {
+    const token = this.#enrollmentTokens.get(input.token_sha256)
+    if (!enrollmentTokenUsable(token, Date.parse(input.now))) return null
+    if (this.#gatewayRunners.has(input.runner_id) || [...this.#gatewayRunners.values()].some((r) => r.public_key === input.public_key)) return null
+    const runner = runnerFromToken(token, input)
+    this.#enrollmentTokens.set(input.token_sha256, { ...token, used_at: input.now, runner_id: input.runner_id })
+    this.#gatewayRunners.set(runner.runner_id, runner)
+    return structuredClone(runner)
+  }
+
+  async revokeGatewayRunner(runnerId: string, tenant: string, at: string): Promise<GatewayRunner | null> {
+    const runner = this.#gatewayRunners.get(runnerId)
+    if (!runner || runner.tenant !== tenant) return null
+    const next = runner.revoked_at === null ? { ...runner, revoked_at: at } : runner
+    this.#gatewayRunners.set(runnerId, next)
+    return structuredClone(next)
   }
 
   async getGatewayRunner(runnerId: string): Promise<GatewayRunner | null> {

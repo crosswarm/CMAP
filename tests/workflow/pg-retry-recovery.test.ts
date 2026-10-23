@@ -129,6 +129,9 @@ class ThrowAfterCommitStore implements Store {
   async getLatestQuotaSnapshot(...args: Parameters<Store['getLatestQuotaSnapshot']>) { return this.inner.getLatestQuotaSnapshot(...args) }
   async listLatestQuotaSnapshots() { return this.inner.listLatestQuotaSnapshots() }
   async healthCheck() { return this.inner.healthCheck() }
+  createEnrollmentToken: Store['createEnrollmentToken'] = (...a) => this.inner.createEnrollmentToken(...a)
+  enrollGatewayRunner: Store['enrollGatewayRunner'] = (...a) => this.inner.enrollGatewayRunner(...a)
+  revokeGatewayRunner: Store['revokeGatewayRunner'] = (...a) => this.inner.revokeGatewayRunner(...a)
   registerGatewayRunner: Store['registerGatewayRunner'] = (...a) => this.inner.registerGatewayRunner(...a)
   getGatewayRunner: Store['getGatewayRunner'] = (...a) => this.inner.getGatewayRunner(...a)
   listGatewayRunners: Store['listGatewayRunners'] = (...a) => this.inner.listGatewayRunners(...a)

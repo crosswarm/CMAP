@@ -55,8 +55,8 @@ import type {
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
 import { decideApprovalState } from './approval-state.ts'
 import { assertSameMissionInput } from './mission-input.ts'
-import { applyGatewayCancel, applyGatewayReport, canRenewLease, newLease, sameEnqueue } from './runner-gateway.ts'
-import type { EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
+import { applyGatewayCancel, applyGatewayReport, canRenewLease, enrollmentTokenUsable, newLease, runnerFromToken, sameEnqueue } from './runner-gateway.ts'
+import type { EnrollGatewayRunnerInput, EnrollmentToken, EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
 import {
   ArtifactConflictError,
   BindingConflictError,
@@ -232,6 +232,20 @@ const toGatewayRunner = (r: Record<string, unknown>): GatewayRunner => ({
   enrolled_at: iso(r['enrolled_at']),
   revoked_at: isoOrNull(r['revoked_at']),
   last_seen_at: isoOrNull(r['last_seen_at']),
+})
+
+const toEnrollmentToken = (r: Record<string, unknown>): EnrollmentToken => ({
+  token_id: r['token_id'] as string,
+  token_sha256: r['token_sha256'] as string,
+  tenant: r['tenant'] as string,
+  owner: r['owner'] as string,
+  allowed_capabilities: r['allowed_capabilities'] as string[],
+  max_risk: r['max_risk'] as RiskLevel,
+  issued_by: r['issued_by'] as string,
+  expires_at: iso(r['expires_at']),
+  created_at: iso(r['created_at']),
+  used_at: isoOrNull(r['used_at']),
+  runner_id: (r['runner_id'] as string | null) ?? null,
 })
 
 const toGatewayLease = (r: Record<string, unknown>): GatewayLease => ({
@@ -956,6 +970,47 @@ export class PgStore implements Store {
         runner.host, runner.enrolled_at, runner.revoked_at, runner.last_seen_at],
     )
     return toGatewayRunner(rows[0] as Record<string, unknown>)
+  }
+
+  async createEnrollmentToken(token: EnrollmentToken): Promise<EnrollmentToken> {
+    const { rows } = await this.#pool.query(
+      `INSERT INTO enrollment_tokens (token_id, token_sha256, tenant, owner, allowed_capabilities, max_risk, issued_by, expires_at, created_at, used_at, runner_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [token.token_id, token.token_sha256, token.tenant, token.owner, [...token.allowed_capabilities], token.max_risk,
+        token.issued_by, token.expires_at, token.created_at, token.used_at, token.runner_id],
+    )
+    return toEnrollmentToken(rows[0] as Record<string, unknown>)
+  }
+
+  async enrollGatewayRunner(input: EnrollGatewayRunnerInput): Promise<GatewayRunner | null> {
+    try {
+      return await this.#tx(async (c) => {
+        // 行锁串行化同一令牌的并发登记：只有第一个看到 used_at IS NULL。
+        const { rows } = await c.query('SELECT * FROM enrollment_tokens WHERE token_sha256 = $1 FOR UPDATE', [input.token_sha256])
+        const token = rows.length ? toEnrollmentToken(rows[0] as Record<string, unknown>) : null
+        if (!enrollmentTokenUsable(token, Date.parse(input.now))) return null
+        const runner = runnerFromToken(token, input)
+        await c.query(
+          `INSERT INTO gateway_runners (runner_id, public_key, tenant, owner, allowed_capabilities, max_risk, host, enrolled_at, revoked_at, last_seen_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,NULL)`,
+          [runner.runner_id, runner.public_key, runner.tenant, runner.owner, [...runner.allowed_capabilities], runner.max_risk, runner.host, runner.enrolled_at],
+        )
+        await c.query('UPDATE enrollment_tokens SET used_at = $2, runner_id = $3 WHERE token_id = $1', [token.token_id, input.now, input.runner_id])
+        return runner
+      })
+    } catch (e) {
+      // 公钥或 runner_id 已登记：整笔回滚，令牌不被消耗。
+      if ((e as { code?: string }).code === UNIQUE_VIOLATION) return null
+      throw e
+    }
+  }
+
+  async revokeGatewayRunner(runnerId: string, tenant: string, at: string): Promise<GatewayRunner | null> {
+    const { rows } = await this.#pool.query(
+      `UPDATE gateway_runners SET revoked_at = COALESCE(revoked_at, $3) WHERE runner_id = $1 AND tenant = $2 RETURNING *`,
+      [runnerId, tenant, at],
+    )
+    return rows.length ? toGatewayRunner(rows[0] as Record<string, unknown>) : null
   }
 
   async getGatewayRunner(runnerId: string): Promise<GatewayRunner | null> {

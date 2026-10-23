@@ -5,13 +5,14 @@
  */
 
 /**
- * ADR-0008 §4 runner enrollment. An admin (OIDC role admin) issues a one-time token: tenant comes from the admin's token claims, never from the request; it is bound to owner, a capability ceiling and a risk ceiling, expires within ttl_seconds (at most 3600) and is consumed by the first successful enroll. The token value is returned once and the control plane keeps only its sha256. On first start the runner generates an Ed25519 key pair, keeps the private key on its own host and enrolls with the token, its raw public key and a proof signature; it receives a runner_id plus the control-plane public key to pin for runner-gateway.v1 replies. The enrolled runner's tenant, owner and ceilings come from the token record; nothing in the enroll request can widen them. Revocation is a control-plane record change and takes effect on the next request. Every enroll failure (unknown, expired or used token, bad proof, key already enrolled) is the same ENROLLMENT_DENIED with no detail.
+ * ADR-0008 §4 runner enrollment. An admin (OIDC role admin) issues a one-time token: tenant comes from the admin's token claims, never from the request; it is bound to owner, a capability ceiling and a risk ceiling, expires within ttl_seconds (at most 3600) and is consumed by the first successful enroll. The token value is returned once and the control plane keeps only its sha256. On first start the runner generates an Ed25519 key pair, keeps the private key on its own host and enrolls with the token, its raw public key and a proof signature; it receives a runner_id plus the control-plane public key to pin for runner-gateway.v1 replies. The enrolled runner's tenant, owner and ceilings come from the token record; nothing in the enroll request can widen them. Revocation (POST /v1/runners/{runner_id}/revoke by an admin of the same tenant, empty JSON body, reply revoked) is a control-plane record change and takes effect on the next request: every gateway request from the runner is then the gateway's identical 401, and its in-flight leases are treated as execution uncertain (never reassigned or rerun). Every enroll failure (unknown, expired or used token, bad proof, key already enrolled) is the same ENROLLMENT_DENIED with no detail.
  */
 export type RunnerEnrollmentMessageV1 =
   | RunnerEnrollmentIssueV1
   | RunnerEnrollmentIssuedV1
   | RunnerEnrollmentRequestV1
   | RunnerEnrollmentAcceptedV1
+  | RunnerEnrollmentRevokedV1
   | RunnerEnrollmentErrorV1
 export type SchemaTag = 'cmap/runner-enrollment/v1'
 export type Identifier = string
@@ -80,6 +81,15 @@ export interface RunnerEnrollmentAcceptedV1 {
   max_risk: Risk
   control_plane_public_key: Ed25519PublicKey
   enrolled_at: string
+}
+/**
+ * Reply to POST /v1/runners/{runner_id}/revoke. Idempotent: revoking again returns the original revoked_at. A runner of another tenant is 404, not 403.
+ */
+export interface RunnerEnrollmentRevokedV1 {
+  schema: SchemaTag
+  kind: 'revoked'
+  runner_id: Identifier
+  revoked_at: string
 }
 /**
  * ENROLLMENT_DENIED for every enroll failure; INVALID_REQUEST for malformed bodies; FORBIDDEN when the issuer lacks the admin role.

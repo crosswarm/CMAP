@@ -23,6 +23,7 @@ const valid = {
     schema: S, kind: 'enrolled', runner_id: 'rnr_01', tenant: 'team-ycc', owner: 'crosswarm',
     allowed_capabilities: ['code.analyze'], max_risk: 'read-meta', control_plane_public_key: KEY, enrolled_at: '2026-10-23T00:10:00.000Z',
   },
+  revoked: { schema: S, kind: 'revoked', runner_id: 'rnr_01', revoked_at: '2026-10-23T02:00:00.000Z' },
   error: { schema: S, kind: 'error', code: 'ENROLLMENT_DENIED', retryable: false },
 }
 
@@ -55,6 +56,9 @@ describe('runner-enrollment schema', () => {
       patch('enroll', (v) => { v.owner = 'someone-else' }),
       patch('enrolled', (v) => { v.token = TOKEN }),
       patch('enrolled', (v) => { v.allowed_owners = ['*'] }),
+      patch('revoked', (v) => { delete v.revoked_at }),
+      patch('revoked', (v) => { v.runner_id = '*' }),
+      patch('revoked', (v) => { v.reason = 'stolen laptop' }),
       patch('error', (v) => { v.code = 'TOKEN_EXPIRED' }),
       patch('error', (v) => { v.detail = 'token used at 10:00' }),
     ]) assert.equal(validate(value), false, `${name}: ${JSON.stringify(value)}`)

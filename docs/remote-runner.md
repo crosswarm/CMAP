@@ -261,6 +261,12 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 - **结果**：先落账（租约关闭、回报入库），再向 `mission-<id>` 发 `runnerReported` 门铃；dag/v1 的 attempt 派发后返回 `awaiting_report`，Workflow 等门铃或 30 秒超时回读（`patched('dag-runner-report-signal-v1')`）。持有资源锁的任务仍在 Activity 内等待（锁靠它续租）。产物落盘后由 Worker 独立复算 sha256。
 - **路由**：按登记记录挑 runner——同租户、未吊销、能力与风险上限放行、最近 120 秒内领取过；挑不到记 `no_runner` / `capability_mismatch` / `risk_exceeded` / `unhealthy` 并按 fallback 回落。runner 侧准入白名单只取自登记记录。
 
+注册与吊销（ADR-0008 §4，runner-enrollment.v1）：
+
+- admin（OIDC 角色 `admin`）`POST /v1/runner-enrollments` 签发一次性令牌：至多 1 小时、单次使用，绑定 owner、能力上限、风险上限；tenant 取自 admin 的 token claims，请求体不能指定。令牌明文只在应答里出现一次，账本只存 sha256。
+- runner 首次启动生成 Ed25519 密钥，用 `CMAP_RUNNER_ENROLL_TOKEN` 调 `POST /v1/runners/enroll`（不走 OIDC）：持钥证明为新私钥对 `cmap-enroll1` LF 令牌 LF 公钥 LF host 的签名。成功后得到 `runner_id` 与控制面网关公钥，写成 0600 的登记记录；之后启动只读记录，令牌不再需要。过期、已用、未知令牌，证明错误，公钥已登记，一律同一个 `ENROLLMENT_DENIED`，失败不消耗令牌。
+- admin `POST /v1/runners/{runner_id}/revoke`（体 `{}`）吊销：此后该 runner 的网关请求一律 401（长轮询中的领取也立即结束、不再下发），在途租约由 Worker 判执行不确定。他租户的 runner 按 404。
+
 配置：
 
 | 进程 | 变量 | 说明 |
@@ -270,6 +276,7 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 | runner | `CMAP_CONTROL_PLANE_URL` | 例如 `https://cmap.spux.cn`；设置即进入出站模式。只认 https，http 仅限回环 |
 | runner | `CMAP_RUNNER_KEY_FILE` | 登记的 runner 私钥（首次启动生成 0600，私钥不离开本机） |
 | runner | `CMAP_RUNNER_ENROLLMENT_FILE` | 登记记录（runner-enrollment.v1 `enrolled`），默认与私钥同目录的 `enrollment.json` |
+| runner | `CMAP_RUNNER_ENROLL_TOKEN` | 仅首次启动（登记记录不存在时）需要的一次性注册令牌；用过即失效，登记后可从环境移除 |
 | runner | `CMAP_PERMIT_PUBLIC_KEY_FILE`、`CMAP_CODEX_MODEL`、`CMAP_PERMIT_ISSUER`、`CMAP_WORK_ROOT`、`CODEX_BIN` | 同监听模式 |
 
 出站模式下 `RUNNER_ID` / `RUNNER_*` 准入变量被登记记录覆盖；禁止出现在 runner 上的变量与监听模式相同。守护进程重启后不恢复已持有的租约（只在内存），在途任务会在租约过期后判执行不确定。

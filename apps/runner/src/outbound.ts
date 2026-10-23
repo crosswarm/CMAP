@@ -5,11 +5,14 @@
  * 每个请求用登记的 Ed25519 私钥签名；每个应答用登记时固定的控制面公钥验签，验不过即不采信（不执行、不当作已送达）。
  * 控制面判过期的租约：停掉本机执行、不再回报。领取期间断网只会让租约过期，由控制面判执行不确定，绝不在这里重跑。
  */
-import type { KeyObject } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { createPublicKey, type KeyObject } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { validateEnrollmentMessage, validateGatewayMessage, type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1 } from '#domain-model'
+import {
+  rawEd25519PublicKey, signEnrollmentProof, validateEnrollmentMessage, validateGatewayMessage,
+  type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1,
+} from '#domain-model'
 import { signRunnerRequest, verifyRunnerResponse } from '../../../packages/domain-model/src/dispatch-permit.ts'
 import { FORBIDDEN_ENV, toRunnerError, type createRunnerCore } from './server.ts'
 
@@ -56,6 +59,34 @@ export const readEnrollment = (file: string): RunnerEnrollment => {
   const value: unknown = JSON.parse(readFileSync(file, 'utf8'))
   if (!validateEnrollmentMessage(value) || value.kind !== 'enrolled') throw new RangeError(`${file} is not a runner-enrollment.v1 enrolled record`)
   return value
+}
+
+/**
+ * 首次启动用一次性注册令牌登记（ADR-0008 §4）：持钥证明 = 本机私钥对 token/公钥/host 的签名，私钥不离开本机。
+ * 应答（runner_id、身份与上限、控制面网关公钥）写成 0600 的登记记录；之后启动只读这份记录，不再需要令牌。
+ */
+export const loadOrEnroll = async (input: {
+  controlPlaneUrl: string
+  enrollmentFile: string
+  privateKey: KeyObject
+  host: string
+  token?: string | undefined
+}): Promise<RunnerEnrollment> => {
+  if (existsSync(input.enrollmentFile)) return readEnrollment(input.enrollmentFile)
+  const token = input.token?.trim()
+  if (!token) throw new RangeError('首次启动需要 CMAP_RUNNER_ENROLL_TOKEN（admin 签发的一次性注册令牌）')
+  const publicKey = rawEd25519PublicKey(createPublicKey(input.privateKey))
+  const res = await fetch(new URL('/v1/runners/enroll', input.controlPlaneUrl), {
+    method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(30_000),
+    body: JSON.stringify({
+      schema: 'cmap/runner-enrollment/v1', kind: 'enroll', token, public_key: publicKey, host: input.host,
+      proof: signEnrollmentProof({ privateKey: input.privateKey, token, publicKey, host: input.host }),
+    }),
+  })
+  const reply: unknown = await res.json().catch(() => undefined)
+  if (res.status !== 201 || !validateEnrollmentMessage(reply) || reply.kind !== 'enrolled') throw new GatewayRejectedError('ENROLLMENT_DENIED')
+  writeFileSync(input.enrollmentFile, JSON.stringify(reply), { flag: 'wx', mode: 0o600 })
+  return reply
 }
 
 /** 出站模式的准入白名单只来自登记记录（tenant/owner/能力/风险上限），本机 RUNNER_* 环境变量不能放宽它。 */

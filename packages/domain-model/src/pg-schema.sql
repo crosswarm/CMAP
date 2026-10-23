@@ -187,6 +187,22 @@ CREATE TABLE IF NOT EXISTS gateway_runners (
 
 CREATE INDEX IF NOT EXISTS gateway_runners_tenant_idx ON gateway_runners (tenant);
 
+-- 一次性注册令牌（ADR-0008 §4）：只存 sha256；used_at 非空即已用，过期由 expires_at 判断。
+CREATE TABLE IF NOT EXISTS enrollment_tokens (
+  token_id             TEXT PRIMARY KEY,
+  token_sha256         TEXT NOT NULL UNIQUE CHECK (char_length(token_sha256) = 64),
+  tenant               TEXT NOT NULL,
+  owner                TEXT NOT NULL,
+  allowed_capabilities TEXT[] NOT NULL,
+  max_risk             TEXT NOT NULL CHECK (max_risk IN ('read-meta','read-sensitive','controlled','mutating')),
+  issued_by            TEXT NOT NULL,
+  expires_at           TIMESTAMPTZ NOT NULL,
+  created_at           TIMESTAMPTZ NOT NULL,
+  used_at              TIMESTAMPTZ,
+  runner_id            TEXT,
+  CONSTRAINT enrollment_tokens_used_has_runner CHECK ((used_at IS NULL) = (runner_id IS NULL))
+);
+
 -- 网关队列与租约。领取用 FOR UPDATE SKIP LOCKED；过期是 leased 且 expires_at 已过，不可逆，不改派。
 CREATE TABLE IF NOT EXISTS gateway_leases (
   lease_id       TEXT PRIMARY KEY,

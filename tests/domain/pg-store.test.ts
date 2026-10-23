@@ -61,7 +61,7 @@ async function truncateAll(): Promise<void> {
   try {
     await c.query(`SET search_path TO ${SCHEMA}`)
     await c.query(
-      'TRUNCATE gateway_leases, gateway_runners, quota_snapshots, resource_locks, approvals, reviews, artifacts, events, tasks, missions CASCADE',
+      'TRUNCATE enrollment_tokens, gateway_leases, gateway_runners, quota_snapshots, resource_locks, approvals, reviews, artifacts, events, tasks, missions CASCADE',
     )
   } finally {
     await c.end()

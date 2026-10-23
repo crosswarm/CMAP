@@ -7,7 +7,7 @@
  *
  * MemoryStore 与 PgStore 都用这里的纯函数推进租约，保证两实现同语义。
  */
-import { createPublicKey, type KeyObject } from 'node:crypto'
+import { createPublicKey, sign, verify, type KeyObject } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import { Ajv2020 } from 'ajv/dist/2020.js'
@@ -36,6 +36,40 @@ export interface GatewayRunner {
   /** 最近一次通过认证的网关请求；路由据此判断 runner 是否在线。 */
   readonly last_seen_at: string | null
 }
+
+/** 一次性注册令牌。只存令牌的 sha256，明文只在签发应答里出现一次。 */
+export interface EnrollmentToken {
+  readonly token_id: string
+  readonly token_sha256: string
+  /** 取自签发者（admin）的 token claims，不取自请求。 */
+  readonly tenant: string
+  readonly owner: string
+  readonly allowed_capabilities: readonly string[]
+  readonly max_risk: RiskLevel
+  readonly issued_by: string
+  readonly expires_at: string
+  readonly created_at: string
+  readonly used_at: string | null
+  readonly runner_id: string | null
+}
+
+export interface EnrollGatewayRunnerInput {
+  readonly token_sha256: string
+  readonly runner_id: string
+  readonly public_key: string
+  readonly host: string
+  readonly now: string
+}
+
+/** 令牌可用：未用过且未过期。 */
+export const enrollmentTokenUsable = (token: EnrollmentToken | null | undefined, nowMs: number): token is EnrollmentToken =>
+  Boolean(token && token.used_at === null && Date.parse(token.expires_at) > nowMs)
+
+export const runnerFromToken = (token: EnrollmentToken, input: EnrollGatewayRunnerInput): GatewayRunner => ({
+  runner_id: input.runner_id, public_key: input.public_key, tenant: token.tenant, owner: token.owner,
+  allowed_capabilities: [...token.allowed_capabilities], max_risk: token.max_risk, host: input.host,
+  enrolled_at: input.now, revoked_at: null, last_seen_at: null,
+})
 
 export type GatewayLeaseState = 'queued' | 'leased' | 'closed'
 
@@ -135,6 +169,21 @@ export const rawEd25519PublicKey = (key: KeyObject): string => {
   const jwk = key.export({ format: 'jwk' })
   if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.x !== 'string') throw new Error('ED25519_KEY_REQUIRED')
   return jwk.x
+}
+
+/** 持钥证明（runner-enrollment.v1 enroll.proof）：新私钥对 'cmap-enroll1' LF token LF public_key LF host 的签名。 */
+const proofBytes = (token: string, publicKey: string, host: string): Buffer => Buffer.from(`cmap-enroll1\n${token}\n${publicKey}\n${host}`, 'utf8')
+
+export const signEnrollmentProof = (input: { privateKey: KeyObject; token: string; publicKey: string; host: string }): string =>
+  sign(null, proofBytes(input.token, input.publicKey, input.host), input.privateKey).toString('base64url')
+
+/** 任何异常（公钥形状、签名长度）都按证明无效处理。 */
+export const verifyEnrollmentProof = (input: { token: string; publicKey: string; host: string; proof: string }): boolean => {
+  try {
+    return verify(null, proofBytes(input.token, input.publicKey, input.host), ed25519PublicKeyFromRaw(input.publicKey), Buffer.from(input.proof, 'base64url'))
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------- 契约校验

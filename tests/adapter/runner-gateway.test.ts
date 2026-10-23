@@ -175,3 +175,37 @@ test('出站模式配置：公网只认 https（http 限回环）；控制面秘
     enrolledRecord(gatewayRunnerRecord('lap-gw', generateKeyPairSync('ed25519').publicKey)))
   assert.deepEqual([env['RUNNER_ID'], env['RUNNER_ALLOWED_OWNERS'], env['RUNNER_MAX_RISK'], env['RUNNER_ALLOWED_TENANTS']], ['lap-gw', 'crosswarm', 'read-meta', 'team-ycc'])
 })
+
+test('M05 首次启动：runner 用一次性令牌持钥登记、写下登记记录（0600），之后只读记录；以登记身份领取并完成任务', async () => {
+  const { loadOrEnroll } = await import('../../apps/runner/src/outbound.ts')
+  const { stat } = await import('node:fs/promises')
+  const { generateKeyPairSync } = await import('node:crypto')
+  const { rawEd25519PublicKey } = await import('#domain-model')
+  const f = await startGatewayFixture()
+  try {
+    const issued = await fetch(`${f.apiUrl}/v1/runner-enrollments`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema: 'cmap/runner-enrollment/v1', kind: 'issue', owner: 'crosswarm', allowed_capabilities: ['code.analyze'], max_risk: 'read-meta', ttl_seconds: 600 }) })
+    assert.equal(issued.status, 201)
+    const { token } = await issued.json() as { token: string }
+    const key = generateKeyPairSync('ed25519')
+    const file = join(f.root, 'enrollment.json')
+    const enrolled = await loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host', token })
+    assert.equal(enrolled.owner, 'crosswarm')
+    assert.equal(enrolled.control_plane_public_key, rawEd25519PublicKey(controlPlaneKey.publicKey))
+    assert.equal((await stat(file)).mode & 0o777, 0o600)
+    assert.deepEqual(await loadOrEnroll({ controlPlaneUrl: 'http://127.0.0.1:1', enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host' }), enrolled, '已登记就不再联网')
+    await assert.rejects(loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: join(f.root, 'again.json'), privateKey: generateKeyPairSync('ed25519').privateKey, host: 'x', token }), /ENROLLMENT_DENIED/, '令牌只能用一次')
+    await assert.rejects(loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: join(f.root, 'none.json'), privateKey: key.privateKey, host: 'x' }), /CMAP_RUNNER_ENROLL_TOKEN/)
+
+    const runner = (await f.store.getGatewayRunner(enrolled.runner_id))!
+    await f.startRunner(enrolled.runner_id, { key, register: false, overrides: runner })
+    await until(async () => (await f.store.getGatewayRunner(enrolled.runner_id))!.last_seen_at !== null, 'runner 上线')
+    await f.addTask('tsk-gw-enrolled')
+    await f.acts.dispatchTask('tsk-gw-enrolled')
+    assert.equal((await f.store.getTask('tsk-gw-enrolled'))!.binding!.runner_id, enrolled.runner_id)
+    const collected = await f.acts.collectTaskResult('tsk-gw-enrolled')
+    assert.ok('passed' in collected && collected.passed)
+  } finally {
+    await f.cleanup()
+  }
+})

@@ -32,7 +32,7 @@ import type {
   Review,
 } from './entities.ts'
 import type { ApprovalDecisionInputV1 } from './generated/approval-decision-input.ts'
-import type { EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
+import type { EnrollGatewayRunnerInput, EnrollmentToken, EnqueueGatewayLeaseInput, GatewayCancel, GatewayLease, GatewayReportBody, GatewayReportOutcome, GatewayRunner } from './runner-gateway.ts'
 
 // ------------------------------------------------------------ 写入参数
 
@@ -357,6 +357,15 @@ export interface Store {
   // Runner 出站网关（ADR-0008 §3）
   /** 登记 runner。runner_id 或公钥已存在即抛错，不覆盖。 */
   registerGatewayRunner(runner: GatewayRunner): Promise<GatewayRunner>
+  /** 存一次性注册令牌（只有哈希）。token_id 或哈希重复即抛错。 */
+  createEnrollmentToken(token: EnrollmentToken): Promise<EnrollmentToken>
+  /**
+   * 原子地用令牌登记 runner：令牌存在、未用、未过期且公钥与 runner_id 未登记时，消耗令牌并按令牌记录登记（tenant/owner/上限取自令牌）；
+   * 否则返回 null 且什么都不写（失败不消耗令牌）。并发使用同一令牌只有一个成功。
+   */
+  enrollGatewayRunner(input: EnrollGatewayRunnerInput): Promise<GatewayRunner | null>
+  /** 吊销本租户的 runner；他租户或不存在返回 null。重复吊销保留首次时间。 */
+  revokeGatewayRunner(runnerId: string, tenant: string, at: string): Promise<GatewayRunner | null>
   getGatewayRunner(runnerId: string): Promise<GatewayRunner | null>
   /** 本租户全部 runner（含已吊销）。 */
   listGatewayRunners(tenant: string): Promise<readonly GatewayRunner[]>

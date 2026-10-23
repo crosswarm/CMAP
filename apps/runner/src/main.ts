@@ -9,6 +9,7 @@
  * 停止时只关监听或退出循环：codex 子进程按运行记录继续或在重启后恢复观察，绝不因守护进程退出而重跑。
  */
 import { mkdirSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -16,7 +17,7 @@ import { ed25519PublicKeyFromRaw, loadOrCreatePermitKey, loadPinnedPublicKey } f
 import { GATEWAY_ADAPTER_ID } from '../../../adapters/runner-gateway/src/index.ts'
 import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
 import { createRunnerCore, createRunnerDaemon, readRunnerDaemonConfig } from './server.ts'
-import { enrolledRunnerEnv, readEnrollment, readOutboundRunnerConfig, startOutboundRunner } from './outbound.ts'
+import { enrolledRunnerEnv, loadOrEnroll, readOutboundRunnerConfig, startOutboundRunner } from './outbound.ts'
 
 const defaultWorkRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../.cmap-work')
 const stopping = new AbortController()
@@ -26,7 +27,10 @@ if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
   const workRoot = config.workRoot ?? defaultWorkRoot
   mkdirSync(dirname(config.signingKeyFile), { recursive: true, mode: 0o700 })
   const { privateKey } = loadOrCreatePermitKey(config.signingKeyFile)
-  const enrolled = readEnrollment(config.enrollmentFile)
+  const enrolled = await loadOrEnroll({
+    controlPlaneUrl: config.controlPlaneUrl, enrollmentFile: config.enrollmentFile, privateKey,
+    host: process.env['RUNNER_HOST']?.trim() || hostname(), token: process.env['CMAP_RUNNER_ENROLL_TOKEN'],
+  })
   const core = await createRunnerCore({
     env: enrolledRunnerEnv(process.env, enrolled), publicKey: loadPinnedPublicKey(config.publicKeyFile),
     issuer: config.issuer, workRoot, permitAdapterId: GATEWAY_ADAPTER_ID,

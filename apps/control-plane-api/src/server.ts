@@ -14,11 +14,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { lstat, open, readFile, realpath, stat } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError, EventConflictError } from '#domain-model'
+import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError, EventConflictError, validateEnrollmentMessage } from '#domain-model'
 import type { Store, Approval, ApprovalAdviceV1, ApprovalScope, Artifact, MissionEventV1, TaskEvent } from '#domain-model'
 import type { Mission, MissionAttention } from '#domain-model'
 import { legacyInspectForm, missionFromRequest, validateMissionCancel } from './mission-submission.ts'
@@ -779,6 +779,45 @@ const routes: readonly Route[] = [
         if (e instanceof RangeError) return fail(ctx.res, 400, e.message)
         throw e
       }
+    },
+  },
+
+  {
+    // ADR-0008 §4：admin 签发一次性注册令牌。tenant 取自 admin 的 token claims，令牌明文只在应答里出现一次，账本只存哈希。
+    method: 'POST',
+    pattern: '/v1/runner-enrollments',
+    handler: async (ctx) => {
+      const error = (status: number, code: string) => json(ctx.res, status, { schema: 'cmap/runner-enrollment/v1', kind: 'error', code, retryable: false })
+      if (lacksRole(ctx, 'admin') || !ctx.owner?.trim()) return error(403, 'FORBIDDEN')
+      const body = await readBody(ctx.req)
+      if (!validateEnrollmentMessage(body) || body.kind !== 'issue') return error(400, 'INVALID_REQUEST')
+      const token = `cmapenr1.${randomBytes(32).toString('base64url')}`
+      const at = Date.now()
+      const record = {
+        token_id: `enr_${randomBytes(12).toString('base64url')}`,
+        token_sha256: createHash('sha256').update(token).digest('hex'),
+        tenant: ctx.tenant, owner: body.owner, allowed_capabilities: [...body.allowed_capabilities], max_risk: body.max_risk,
+        issued_by: ctx.owner, expires_at: new Date(at + body.ttl_seconds * 1000).toISOString(), created_at: new Date(at).toISOString(),
+        used_at: null, runner_id: null,
+      }
+      await ctx.store.createEnrollmentToken(record)
+      json(ctx.res, 201, {
+        schema: 'cmap/runner-enrollment/v1', kind: 'issued', token, token_id: record.token_id, tenant: record.tenant, owner: record.owner,
+        allowed_capabilities: record.allowed_capabilities, max_risk: record.max_risk, issued_by: record.issued_by, expires_at: record.expires_at, single_use: true,
+      })
+    },
+  },
+
+  {
+    // 吊销立即生效：此后该 runner 的网关请求一律 401，在途租约由 Worker 判执行不确定。他租户的 runner 按 404。
+    method: 'POST',
+    pattern: '/v1/runners/:id/revoke',
+    handler: async (ctx) => {
+      if (lacksRole(ctx, 'admin')) return json(ctx.res, 403, { schema: 'cmap/runner-enrollment/v1', kind: 'error', code: 'FORBIDDEN', retryable: false })
+      if (!(await emptyJsonBody(ctx))) return
+      const runner = await ctx.store.revokeGatewayRunner(ctx.params['id']!, ctx.tenant, new Date().toISOString())
+      if (!runner) return fail(ctx.res, 404, `runner 不存在：${ctx.params['id']}`)
+      json(ctx.res, 200, { schema: 'cmap/runner-enrollment/v1', kind: 'revoked', runner_id: runner.runner_id, revoked_at: runner.revoked_at })
     },
   },
 
