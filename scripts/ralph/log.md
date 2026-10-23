@@ -146,3 +146,11 @@
 - `fda7f81` Q07 真实 Temporal/PostgreSQL/Codex 三段式全链路通过：额度低改派 → 中途触顶续接（mutating，两次审批，半成品经快照传递）→ 恢复后派回并记 QUOTA_RESTORED；`4a8c58b` 提示词区分额度续接与返工。
 - 主会话验收：`7940112` 上 `npm run check` 全过（test 498、api 92、pg 91、workflow 352）。
 - 遗留：续接快照未覆盖远程 runner 工作区；inspect/v1 未接入续接。
+
+## M04、M06（通过）；M05 实现已合入，待两机出站实测
+
+- `3208c54` M04 出站网关：PostgreSQL 队列（SKIP LOCKED）与租约、长轮询领取、回报落账后 runnerReported 门铃唤醒；租约过期或吊销判执行不确定；runner 新增出站模式。
+- `88b64f2` M05 一次性注册令牌（只存哈希、原子消耗）、Ed25519 持钥证明、吊销即拒。
+- `2206fc3` M06 owner 亲和：路由、派发前与 runner 准入三道闸。
+- 主会话验收：`2206fc3` 上 `npm run check` 全过（test 520、api 104、pg 102、workflow 353）；本机两进程模拟（登记、完成、SIGKILL、吊销）通过。
+- 已知：runner 重启不恢复已持有租约（租约过期后判执行不确定）；长轮询每 500 毫秒读库；Worker 本机准入白名单先于路由生效，多用户需列入各 owner。

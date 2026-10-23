@@ -114,7 +114,7 @@
       "本机模拟 runner 以出站模式完成任务",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M05",
@@ -134,7 +134,7 @@
       "先写失败测试",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M07",
