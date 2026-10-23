@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net'
 import { generateKeyPairSync, sign, createHmac, type KeyObject } from 'node:crypto'
 
 import { MemoryStore } from '#domain-model'
-import type { Mission, EventActor, Store } from '#domain-model'
+import type { Mission, Approval, EventActor, Store } from '#domain-model'
 import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
 
 const ISSUER = 'http://idp.test/realms/cmap'
@@ -77,6 +77,7 @@ before(async () => {
     store, tenant: 'config-tenant', owner: 'config-owner',
     oidc: { issuer: ISSUER, audience: AUDIENCE, jwksUrl: `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/certs` },
     startMission: async (missionId) => { started.push(missionId) },
+    cancelMission: async () => {},
   })
   await server.listen(0)
   port = (server.address() as AddressInfo).port
@@ -183,5 +184,97 @@ describe('OIDC 认证：403', () => {
 
   test('缺 tenant claim 返回 403', async () => {
     assert.equal((await call('/v1/context', { token: jwt(claims({ tenant: undefined })) })).status, 403)
+  })
+})
+
+const approval = (id: string, scope: 'controlled' | 'mutating', missionId = 'mis-a'): Approval => ({
+  id, mission_id: missionId, task_id: 'tsk-1', action: scope === 'mutating' ? 'code.commit' : 'yonwork.chat_send',
+  scope, requested_by: 'agent:codex', risk_level: scope, reason: '需要人工确认', evidence_artifact_ids: [],
+  decision: 'pending', decided_by: null, decided_at: null, expires_at: '2099-01-01T00:00:00.000Z', created_at: T0,
+})
+
+describe('OIDC 授权：审批绑定 token 主体（M03）', () => {
+  before(async () => {
+    for (const [id, scope] of [['apr-c1', 'controlled'], ['apr-c2', 'controlled'], ['apr-m1', 'mutating'], ['apr-m2', 'mutating']] as const) {
+      await store.createApproval(approval(id, scope))
+    }
+    await store.createApproval(approval('apr-b', 'controlled', 'mis-b'))
+  })
+  const decide = (id: string, scope: string, roles: string[], extra: Record<string, unknown> = {}, sub = 'sub-alice') =>
+    call(`/v1/approvals/${id}/decision`, { token: jwt(claims({ roles, sub })), body: { decision: 'approved', scope, ...extra } })
+
+  test('controlled 只认 approver-controlled，mutating 只认 approver-mutating，互不蕴含；其他角色 403 且不落账', async () => {
+    for (const roles of [['approver-mutating'], ['viewer'], ['operator'], ['admin'], ['operator', 'admin', 'viewer', 'approver-mutating']]) {
+      assert.equal((await decide('apr-c1', 'controlled', roles)).status, 403, `controlled ${roles}`)
+    }
+    for (const roles of [['approver-controlled'], ['viewer'], ['operator'], ['admin'], ['operator', 'admin', 'viewer', 'approver-controlled']]) {
+      assert.equal((await decide('apr-m1', 'mutating', roles)).status, 403, `mutating ${roles}`)
+    }
+    for (const id of ['apr-c1', 'apr-m1']) {
+      const after = await store.getApproval(id)
+      assert.equal(after?.decision, 'pending')
+      assert.equal(after?.decided_by, null)
+    }
+  })
+
+  test('decided_by 取 token 主体；请求体可省略 decided_by', async () => {
+    const res = await decide('apr-c1', 'controlled', ['approver-controlled'])
+    assert.equal(res.status, 200, JSON.stringify(res.body))
+    assert.equal((res.body as Approval).decided_by, 'sub-alice')
+    const mut = await decide('apr-m1', 'mutating', ['approver-mutating'], {}, 'sub-bob')
+    assert.equal(mut.status, 200, JSON.stringify(mut.body))
+    assert.equal((await store.getApproval('apr-m1'))?.decided_by, 'sub-bob')
+  })
+
+  test('请求体 decided_by 与 token 主体不符 403 且不落账；相同则接受', async () => {
+    for (const decidedBy of ['sub-bob', 'config-owner', ' sub-alice']) {
+      assert.equal((await decide('apr-c2', 'controlled', ['approver-controlled'], { decided_by: decidedBy })).status, 403, decidedBy)
+    }
+    assert.equal((await store.getApproval('apr-c2'))?.decision, 'pending')
+    const ok = await decide('apr-m2', 'mutating', ['approver-mutating'], { decided_by: 'sub-alice' })
+    assert.equal(ok.status, 200)
+    assert.equal((ok.body as Approval).decided_by, 'sub-alice')
+  })
+
+  test('有角色也不能跨租户决策：404', async () => {
+    assert.equal((await decide('apr-b', 'controlled', ['approver-controlled'])).status, 404)
+    assert.equal((await store.getApproval('apr-b'))?.decision, 'pending')
+  })
+})
+
+describe('OIDC 授权：创建/启动/取消 Mission 要求 operator（M03）', () => {
+  before(async () => {
+    await store.createMission({ mission: mission('mis-cancel', 'team-a'), actor: ACTOR })
+  })
+  const create = (roles: string[], requestId: string) => call('/v1/missions', {
+    token: jwt(claims({ roles })),
+    body: { request_id: requestId, goal: 'Count files', risk_level: 'read-meta',
+      acceptance: [{ criterion_id: 'files', metric: 'count', operator: 'eq', expected: 3 }] },
+  })
+
+  test('没有 operator 的角色组合创建 Mission 403 且不入账', async () => {
+    const before = (await store.queryMissions({ tenant: 'team-a', terminal_limit: 500 })).length
+    for (const roles of [['viewer'], ['approver-controlled', 'approver-mutating'], ['admin']]) {
+      assert.equal((await create(roles, 'oidc-denied-001')).status, 403, String(roles))
+    }
+    assert.equal((await store.queryMissions({ tenant: 'team-a', terminal_limit: 500 })).length, before)
+    assert.equal((await create(['operator'], 'oidc-allowed-001')).status, 202)
+  })
+
+  test('启动、取消自己的 Mission 要求 operator', async () => {
+    for (const roles of [['viewer'], ['admin', 'approver-controlled']]) {
+      const token = jwt(claims({ roles }))
+      assert.equal((await call('/v1/missions/mis-a/start', { token, body: {} })).status, 403, `start ${roles}`)
+      assert.equal((await call('/v1/missions/mis-cancel/cancel', { token, body: { reason: '不再需要' } })).status, 403, `cancel ${roles}`)
+    }
+    assert.equal((await store.listEvents('mis-cancel')).some((e) => e.event_type === 'MISSION_CANCEL_REQUESTED'), false)
+    const operator = jwt(claims({ roles: ['operator'] }))
+    assert.equal((await call('/v1/missions/mis-a/start', { token: operator, body: {} })).status, 202)
+    assert.equal((await call('/v1/missions/mis-cancel/cancel', { token: operator, body: { reason: '不再需要' } })).status, 202)
+  })
+
+  test('operator 不能取消别人的 Mission', async () => {
+    const other = jwt(claims({ roles: ['operator'], sub: 'sub-bob' }))
+    assert.equal((await call('/v1/missions/mis-a/cancel', { token: other, body: { reason: '不再需要' } })).status, 403)
   })
 })

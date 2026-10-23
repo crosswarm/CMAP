@@ -116,7 +116,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 |---|---|
 | 审批状态只有控制面能改，Agent 无写权 | 🟡 设计已确立；审批 API 与本机 PostgreSQL/Temporal 均未认证，靠 Agent 沙箱挡住直连。Kimi 沙箱已禁止访问控制面端口（`tests/adapter/kimi-runtime.test.ts`，2026-10-21）；Codex 沙箱对本机回环端口未核实 |
 | Jev 代为决定须受真人签发的委托策略约束，以 `jev:` 身份记录，不算人工授权 | ⬜ [ADR-0007](adr/0007-jev-delegated-decisions.md) 提议，契约已定义，未实现 |
-| `Approval.decided_by` 必须是有权限的真人 | 🟡 类型已定义，鉴权待 P4 |
+| `Approval.decided_by` 必须是有权限的真人 | 🟡 OIDC 模式下取 token 主体（请求体不符即 403），controlled / mutating 分别要求 `approver-controlled` / `approver-mutating`，互不蕴含（`tests/api/oidc.test.ts`，[映射](identity.md)）；本机模式仍为配置的 owner；公网上线闸口未过 |
 | `controlled` 与 `mutating` **互不蕴含**，不得合并为单一批准 | ✅ Schema 与状态机已实现 |
 | 审批终态不可覆盖、过期不可批准；并发决策只接受一个终态 | ✅ Memory/PG 共享转换规则，API/真实 PG 并发与到期验证通过 |
 | 审批记录进不可变审计流 | ⬜ P4 |

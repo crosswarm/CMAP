@@ -180,6 +180,9 @@ const emptyJsonBody = async (ctx: Ctx): Promise<boolean> => {
   return true
 }
 
+/** OIDC 模式缺少该角色；本机模式（roles 为 null）不做角色检查。角色互不蕴含，见 docs/identity.md。 */
+const lacksRole = (ctx: Ctx, role: OidcRole): boolean => ctx.roles !== null && !ctx.roles.has(role)
+
 const missionSubmission = (missionId: string): MissionSubmissionV1 => ({
   accepted: true,
   mission_id: missionId,
@@ -471,6 +474,7 @@ const routes: readonly Route[] = [
   {
     method: 'POST', pattern: '/v1/missions',
     handler: async (ctx) => {
+      if (lacksRole(ctx, 'operator')) return fail(ctx.res, 403, '创建 Mission 需要 operator 角色')
       const { owner, config: { startMission } } = ctx
       if (!owner?.trim() || !startMission) return fail(ctx.res, 503, 'Mission 创建入口未配置')
       let body, mission
@@ -510,6 +514,7 @@ const routes: readonly Route[] = [
   {
     method: 'POST', pattern: '/v1/missions/:id/start',
     handler: async (ctx) => {
+      if (lacksRole(ctx, 'operator')) return fail(ctx.res, 403, '启动 Mission 需要 operator 角色')
       if (!(await emptyJsonBody(ctx))) return
       const id = ctx.params['id']!
       const mission = await ctx.store.getMission(id)
@@ -522,6 +527,7 @@ const routes: readonly Route[] = [
   {
     method: 'POST', pattern: '/v1/missions/:id/cancel',
     handler: async (ctx) => {
+      if (lacksRole(ctx, 'operator')) return fail(ctx.res, 403, '取消 Mission 需要 operator 角色')
       const body = await readBody(ctx.req)
       if (!validateMissionCancel(body)) return fail(ctx.res, 400, '请求不符合 mission-cancel v1：reason 必填（1–500 字）')
       const id = ctx.params['id']!
@@ -686,8 +692,9 @@ const routes: readonly Route[] = [
         return fail(ctx.res, 400, '请求体不是合法 JSON')
       }
 
-      const { decision, scope, decided_by: decidedBy } =
-        body as { decision?: string; scope?: string; decided_by?: string }
+      const { decision, scope } = body as { decision?: string; scope?: string }
+      // OIDC 模式下 decided_by 就是 token 主体，可省略；本机模式仍须显式复述配置的 owner
+      const decidedBy = (body as { decided_by?: unknown }).decided_by ?? (ctx.roles ? ctx.owner : undefined)
 
       // scope 必填：缺失时默许通过等于把 controlled 与 mutating 合并了
       if (scope !== 'controlled' && scope !== 'mutating') {
@@ -703,9 +710,13 @@ const routes: readonly Route[] = [
       if (typeof decidedBy !== 'string' || !decidedBy.trim()) {
         return fail(ctx.res, 400, 'decided_by 必填，审批必须可追溯到具体的人')
       }
-      // 身份由控制面配置决定，请求体只能复述它，不能自报别人
+      // 身份由控制面决定（本机配置或 token 主体），请求体只能复述它，不能自报别人
       if (decidedBy !== ctx.owner) {
-        return fail(ctx.res, 403, 'decided_by 必须等于本机 owner')
+        return fail(ctx.res, 403, ctx.roles ? 'decided_by 必须等于登录用户' : 'decided_by 必须等于本机 owner')
+      }
+      // controlled 与 mutating 分别授权，互不蕴含（威胁模型 T4）
+      if (lacksRole(ctx, scope === 'controlled' ? 'approver-controlled' : 'approver-mutating')) {
+        return fail(ctx.res, 403, `决定 ${scope} 审批需要 approver-${scope} 角色`)
       }
 
       const target = await ctx.store.getApproval(id)
