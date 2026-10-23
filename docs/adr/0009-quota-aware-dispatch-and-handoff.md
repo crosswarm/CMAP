@@ -1,6 +1,6 @@
 # ADR-0009：额度感知调度与交接
 
-- 状态：已接受（方向由 Cross 于 2026-10-23 决定；**未实现**）
+- 状态：已接受（方向由 Cross 于 2026-10-23 决定）；实现情况见文末「实现状态」
 - 日期：2026-10-23
 - 相关：[ADR-0007](0007-jev-delegated-decisions.md)（Jev 委托决策）、[ADR-0008](0008-multi-user-control-plane.md)（多用户）、[mission-continuity](../mission-continuity.md)（续接）
 
@@ -77,3 +77,17 @@
 
 - Claude 的 `get_usage` 是实验性接口，Codex 的触顶文本可能改动：分类器要有版本与回归样例，识别不了的按普通失败处理（不续接），宁可少交接也不误重跑。
 - 额度快照有延迟：快照显示充足、实际已触顶时，任务会以 `QUOTA_EXHAUSTED` 结束，再由续接兜底。
+
+## 实现状态（2026-10-23）
+
+| 条目 | 状态 | 落点 |
+|---|---|---|
+| §1 额度快照、§2 路由额度维度、§3 触顶分类 | ✅ | Q01–Q03（`packages/adapter-sdk/src/quota-probe.ts`、`workflows/activities.ts` 的 `selectAdapter`、各 Adapter 的 `QUOTA_EXHAUSTED`） |
+| §3 续接交接 | ✅ dag/v1 | `handoffQuotaExhausted`（`workflows/dag-activities.ts`）、`materializeQuotaHandoff`（`workflows/dag-materialization.ts`），补丁 `dag-quota-handoff-v1`；事件 `QUOTA_HANDOFF`（[quota-handoff.v1](../../schemas/quota-handoff.v1.schema.json)）。续接任务与原任务同轮，不耗返工预算；派发时排除 `excluded_agents`（原 Agent 及本链路此前触顶者），记 `skipped(quota_handoff_excluded)`。写副作用级先复核「结果已落账 + Adapter 观测到终态」，再把原工作区（不含 `inputs/` 与符号链接）打包为 `workspace_snapshot` 冻结输入、在新工作区解包；审批绑定新任务重新走闸口。每节点上限 `CMAP_QUOTA_HANDOFF_LIMIT`（默认 2），超限 `QUOTA_HANDOFF_LIMIT`，退出无法确认 `QUOTA_HANDOFF_EXIT_UNCONFIRMED`。Agent 自报的 `QUOTA_EXHAUSTED` 改记 `AGENT_REPORTED_QUOTA_EXHAUSTED`，不触发换 Agent。inspect/v1 未接入 |
+| §4 可切换调度者 | ✅ | `workflows/dispatchers.ts`，`CMAP_DISPATCHERS=jev,claude`（未配置即纯确定性）；决定记 `JEV_DECIDED`（jev-decision.v1 routing，`decider`，键 `jev-routing:<task_id>`）。授权来源记为 `pol_cmap_dispatchers` + 调度者列表 sha256，不经 ADR-0007 委托策略；确定性兜底判高风险的任务不交给调度者 |
+| §5 交回 | ✅ | 恢复判定在 `selectAdapter` 落账快照时进行，首次检测记 `QUOTA_RESTORED`；派回由 `preferred_agent` 自然成立。WebUI 资源页显示各账号最新快照（`GET /v1/quota-snapshots`），任务链显示额度交接（`GET /v1/missions/:id/quota-handoffs`） |
+| 全链路验证 | ✅ | `TMPDIR=/private/tmp node scripts/e2e-quota-handoff.mjs`：2026-10-23 实测三段全部通过（schema `e2e_quota_mvkhmizq`）。A 为注册成第二身份的 CodexAdapter：① 注入 95% 快照；② 快照读不到、包装脚本输出 Codex 触顶文本（mutating，两次以 API owner 身份审批）；③ 注入 3% 快照并走真实 codex。B 为真实 Codex 与真实零额度探针 |
+
+真实调度器各调用一次（2026-10-23，候选 codex/kimi）：Jev `jev-1.14.0` 976ms 选 codex、置信度 0.9（需 `NODE_USE_ENV_PROXY=1`）；Claude `claude-opus-5-5` 9.5s 选 codex。同时探到 Claude 账号七日窗口已用 97%，路由中 claude 调度者会因自身额度低被跳过。
+
+已知限制：续接快照只覆盖控制面本机工作区（远程 runner 的工作区在 lap 上，未接入）；`previous_attempt` 的 Agent 提示文案仍按「返工」措辞，失败原因里写明了是额度续接。
