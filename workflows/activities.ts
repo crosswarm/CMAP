@@ -352,8 +352,7 @@ export const createActivities = (deps: ActivityDeps) => {
         return {reason: 'probe_error'}
       }
     }
-    // 额度未知的候选不排除，但排在已知充足者之后：先记为 skipped(quota_unknown)，没有已知充足者时取第一个未知者
-    let unknownPick: {adapter: AgentAdapter; supportsWorktreeIsolation: boolean; entry: RoutingCandidate} | undefined
+    // 只跳过已知额度不足的候选；额度未知（如 Kimi 无零额度探针）不改变首选顺序，否则替补会抢走首选的任务。
     for (const {id, matched} of order) {
       if (!matched.length) {
         skip(id, null, 'not_registered')
@@ -377,22 +376,12 @@ export const createActivities = (deps: ActivityDeps) => {
           entry.reason = 'quota_low'
           continue
         }
-        if (quota === 'unknown') {
-          entry.reason = 'quota_unknown'
-          unknownPick ??= {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, entry}
-          continue
-        }
         entry.verdict = 'selected'
         await persistQuota()
         return {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, routing: decision(candidate)}
       }
     }
     await persistQuota()
-    if (unknownPick) {
-      unknownPick.entry.verdict = 'selected'
-      unknownPick.entry.reason = null
-      return {adapter: unknownPick.adapter, supportsWorktreeIsolation: unknownPick.supportsWorktreeIsolation, routing: decision(unknownPick.adapter)}
-    }
     throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
   }
 

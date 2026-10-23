@@ -8,6 +8,8 @@ const read = (name) => JSON.parse(readFileSync(new URL(`../../schemas/${name}.v1
 const ajv = new Ajv({ strict: true, allErrors: true })
 addFormats(ajv)
 ajv.addSchema(read('remote-runner'), 'https://cmap.local/schemas/remote-runner.v1.schema.json')
+// remote-runner 的 health.quota 以相对路径引用额度快照，按其 $id 解析后的地址登记
+ajv.addSchema(read('quota-snapshot'), new URL('quota-snapshot.v1.schema.json', read('remote-runner').$id).href)
 const validate = ajv.compile(read('runner-gateway'))
 
 const S = 'cmap/runner-gateway/v1'

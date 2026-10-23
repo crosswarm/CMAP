@@ -241,16 +241,16 @@ test('提供方明确不允许普通用量（ordinary_usage_allowed=false）同�
   assert.deepEqual(verdicts(await routed(store)), [['a', 'skipped', 'quota_low'], ['b', 'selected', null]])
 })
 
-test('额度未知排在已知充足之后，但不排除：没有已知充足的候选时仍派给未知者', async () => {
+test('额度未知不改变首选顺序：只跳过已知额度不足的候选', async () => {
   const unknown = candidate('u')
   const known = candidate('k')
   withQuota(unknown, undefined)
   withQuota(known, quotaOf(20))
   const first = await qfixture([unknown, known])
   await first.acts.dispatchTask(first.taskId)
-  assert.equal(unknown.startCalls.length, 0)
-  assert.equal(known.startCalls.length, 1)
-  assert.deepEqual(verdicts(await routed(first.store)), [['u', 'skipped', 'quota_unknown'], ['k', 'selected', null]])
+  assert.equal(unknown.startCalls.length, 1, '首选读不到额度（如 Kimi）时仍按首选派发，不被替补抢走')
+  assert.equal(known.startCalls.length, 0)
+  assert.deepEqual(verdicts(await routed(first.store)), [['u', 'selected', null]])
 
   const u2 = candidate('u')
   const errored = candidate('e')
@@ -260,8 +260,9 @@ test('额度未知排在已知充足之后，但不排除：没有已知充足�
   withQuota(lowest, quotaOf(99))
   const second = await qfixture([lowest, u2, errored])
   await second.acts.dispatchTask(second.taskId)
-  assert.equal(u2.startCalls.length, 1, '未知不等于充足，但也不排除')
-  assert.deepEqual(verdicts(await routed(second.store)), [['l', 'skipped', 'quota_low'], ['u', 'selected', null], ['e', 'skipped', 'quota_unknown']])
+  assert.equal(u2.startCalls.length, 1)
+  assert.equal(errored.startCalls.length, 0, '选中后不再探测后续候选')
+  assert.deepEqual(verdicts(await routed(second.store)), [['l', 'skipped', 'quota_low'], ['u', 'selected', null]])
 })
 
 test('快照过期（默认 5 分钟）时以 health 重新获取；仍过期则按未知处理', async () => {
@@ -282,8 +283,9 @@ test('快照过期（默认 5 分钟）时以 health 重新获取；仍过期则
   withQuota(d, quotaOf(10))
   const second = await qfixture([c, d])
   await second.acts.dispatchTask(second.taskId)
-  assert.equal(d.startCalls.length, 1)
-  assert.deepEqual((await routed(second.store)).candidates.map((x: any) => x.quota), ['unknown', 'sufficient'])
+  assert.equal(c.startCalls.length, 1, '仍过期按未知处理：不改变首选顺序')
+  assert.equal(d.startCalls.length, 0)
+  assert.deepEqual((await routed(second.store)).candidates.map((x: any) => x.quota), ['unknown'])
 })
 
 test('阈值可由 CMAP_QUOTA_LOW_PERCENT 配置', async () => {
