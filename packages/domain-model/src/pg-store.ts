@@ -904,6 +904,14 @@ export class PgStore implements Store {
     return rows.length ? (rows[0].snapshot as QuotaSnapshotV1) : null
   }
 
+  async listLatestQuotaSnapshots(): Promise<QuotaSnapshotV1[]> {
+    const { rows } = await this.#pool.query(
+      `SELECT DISTINCT ON (provider, account_ref) snapshot FROM quota_snapshots
+       ORDER BY provider, account_ref, observed_at DESC`,
+    )
+    return rows.map((r) => r.snapshot as QuotaSnapshotV1)
+  }
+
   // ------------------------------------------------------------ 自检
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {

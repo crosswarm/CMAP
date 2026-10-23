@@ -127,6 +127,7 @@ class ThrowAfterCommitStore implements Store {
   async listActiveLocks(now: string) { return this.inner.listActiveLocks(now) }
   async putQuotaSnapshot(s: Parameters<Store['putQuotaSnapshot']>[0]) { return this.inner.putQuotaSnapshot(s) }
   async getLatestQuotaSnapshot(...args: Parameters<Store['getLatestQuotaSnapshot']>) { return this.inner.getLatestQuotaSnapshot(...args) }
+  async listLatestQuotaSnapshots() { return this.inner.listLatestQuotaSnapshots() }
   async healthCheck() { return this.inner.healthCheck() }
 }
 

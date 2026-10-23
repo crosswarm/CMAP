@@ -145,6 +145,8 @@ export const EVENT_TYPES = [
   'JEV_DECIDED',
   /** ADR-0009 §3 额度续接（payload 为 quota-handoff.v1）：原任务 QUOTA_EXHAUSTED 后派生的同轮续接任务。 */
   'QUOTA_HANDOFF',
+  /** ADR-0009 §5 某账号从额度低恢复（重置时刻已过且重新探测确认），每个低额度时段只记一次。 */
+  'QUOTA_RESTORED',
   'HARD_GATE_EVALUATED',
   'REVIEW_STARTED',
   'REVIEW_APPLICATION_INTENT',

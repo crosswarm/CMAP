@@ -536,6 +536,18 @@ export class MemoryStore implements Store {
     return latest ? structuredClone(latest) : null
   }
 
+  async listLatestQuotaSnapshots(): Promise<QuotaSnapshotV1[]> {
+    const latest = new Map<string, QuotaSnapshotV1>()
+    for (const q of this.#quota) {
+      const key = `${q.provider}\0${q.account_ref}`
+      const seen = latest.get(key)
+      if (!seen || Date.parse(q.observed_at) > Date.parse(seen.observed_at)) latest.set(key, q)
+    }
+    return [...latest.values()]
+      .sort((a, b) => a.provider.localeCompare(b.provider) || a.account_ref!.localeCompare(b.account_ref!))
+      .map((q) => structuredClone(q))
+  }
+
   // ------------------------------------------------------------ 自检
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {

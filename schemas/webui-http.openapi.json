@@ -202,6 +202,42 @@
           "404": { "$ref": "#/components/responses/JsonError" }
         }
       }
+    },
+    "/v1/quota-snapshots": {
+      "get": {
+        "summary": "List the latest quota snapshot of each provider account",
+        "description": "Read-only (ADR-0009 §5). One quota-snapshot.v1 per (provider, account_ref), the newest by observed_at, sorted by provider then account_ref. account_ref is a sha256 digest, never a raw account id. Snapshots are account-level, not tenant-scoped.",
+        "responses": {
+          "200": {
+            "description": "Latest snapshots.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "quota-snapshot.v1.schema.json" } } } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/missions/{missionId}/quota-handoffs": {
+      "get": {
+        "summary": "List the quota handoff chain of a mission",
+        "description": "Read-only (ADR-0009 §3/§5). QUOTA_HANDOFF payloads of this mission in ledger order. 404 when the mission is not visible in this tenant.",
+        "parameters": [
+          { "name": "missionId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Handoff records.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": false, "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "quota-handoff.v1.schema.json" } } } }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/JsonError" }
+        }
+      }
     }
   },
   "components": {

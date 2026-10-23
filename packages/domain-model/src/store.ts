@@ -343,6 +343,8 @@ export interface Store {
   putQuotaSnapshot(s: QuotaSnapshotV1): Promise<QuotaSnapshotV1>
   /** 该账号 observed_at 最新的一份；没有返回 null。 */
   getLatestQuotaSnapshot(provider: QuotaSnapshotV1['provider'], accountRef: string): Promise<QuotaSnapshotV1 | null>
+  /** 每个 (provider, account_ref) 的最新一份，按 provider、account_ref 排序；供 WebUI 只读展示。 */
+  listLatestQuotaSnapshots(): Promise<QuotaSnapshotV1[]>
 
   /** 自检：能报出「进程活着但存储不可用」。 */
   healthCheck(): Promise<{ ok: boolean; detail?: string }>

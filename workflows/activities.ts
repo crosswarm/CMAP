@@ -258,6 +258,19 @@ export const createActivities = (deps: ActivityDeps) => {
     // 只有窗口数据或提供方明确允许，才算已知充足；什么都没说不能推断为充足
     return q.windows.length > 0 || q.ordinary_usage_allowed === true ? 'sufficient' : 'unknown'
   }
+  /**
+   * ADR-0009 §5 恢复判定：上一份快照额度低，它的低额度窗口（因提供方不允许而低时取全部窗口）重置时刻都已过，
+   * 且这次重新探测为已知充足、明确允许普通用量（Codex 的 null 不算）。成立时返回最晚的重置时刻，否则 null。
+   */
+  const quotaRestoredAfter = (prior: QuotaSnapshotV1 | null, q: QuotaSnapshotV1): string | null => {
+    if (!prior || quotaVerdict(q) !== 'sufficient') return null
+    const disallowed = prior.ordinary_usage_allowed === false
+    if (!disallowed && prior.status !== 'ok') return null
+    const resets = prior.windows.filter((w) => disallowed || w.used_percent >= quotaLowPercent).map((w) => w.resets_at)
+    if (!resets.length || resets.some((r) => r === null || !(Date.parse(r) <= Date.now()))) return null
+    if (!(q.ordinary_usage_allowed === true || (q.ordinary_usage_allowed === null && !disallowed && q.provider !== 'codex'))) return null
+    return (resets as string[]).reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b))
+  }
   const executionUncertain = {code:'BINDING_NOT_FOUND',terminalObserved:false} as const
   const hasExecutionUncertainty = async (task: TaskRecord): Promise<boolean> => {
     const receipts = (await store.listEvents(task.mission_id))
@@ -299,7 +312,8 @@ export const createActivities = (deps: ActivityDeps) => {
     readonly runner_id: string
   }
 
-  const selectAdapter = async (envelope: TaskEnvelopeV1, excluded: readonly string[] = []): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
+  const selectAdapter = async (task: TaskRecord, excluded: readonly string[] = []): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
+    const envelope = task.envelope as TaskEnvelopeV1
     if (!adapters.length) throw new Error('未注入 Adapter：控制面没有可派发的目标')
     const started = Date.now()
     const policy = envelope.execution_policy
@@ -325,7 +339,21 @@ export const createActivities = (deps: ActivityDeps) => {
     // health 带回的账号级额度快照落账（ADR-0009），供路由与审计；没有账号摘要的无从归属，不落账
     const quotaSeen: QuotaSnapshotV1[] = []
     const persistQuota = async (): Promise<void> => {
-      for (const q of quotaSeen) if (q.account_ref) await store.putQuotaSnapshot(q)
+      for (const q of quotaSeen) {
+        if (!q.account_ref) continue
+        const prior = await store.getLatestQuotaSnapshot(q.provider, q.account_ref)
+        await store.putQuotaSnapshot(q)
+        // 首次检测到该账号从额度低恢复：每个低额度时段只记一次（键含那份低快照的时刻）
+        const resetsAt = prior && Date.parse(prior.observed_at) < Date.parse(q.observed_at) ? quotaRestoredAfter(prior, q) : null
+        if (!resetsAt) continue
+        await store.appendEvent({event:{
+          event_type:'QUOTA_RESTORED',event_version:1,occurred_at:new Date().toISOString(),
+          mission_id:task.mission_id,task_id:task.id,attempt:task.attempt,actor:ACTOR,
+          causation_id:null,correlation_id:task.mission_id,trace_id:task.id,
+          idempotency_key:`quota-restored:${q.provider}:${q.account_ref}:${prior!.observed_at}`,
+          payload:{provider:q.provider,account_ref:q.account_ref,low_observed_at:prior!.observed_at,resets_at:resetsAt,restored_observed_at:q.observed_at},
+        }})
+      }
     }
     const probe = async (candidate: AgentAdapter): Promise<{reason: string} | {supportsWorktreeIsolation: boolean; quota: QuotaSnapshotV1 | undefined}> => {
       try {
@@ -602,7 +630,7 @@ export const createActivities = (deps: ActivityDeps) => {
         : undefined
       let selection: Awaited<ReturnType<typeof selectAdapter>>
       try {
-        selection = await selectAdapter(envelope, excluded)
+        selection = await selectAdapter(existing, excluded)
       } catch (error) {
         const routing = (error as {routing?: RoutingDecision}).routing
         if (routing) await recordRouting(existing, routing)

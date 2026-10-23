@@ -1568,6 +1568,19 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.deepEqual(await s.getLatestQuotaSnapshot('codex', ACCOUNT), snapshot())
       })
 
+      test('列出每个账号的最新快照（WebUI 只读展示），按 provider、account_ref 排序', async () => {
+        const s = await createStore()
+        assert.deepEqual(await s.listLatestQuotaSnapshots(), [])
+        const later = snapshot({ observed_at: '2026-10-23T00:05:00.000Z' })
+        await s.putQuotaSnapshot(later)
+        await s.putQuotaSnapshot(snapshot())
+        const other = snapshot({ account_ref: 'd'.repeat(64), observed_at: '2026-10-22T00:00:00.000Z' })
+        await s.putQuotaSnapshot(other)
+        const claude = snapshot({ provider: 'claude', observed_at: '2026-10-23T01:00:00.000Z' })
+        await s.putQuotaSnapshot(claude)
+        assert.deepEqual(await s.listLatestQuotaSnapshots(), [claude, later, other])
+      })
+
       test('没有账号摘要的快照不能落账（无从归属额度池）', async () => {
         const s = await createStore()
         await assert.rejects(s.putQuotaSnapshot(snapshot({ account_ref: null, status: 'unknown' })), /QUOTA_SNAPSHOT_ACCOUNT_REQUIRED/)

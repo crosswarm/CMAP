@@ -642,6 +642,27 @@ const routes: readonly Route[] = [
 
   {
     method: 'GET',
+    pattern: '/v1/missions/:id/quota-handoffs',
+    handler: async (ctx) => {
+      // 只读：额度续接链路（ADR-0009 §3），按账本顺序
+      const id = ctx.params['id']!
+      if (!(await missionInTenant(ctx, id))) {
+        return fail(ctx.res, 404, `Mission 不存在：${id}`)
+      }
+      const items = (await ctx.store.listEvents(id)).filter((e) => e.event_type === 'QUOTA_HANDOFF').map((e) => e.payload)
+      json(ctx.res, 200, { items })
+    },
+  },
+
+  {
+    method: 'GET',
+    pattern: '/v1/quota-snapshots',
+    // 只读：各账号最新额度快照（ADR-0009 §5）。账号级、不分租户；account_ref 是摘要，不含原始账号
+    handler: async (ctx) => json(ctx.res, 200, { items: await ctx.store.listLatestQuotaSnapshots() }),
+  },
+
+  {
+    method: 'GET',
     pattern: '/v1/approvals',
     handler: async (ctx) => {
       json(ctx.res, 200, { items: await pendingApprovalsInTenant(ctx) })

@@ -5,6 +5,8 @@ import type {
   ControlPlaneContextV1,
   EvidencePack,
   Mission,
+  QuotaHandoffV1,
+  QuotaSnapshotV1,
   ResourceLock,
   Review,
   TaskRecord,
@@ -31,6 +33,7 @@ interface Detail {
   tasks: TaskRecord[]
   reviews: Review[]
   evidence: EvidencePack
+  handoffs: QuotaHandoffV1[]
 }
 type Modal =
   | { type: 'create' }
@@ -77,6 +80,7 @@ export default function App() {
   const [missions, setMissions] = useState<MissionListItem[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [locks, setLocks] = useState<ResourceLock[]>([])
+  const [quota, setQuota] = useState<QuotaSnapshotV1[]>([])
   const [detail, setDetail] = useState<Detail | null>(null)
   const [taskSummaries, setTaskSummaries] = useState<
     Record<string, TaskRecord[]>
@@ -118,19 +122,21 @@ export default function App() {
       const loadDetail = async (): Promise<Detail | null> => {
         if (!id) return null
         const path = `/v1/missions/${encodeURIComponent(id)}`
-        const [mission, tasks, reviews, evidence] = await Promise.all([
+        const [mission, tasks, reviews, evidence, handoffs] = await Promise.all([
           request<Mission>(path, options),
           request<{ items: TaskRecord[] }>(`${path}/tasks`, options),
           request<{ items: Review[] }>(`${path}/reviews`, options),
           request<EvidencePack>(`${path}/evidence`, options),
+          request<{ items: QuotaHandoffV1[] }>(`${path}/quota-handoffs`, options),
         ])
-        return { mission, tasks: tasks.items, reviews: reviews.items, evidence }
+        return { mission, tasks: tasks.items, reviews: reviews.items, evidence, handoffs: handoffs.items }
       }
-      const [ctx, list, pending, activeLocks, selected] = await Promise.all([
+      const [ctx, list, pending, activeLocks, snapshots, selected] = await Promise.all([
         request<ControlPlaneContextV1>('/v1/context', options),
         request<{ items: MissionListItem[] }>('/v1/missions', options),
         request<{ items: Approval[] }>('/v1/approvals', options),
         request<{ items: ResourceLock[] }>('/v1/locks', options),
+        request<{ items: QuotaSnapshotV1[] }>('/v1/quota-snapshots', options),
         loadDetail(),
       ])
       // 只有选中的 Mission 拉任务；其余 RUNNING Mission 的侧栏状态取列表自带的 attention 摘要。
@@ -145,6 +151,7 @@ export default function App() {
       )
       setApprovals(pending.items)
       setLocks(activeLocks.items)
+      setQuota(snapshots.items)
       setDetail(selected)
       setTaskSummaries(summaries)
       setError('')
@@ -520,6 +527,49 @@ export default function App() {
             </section>
             <section className="panel">
               <div className="section-title">
+                <h2>账号额度</h2>
+                <span>各账号最新快照，派发前据此跳过额度低的 Agent</span>
+              </div>
+              {quota.length === 0 ? (
+                <div className="empty-compact">尚无额度快照</div>
+              ) : (
+                <div className="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>提供方</th>
+                        <th>账号摘要</th>
+                        <th>窗口用量</th>
+                        <th>允许普通用量</th>
+                        <th>观测时间</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {quota.map((q) => (
+                        <tr key={`${q.provider}:${q.account_ref}`}>
+                          <td>{q.provider}</td>
+                          <td className="identifier">{q.account_ref?.slice(0, 12)}</td>
+                          <td>
+                            {q.status !== 'ok'
+                              ? q.status === 'error' ? '读取出错' : '未知'
+                              : q.windows.map((w) => (
+                                  <span className="cell-note" key={w.kind}>
+                                    {w.kind} {w.used_percent}%
+                                    {w.resets_at ? ` · ${showTime(w.resets_at)} 重置` : ''}
+                                  </span>
+                                ))}
+                          </td>
+                          <td>{q.ordinary_usage_allowed === null ? '未说明' : q.ordinary_usage_allowed ? '是' : '否'}</td>
+                          <td>{showTime(q.observed_at)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+            <section className="panel">
+              <div className="section-title">
                 <h2>所选目标的执行绑定</h2>
               </div>
               {!selected || selected.tasks.every((t) => !t.binding) ? (
@@ -778,7 +828,7 @@ export default function App() {
                       查看完整任务链
                     </button>
                   </div>
-                  <TaskList tasks={selected.tasks.slice(-3)} />
+                  <TaskList tasks={selected.tasks.slice(-3)} handoffs={selected.handoffs} />
                 </section>
               </>
             ) : tab === 'evidence' ? (
@@ -858,8 +908,51 @@ export default function App() {
                       )}
                     </span>
                   </div>
-                  <TaskList tasks={selected.tasks} />
+                  <TaskList tasks={selected.tasks} handoffs={selected.handoffs} />
                 </section>
+                {selected.handoffs.length > 0 && (
+                  <section className="panel">
+                    <div className="section-title">
+                      <h2>额度交接</h2>
+                      <span className="muted">原 Agent 额度耗尽后的续接链路，不计入返工轮次</span>
+                    </div>
+                    <div className="table-scroll">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>次序</th>
+                            <th>节点</th>
+                            <th>原任务 → 续接任务</th>
+                            <th>触顶 Agent</th>
+                            <th>工作区</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selected.handoffs.map((h) => (
+                            <tr key={h.from_task_id}>
+                              <td>第 {h.handoff_index} 次</td>
+                              <td>{h.node_id}</td>
+                              <td>
+                                <span className="cell-note identifier">{h.from_task_id}</span>
+                                <span className="cell-note identifier">→ {h.to_task_id}</span>
+                              </td>
+                              <td>
+                                {h.from_agent}
+                                <span className="cell-note">排除 {h.excluded_agents.join('、')}</span>
+                              </td>
+                              <td>
+                                {h.workspace === 'snapshot' ? '原工作区快照' : '新工作区'}
+                                {h.snapshot && (
+                                  <span className="cell-note identifier">sha256 {h.snapshot.sha256.slice(0, 12)}</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
                 <section className="panel">
                   <div className="section-title">
                     <h2>评审与停止原因</h2>
@@ -953,7 +1046,7 @@ export default function App() {
   )
 }
 
-function TaskList({ tasks }: { tasks: TaskRecord[] }) {
+function TaskList({ tasks, handoffs = [] }: { tasks: TaskRecord[]; handoffs?: QuotaHandoffV1[] }) {
   if (!tasks.length)
     return <div className="empty-compact">目标已接收，尚未生成执行任务。</div>
   return (
@@ -968,7 +1061,8 @@ function TaskList({ tasks }: { tasks: TaskRecord[] }) {
               <span className="identifier">{task.id}</span>
               {task.supersedes_task_id && (
                 <span className="cell-note">
-                  返工自 {task.supersedes_task_id}
+                  {handoffs.some((h) => h.to_task_id === task.id) ? '额度续接自' : '返工自'}{' '}
+                  {task.supersedes_task_id}
                 </span>
               )}
               {task.deps.length > 0 && (
