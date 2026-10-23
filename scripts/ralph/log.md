@@ -108,3 +108,17 @@
 # 多用户与额度交接轮（2026-10-23 起）
 
 范围见 `docs/user-stories/cmap-multiuser-quota-2026-10.json`（Q01–Q07 额度交接、M01–M10 多用户、L01–L08 遗留），设计见 ADR-0008、ADR-0009。M10 公网部署等待 Cross 提供主机与域名。
+
+## Q01–Q03、M01–M03、L02、L03、L05（通过）
+
+- Q01 `24f1cdf` 账号级额度快照契约、零额度探针（Codex app-server、Claude get_usage；Kimi 未知）与落账；真实零额度探测两家各一次（Codex 7 天窗口 2%，Claude 5 小时 56%、7 天 93%）。
+- Q02 `7e43a1b` 路由额度维度；`c16e643` 修订：额度未知不改变首选顺序（原规则让 Kimi 等读不到额度的首选被替补抢走），ADR-0009 §1 同步。
+- Q03 `014f6b8` Codex 与 Kimi 的明确额度耗尽归一为 QUOTA_EXHAUSTED，未识别按普通失败。
+- M01 `d0ab080` runner-gateway.v1、runner-enrollment.v1 契约与 docs/identity.md。
+- M02 `fe3e7f2`、`b71c32d` API 校验 OIDC JWT（RS256、JWKS 缓存，无新依赖）、tenant/owner 取自 claims、公网 Host 与 Origin 校验、开发栈 Keycloak 26.7.5；本地 Keycloak 真实 PKCE 登录与浏览器实测通过。
+- M03 `a612d55` 审批 decided_by 取 token 主体，controlled/mutating 分别要求对应 approver 角色，Mission 写操作要求 operator。
+- L02 `8d6358b` `--restart-worker` 支持本机 runner 模式（`CMAP_RUNNER_RUNS_DIR`），真实运行通过；未补自动化测试。
+- L03 `892aa7f` ADR-0007 确定性兜底、当日预算、`CMAP_JEV_AUTODECIDE=off`；enforce 仍未开启。
+- L05 `b2e6522` Planner 403 已不复现，原因在服务端或账号侧，脚本无问题；真实 plan-mission 成功一次；提交计划到执行的整链路未验证。
+- 主会话验收：`c16e643` 上 `npm run check` 全过（test 480、api 90、pg 89、workflow 337）。
+- qcl 清理（ADR-0008 部署修订）：配置与清单备份到 CrossMini `~/.cmap/qcl-backup-20261023/`；停用并禁用旧 aiticket 后端、nginx、llmsandbox、qdrant、playwright-mcp、RustDesk；frps 保留；数据目录未删除。

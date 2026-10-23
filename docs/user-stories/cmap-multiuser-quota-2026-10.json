@@ -9,7 +9,7 @@
       "快照过期重探、读失败记为未知",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "Q02",
@@ -20,7 +20,7 @@
       "已绑定任务不迁移",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "Q03",
@@ -30,7 +30,7 @@
       "每家各有回归样例（含未识别文本按普通失败处理）",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "Q04",
@@ -82,7 +82,7 @@
       "契约正反样例测试",
       "npm run codegen 与 npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M02",
@@ -93,7 +93,7 @@
       "本地 Keycloak 实测登录与 API 调用",
       "npm run check 全过；build:web 通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M03",
@@ -103,7 +103,7 @@
       "先写失败测试：无对应角色 403、请求体身份与 token 不符拒绝",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M04",
@@ -193,7 +193,7 @@
     "steps": [
       "本机 runner 模式下真实运行通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L03",
@@ -203,7 +203,7 @@
       "先写失败测试",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L04",
@@ -222,7 +222,7 @@
     "steps": [
       "如实记录原因；修好则真实跑通一次"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L06",
