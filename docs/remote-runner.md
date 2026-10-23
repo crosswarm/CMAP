@@ -259,7 +259,7 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 - **认证**：每个请求用 runner 登记的 Ed25519 私钥签名（域前缀 `cmap-gateway-req1`，身份头 `x-cmap-runner-id`）；API 用登记公钥验签，任何失败（含已吊销）都是同一个无签名 401。应答由控制面网关密钥签名，runner 用登记时固定的公钥验签。
 - **许可**：受众是路由所选 runner 与 `gateway-runner-adapter`，由 Worker 的派发许可私钥签发；runner 用固定的许可公钥验签。API 不持有许可私钥：API 被攻破不等于能让 runner 执行任意信封。
 - **结果**：先落账（租约关闭、回报入库），再向 `mission-<id>` 发 `runnerReported` 门铃；dag/v1 的 attempt 派发后返回 `awaiting_report`，Workflow 等门铃或 30 秒超时回读（`patched('dag-runner-report-signal-v1')`）。持有资源锁的任务仍在 Activity 内等待（锁靠它续租）。产物落盘后由 Worker 独立复算 sha256。
-- **路由**：按登记记录挑 runner——同租户、未吊销、能力与风险上限放行、最近 120 秒内领取过；挑不到记 `no_runner` / `capability_mismatch` / `risk_exceeded` / `unhealthy` 并按 fallback 回落。runner 侧准入白名单只取自登记记录。
+- **路由与 owner 亲和**（ADR-0008 §5）：按登记记录挑 runner——同租户、**owner 等于任务 owner**、未吊销、能力与风险上限放行、最近 120 秒内领取过；挑不到记 `no_runner` / `owner_mismatch` / `capability_mismatch` / `risk_exceeded` / `unhealthy` 并按 fallback 回落。跨人共享 runner 默认禁止、没有开关。派发前 Adapter 再复核一次（不符即 `OWNER_DENIED` / `TENANT_DENIED` 落准入拒绝、不入队）；runner 侧准入白名单只取自登记记录，别人的信封在执行前被拒（`OWNER_DENIED`）。
 
 注册与吊销（ADR-0008 §4，runner-enrollment.v1）：
 

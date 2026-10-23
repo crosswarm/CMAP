@@ -94,13 +94,17 @@ export class GatewayRunnerAdapter implements AgentAdapter {
     }
   }
 
-  /** 从本租户已登记、未吊销、在线的 runner 里挑一个能承接的；挑不到给出第一个不满足的原因，路由据此回落。 */
+  /**
+   * 从本租户已登记、未吊销、在线的 runner 里挑一个能承接的；挑不到给出第一个不满足的原因，路由据此回落。
+   * owner 亲和（ADR-0008 §5）：只挑任务 owner 本人登记的 runner（本人的提供方账号）；跨人共享默认禁止，不在此开放。
+   */
   async runnerFor(envelope: TaskEnvelopeV1): Promise<{ runnerId: string } | { reason: string }> {
     const now = this.#now()
     let pool = (await this.#store.listGatewayRunners(envelope.identity.tenant ?? '')).filter((r) => r.revoked_at === null)
     if (!pool.length) return { reason: 'no_runner' }
     const required = RISK_LEVELS.indexOf(envelope.classification.risk_level)
     for (const [reason, keep] of [
+      ['owner_mismatch', (r: typeof pool[number]) => r.owner === envelope.identity.owner],
       ['capability_mismatch', (r: typeof pool[number]) => r.allowed_capabilities.includes(envelope.classification.requested_capability)],
       ['risk_exceeded', (r: typeof pool[number]) => required >= 0 && RISK_LEVELS.indexOf(r.max_risk) >= required],
       ['unhealthy', (r: typeof pool[number]) => r.last_seen_at !== null && now - Date.parse(r.last_seen_at) <= this.#onlineWindowMs],
@@ -131,6 +135,7 @@ export class GatewayRunnerAdapter implements AgentAdapter {
     // 路由与派发之间 runner 可能被吊销：发送意图前的确定性拒绝，按准入拒绝落账、不重发。
     if (!runner || runner.revoked_at !== null) throw new RunnerAdmissionError('INVALID_RUNNER')
     if (runner.tenant !== frozenEnvelope.identity.tenant) throw new RunnerAdmissionError('TENANT_DENIED')
+    if (runner.owner !== frozenEnvelope.identity.owner) throw new RunnerAdmissionError('OWNER_DENIED')
     const inputs = await readFrozenInputs(frozenEnvelope, frozenCtx)
     await frozenCtx.beforeSend?.(binding)
     assertAdapterAuthorization(this.#authorization, frozenEnvelope, frozenCtx, GATEWAY_ADAPTER_ID)
