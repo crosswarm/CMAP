@@ -313,6 +313,8 @@ export const createActivities = (deps: ActivityDeps) => {
     readonly candidates: readonly RoutingCandidate[]
     readonly decision_ms: number
     readonly runner_id: string
+    /** 动态 runner（出站网关）实际选中的执行方；固定 runner 的 Adapter 为 null。 */
+    readonly target_runner_id: string | null
     /** ADR-0009 §4 在候选内做出选择的调度者（<调度者>:<模型>）；确定性顺序为 null。 */
     readonly decider: string | null
   }
@@ -331,7 +333,7 @@ export const createActivities = (deps: ActivityDeps) => {
     const skip = (agent_id: string, adapter_id: string | null, reason: string): void => {
       candidates.push({agent_id, adapter_id, verdict: 'skipped', reason, quota: null, quota_observed_at: null})
     }
-    const decision = (chosen: AgentAdapter | null, decider: string | null = null): RoutingDecision => ({
+    const decision = (chosen: AgentAdapter | null, decider: string | null = null, targetRunnerId: string | null = null): RoutingDecision => ({
       preferred_agent: policy.preferred_agent ?? null,
       chosen_agent: chosen?.agentId ?? null,
       chosen_adapter: chosen?.adapterId ?? null,
@@ -339,6 +341,7 @@ export const createActivities = (deps: ActivityDeps) => {
       candidates,
       decision_ms: Date.now() - started,
       runner_id: runnerId,
+      target_runner_id: targetRunnerId,
       decider,
     })
     const risks = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
@@ -446,7 +449,7 @@ export const createActivities = (deps: ActivityDeps) => {
       }
       pick.entry.verdict = 'selected'
       return {adapter: pick.adapter, supportsWorktreeIsolation: pick.supportsWorktreeIsolation,
-        ...(pick.targetRunnerId !== undefined ? {targetRunnerId: pick.targetRunnerId} : {}), routing: decision(pick.adapter, decider)}
+        ...(pick.targetRunnerId !== undefined ? {targetRunnerId: pick.targetRunnerId} : {}), routing: decision(pick.adapter, decider, pick.targetRunnerId ?? null)}
     }
     throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
   }

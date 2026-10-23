@@ -32,6 +32,9 @@ test('出站 runner 领取并完成：许可受众为所选 runner 与网关 Ada
     assert.deepEqual(await f.acts.dispatchTask('tsk-gw-ok'), { dispatched: true, remoteTaskId: 'codex:tsk-gw-ok:1' })
     const task = (await f.store.getTask('tsk-gw-ok'))!
     assert.deepEqual([task.binding!.adapter, task.binding!.runner_id], [GATEWAY_ADAPTER_ID, 'lap-gw'])
+    // 路由记录网关实际选中的 runner，不只是 Worker 自己的 runner_id
+    const [routing] = (await f.store.listEvents(task.mission_id)).filter((e) => e.event_type === 'ROUTING_DECIDED').map((e) => e.payload as Record<string, unknown>)
+    assert.deepEqual([routing!.runner_id, routing!.target_runner_id], ['crossmini', 'lap-gw'])
     const lease = (await f.store.getGatewayLease(gatewayLeaseId(task.binding!)))!
     // 许可绑定所选 runner 与网关 Adapter：换任一受众都验不过
     verifyDispatchPermit(lease.dispatch.permit, { publicKey: trust.publicKey, issuer: ISSUER, runnerId: 'lap-gw', adapterId: GATEWAY_ADAPTER_ID, envelope: task.envelope })
