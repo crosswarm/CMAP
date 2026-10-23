@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
 import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { MemoryStore } from '#domain-model'
@@ -207,8 +207,8 @@ test('Artifact 下载兼容 sha256 大小写，并安全化非 ASCII 或换行�
   assert.equal(disposition.includes('雪'), false)
 })
 
-test('Artifact 下载拒绝目录穿越、symlink 逃逸、超大文件与账本 hash 不符', async (t) => {
-  const { base, store, workRoot } = await setup(t)
+test('Artifact 下载拒绝目录穿越、symlink 逃逸、超大文件（上限可配置）与账本 hash 不符', async (t) => {
+  const { base, store, workRoot } = await setup(t, { maxArtifactBytes: 2 * 1024 * 1024 })
   const small = Buffer.from('small')
   await writeFile(join(workRoot, 'outside.txt'), small)
   await symlink(join(workRoot, 'outside.txt'), join(workRoot, 'tsk-1', 'link.txt'))
@@ -223,6 +223,33 @@ test('Artifact 下载拒绝目录穿越、symlink 逃逸、超大文件与账本
   assert.equal((await fetch(`${base}/v1/missions/mis-1/artifacts/tsk-1/art-link`)).status, 403)
   assert.equal((await fetch(`${base}/v1/missions/mis-1/artifacts/tsk-1/art-big`)).status, 413)
   assert.equal((await fetch(`${base}/v1/missions/mis-1/artifacts/tsk-1/art-hash`)).status, 409)
+})
+
+test('M09 Artifact 下载：内容寻址存储优先（任务目录无副本也可下载）；默认上限下 >2MiB 流式下载；旧路径照旧；存储对象被改动 → 409', async (t) => {
+  const { base, store, workRoot } = await setup(t)
+  const big = Buffer.alloc(3 * 1024 * 1024 + 5, 'cmap-m09 ')
+  const h = createHash('sha256').update(big).digest('hex')
+  const cas = (hash: string) => join(workRoot, '.cas', 'sha256', hash.slice(0, 2), hash.slice(2, 4), hash)
+  await mkdir(dirname(cas(h)), { recursive: true })
+  await writeFile(cas(h), big, { mode: 0o600 })
+  await store.putArtifact(artifact('art-cas', 'tsk-1', 'evidence/big.bin', big))
+
+  const res = await fetch(`${base}/v1/missions/mis-1/artifacts/tsk-1/art-cas`)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get('content-length'), String(big.length))
+  assert.equal(res.headers.get('x-content-sha256'), h)
+  assert.equal(createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex'), h)
+
+  const legacy = await fetch(`${base}/v1/missions/mis-1/artifacts/tsk-1/art-1`)
+  assert.equal(legacy.status, 200)
+  assert.equal(Buffer.from(await legacy.arrayBuffer()).toString('utf8'), 'artifact bytes')
+
+  const original = Buffer.from('original cas bytes')
+  const oh = createHash('sha256').update(original).digest('hex')
+  await mkdir(dirname(cas(oh)), { recursive: true })
+  await writeFile(cas(oh), 'corrupted', { mode: 0o600 })
+  await store.putArtifact(artifact('art-cas-bad', 'tsk-1', 'evidence/orig.bin', original))
+  assert.equal((await fetch(`${base}/v1/missions/mis-1/artifacts/tsk-1/art-cas-bad`)).status, 409)
 })
 
 test('Approval advice 只查询 pending 本租户审批，返回建议但不写入 Approval', async (t) => {

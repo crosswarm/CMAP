@@ -127,3 +127,39 @@ describe('remote-runner 请求/响应认证头', () => {
     assert.equal(headers('responseAuthHeaders')({ 'x-cmap-signature': 'short' }), false)
   })
 })
+
+describe('remote-runner 产物流式传输（M09）', () => {
+  const ajv = withQuota(new Ajv({ strict: true, allErrors: true }))
+  ajv.addSchema(schema)
+  const def = (name) => ajv.getSchema(`${schema.$id}#/$defs/${name}`)
+  const streamed = { uri: 'evidence/big.bin', sha256: H, size_bytes: 17 * 1024 * 1024 }
+
+  test('result 只带元数据（sha256 + 长度）即有效；旧 runner 的内联产物仍有效', () => {
+    const result = { ...valid.result, artifacts: [streamed, { uri: 'evidence/report.txt', content_base64: 'b2s=' }] }
+    assert.equal(validate(result), true, JSON.stringify(validate.errors))
+  })
+
+  test('流式元数据缺哈希或长度、哈希畸形、长度非整数、混入内联字节或路径越界均无效', () => {
+    for (const fn of [
+      (a) => { delete a.sha256 },
+      (a) => { delete a.size_bytes },
+      (a) => { a.sha256 = 'A'.repeat(64) },
+      (a) => { a.size_bytes = -1 },
+      (a) => { a.size_bytes = 1.5 },
+      (a) => { a.content_base64 = 'b2s=' },
+      (a) => { a.uri = '../x' },
+    ]) {
+      const art = structuredClone(streamed)
+      fn(art)
+      assert.equal(validate({ ...valid.result, artifacts: [art] }), false, JSON.stringify(art))
+    }
+  })
+
+  test('产物流应答头：必须带长度与签名', () => {
+    const v = def('artifactStream')
+    assert.equal(v({ 'content-length': '17825792', 'x-cmap-signature': 'A'.repeat(86) }), true)
+    assert.equal(v({ 'x-cmap-signature': 'A'.repeat(86) }), false)
+    assert.equal(v({ 'content-length': '-1', 'x-cmap-signature': 'A'.repeat(86) }), false)
+    assert.equal(v({ 'content-length': '1' }), false)
+  })
+})

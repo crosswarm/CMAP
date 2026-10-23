@@ -8,11 +8,13 @@
 import { createPublicKey, type KeyObject } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { Readable } from 'node:stream'
 
 import {
   rawEd25519PublicKey, signEnrollmentProof, validateEnrollmentMessage, validateGatewayMessage,
   type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1,
 } from '#domain-model'
+import { AdapterError } from '#adapter-sdk'
 import { signRunnerRequest, verifyRunnerResponse } from '../../../packages/domain-model/src/dispatch-permit.ts'
 import { FORBIDDEN_ENV, toRunnerError, type createRunnerCore } from './server.ts'
 
@@ -122,8 +124,10 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((
   signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
 })
 
+type GatewayClient = Pick<OutboundRunnerOptions, 'controlPlaneUrl' | 'signingKey' | 'controlPlanePublicKey'> & { runnerId: string }
+
 /** 一次网关请求：签名 → 发送 → 验应答签名 → 校验契约。401 与验签失败都抛错，调用方按未送达处理。 */
-export const gatewayCall = async (opts: Pick<OutboundRunnerOptions, 'controlPlaneUrl' | 'signingKey' | 'controlPlanePublicKey'> & { runnerId: string },
+export const gatewayCall = async (opts: GatewayClient,
   path: '/v1/gateway/claim' | '/v1/gateway/reports', body: object, timeoutMs: number, signal?: AbortSignal): Promise<{ status: number; message: RunnerGatewayMessageV1 }> => {
   const url = new URL(path, opts.controlPlaneUrl)
   const payload = JSON.stringify(body)
@@ -132,6 +136,27 @@ export const gatewayCall = async (opts: Pick<OutboundRunnerOptions, 'controlPlan
     method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: payload,
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
   })
+  return gatewayReply(opts, res, headers)
+}
+
+/**
+ * 流式上传一个产物（runner-gateway.v1 artifactUpload）：元数据（租约、sha256、长度）在签名覆盖的查询串里，
+ * x-cmap-content-sha256 即产物 sha256，字节作请求体流出；控制面边收边算，不符即拒收不落盘。
+ */
+export const gatewayUpload = async (opts: GatewayClient, art: { lease_id: string; sha256: string; size_bytes: number },
+  body: Readable, timeoutMs: number, signal?: AbortSignal): Promise<{ status: number; message: RunnerGatewayMessageV1 }> => {
+  const query = new URLSearchParams({ lease_id: art.lease_id, sha256: art.sha256, size: String(art.size_bytes) })
+  const url = new URL(`/v1/gateway/artifacts?${query}`, opts.controlPlaneUrl)
+  const headers = signRunnerRequest({ privateKey: opts.signingKey, method: 'POST', target: url.pathname + url.search, audience: opts.runnerId, contentSha256: art.sha256, scheme: 'gateway' })
+  const res = await fetch(url, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream', ...headers },
+    body: Readable.toWeb(body) as ReadableStream, duplex: 'half',
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+  } as RequestInit)
+  return gatewayReply(opts, res, headers)
+}
+
+const gatewayReply = async (opts: GatewayClient, res: Response, headers: Record<string, string>): Promise<{ status: number; message: RunnerGatewayMessageV1 }> => {
   const bytes = Buffer.from(await res.arrayBuffer())
   if (res.status === 401) throw new GatewayRejectedError('UNAUTHORIZED')
   verifyRunnerResponse({
@@ -178,6 +203,38 @@ export const startOutboundRunner = (opts: OutboundRunnerOptions) => {
     return false
   }
 
+  /**
+   * 回报结果前逐个上传流式产物。返回 undefined 表示全部已被控制面核验接收；返回 error 体表示应改报该错误；
+   * 返回 null 表示租约已不归本 runner，停止跟踪。网络失败有限次重试（上限可能两侧配置不一致，不能无限重传）。
+   */
+  const upload = async (leaseId: string, remoteTaskId: string, artifacts: ReportBody & { kind: 'result' }): Promise<ReportBody | null | undefined> => {
+    for (const art of artifacts.artifacts) {
+      if (!('sha256' in art)) continue
+      for (let attempt = 1; ; attempt += 1) {
+        if (signal?.aborted || !held.has(leaseId)) return null
+        let stream: Readable | undefined
+        try {
+          stream = (await core.openArtifact(remoteTaskId, art.sha256)).stream
+          const { message } = await gatewayUpload(client, { lease_id: leaseId, sha256: art.sha256, size_bytes: art.size_bytes }, stream, 600_000, signal)
+          if (message.kind === 'upload_ack' && message.sha256 === art.sha256) break
+          if (message.kind === 'error' && (message.code === 'LEASE_EXPIRED' || message.code === 'LEASE_UNKNOWN')) {
+            drop(leaseId, message.code)
+            return null
+          }
+          if (message.kind === 'error' && message.code.startsWith('EVIDENCE_')) return toRunnerError(new AdapterError(message.code, message.code, false, `gateway-upload:${message.code}`))[1] as ReportBody
+        } catch (error) {
+          if (error instanceof AdapterError) return toRunnerError(error)[1] as ReportBody
+          /* 未送达：稍后重传 */
+        } finally {
+          stream?.destroy()
+        }
+        if (attempt >= 5) return toRunnerError(new AdapterError('EVIDENCE_UPLOAD_FAILED', 'EVIDENCE_UPLOAD_FAILED', true, 'gateway-upload-failed'))[1] as ReportBody
+        await sleep(retryMs, signal)
+      }
+    }
+    return undefined
+  }
+
   const execute = async ({ lease, dispatch }: Assignment): Promise<void> => {
     const leaseId = lease.lease_id
     held.set(leaseId, null)
@@ -209,6 +266,11 @@ export const startOutboundRunner = (opts: OutboundRunnerOptions) => {
       if (terminal) {
         let outcome: ReportBody
         try { outcome = await core.result(accepted.remote_task_id) } catch (error) { outcome = toRunnerError(error)[1] as ReportBody }
+        if (outcome.kind === 'result') {
+          const failed = await upload(leaseId, accepted.remote_task_id, outcome)
+          if (failed === null) return
+          if (failed) outcome = failed
+        }
         await report(leaseId, outcome)
         held.delete(leaseId)
         return

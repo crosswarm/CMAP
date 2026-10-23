@@ -11,7 +11,8 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 | `GET /v1/health` | 派发前 3 秒健康探测；应答同时公布 lap 的准入白名单（`admission`：租户、owner、能力、风险上限）。不健康、`runner_id` 不符或缺 `admission` 即按 `fallback_agents` 回落本地，`ROUTING_DECIDED` 记 `unhealthy`；白名单不放行则记 `tenant_mismatch` / `owner_mismatch` / `capability_mismatch` / `risk_exceeded` 并同样回落 |
 | `POST /v1/tasks` | 派发：信封 + 许可 + 已冻结输入（Memross 快照、评审输入） |
 | `GET /v1/tasks/{id}` | 状态轮询 |
-| `GET /v1/tasks/{id}/result` | 拉取结果与产物字节；CrossMini 落盘后用 `readVerifiedArtifact` 独立复算 sha256 |
+| `GET /v1/tasks/{id}/result` | 拉取结果与产物元数据（每个产物的 sha256 与长度，M09 起不再内联字节） |
+| `GET /v1/tasks/{id}/artifacts/{sha256}` | 按元数据流式拉取产物字节（见下「产物流式传输」） |
 | `POST /v1/tasks/{id}/cancel` | 取消 |
 
 **每个请求（含 health）都带请求签名，每个应答（401 除外）都带 lap 的响应签名**，见下「应用层认证」。
@@ -33,6 +34,17 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 - **CrossMini 对 401 的处理**：派发被 401 拒绝时 lap 未执行，按 `PERMIT_INVALID`（`BAD_SIGNATURE`）落账、保留 binding、不重发；状态查询被 401 拒绝（密钥不符、时钟漂移）按失联处理，计入离线宽限，不重跑。
 - **nonce 缓存**在 lap 进程内存（容量 4096，保留约 5 秒）。守护进程重启后，窗口内（时间戳 ±2 秒，理论上至多约 4 秒）一个已被用过的请求理论上可被重放；时间戳窗口限定了这个缺口，未落盘。
 - 这一层**不替代** Tailscale ACL（ACL 仍未配置），也不加密：信封、冻结输入、结果产物的机密性依赖 tailnet 的 WireGuard；应用层只保证来源、完整性、受众与防重放。
+
+## 产物流式传输与内容寻址存储（M09，ADR-0008 §6）
+
+状态：🟡 本机实现与两种模式的双进程模拟通过（17 MiB 产物，`--artifact-bytes`），未在两台机器上实测。
+
+- **存储**：控制面产物按 sha256 存在 `<CMAP_WORK_ROOT>/.cas/sha256/ab/cd/<hash>`（0600）。写入用 `.cas/tmp` 下的临时文件，边写边算 sha256、长度并扫已知凭据模式，结束后与声明核对，一致才原子重命名；不一致、超限、命中凭据或断流都删掉临时文件。之后再复制（APFS 上是写时复制克隆）到原来的 `<CMAP_WORK_ROOT>/<taskId>/<uri>` 并复核，既有读者（DAG 子节点输入、评审输入、Memross 回写）不变。Artifact 记录不变：按记录里的 sha256 即可在存储里定位。
+- **监听模式**：结果应答只列 `{uri, sha256, size_bytes}`（已签名）。CrossMini 随后逐个 `GET /v1/tasks/{id}/artifacts/{sha256}`；lap 的应答签名把产物 sha256 当作体哈希，先签后流。CrossMini 先按声明的 sha256 验签、核对 `content-length` 等于声明长度，再边收边写入存储；签名、长度、哈希任何一项不符都按 `EVIDENCE_HASH_MISMATCH` 处理，不落盘。
+- **出站模式**：runner 回报结果前逐个 `POST /v1/gateway/artifacts?lease_id=&sha256=&size=` 上传原始字节（请求签名覆盖查询串与体 sha256，即声明的哈希与长度）。API 只接受本 runner 持有的在租租约，边收边算写入存储，与声明不符回 422 `EVIDENCE_HASH_MISMATCH`、不落盘，并把上传登记在 `.cas/leases/<lease_id>/<sha256>`。结果回报只带元数据；Worker 只认本租约下登记的上传（别处已有同哈希的内容不能被借用，缺了即 `EVIDENCE_FILE_MISSING`），复制进任务目录后再复算一次。上传被拒时 runner 改报对应的 adapter 错误；网络失败重试 5 次后报 `EVIDENCE_UPLOAD_FAILED`。**API 与 Worker 必须用同一个 `CMAP_WORK_ROOT`**，API 未配置工作区时拒绝上传。
+- **上限**：证据读取与传输的单文件上限 `CMAP_MAX_EVIDENCE_BYTES`（正整数字节，默认 256 MiB，非法值拒绝），两侧各自执行；读取一律流式哈希，FIFO 等非普通文件仍按 `O_NONBLOCK` + `fstat` 拒绝。API 下载流式发出、上限 `CMAP_API_MAX_ARTIFACT_BYTES`（默认同上），先流式复算一遍哈希（不符 409，不发字节）再从同一句柄发出；存储里没有的旧产物仍按任务目录路径下载。
+- **兼容**：新控制面仍接受旧 runner 的内联小产物（`content_base64`，≤ 16 MiB），同样经存储核验落盘；新 runner 只发流式元数据，旧控制面不认。所以**先升级控制面，再升级 lap / 出站 runner**；lap 不必同步升级，但升级前其产物仍受 16 MiB 内联上限约束。
+- 未做：派发时下发给 runner 的冻结输入（Memross 快照、评审输入、DAG 父节点产物）仍以 base64 内联，单个约 16 MiB 上限；需要内容的控制面读者（`readVerifiedArtifact`）仍把文件读进内存；进程内 Adapter（本机 codex、kimi、yonwork）的产物不进存储；存储没有清理与保留期。
 
 ## CrossMini（控制面 Worker）配置
 
@@ -272,6 +284,7 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 | 进程 | 变量 | 说明 |
 |---|---|---|
 | API | `CMAP_GATEWAY_KEY_FILE` | 网关应答签名私钥（不存在则生成 0600）；配置后启用 `/v1/gateway/*`。不得等于 `CMAP_PERMIT_KEY_FILE` |
+| API | `CMAP_WORK_ROOT` | 必须与 Worker 相同：网关上传的产物写入其 `.cas`（M09） |
 | Worker | `CMAP_GATEWAY_AGENT_ID` | 例如 `codex@gateway`；设置后注册网关 Adapter，需 `CMAP_PERMIT_KEY_FILE` |
 | runner | `CMAP_CONTROL_PLANE_URL` | 例如 `https://cmap.spux.cn`；设置即进入出站模式。只认 https，http 仅限回环 |
 | runner | `CMAP_RUNNER_KEY_FILE` | 登记的 runner 私钥（首次启动生成 0600，私钥不离开本机） |
@@ -286,6 +299,6 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 - 所有端点已有应用层请求认证与应答签名；按 ADR-0006 修订 1 **不配置 Tailscale ACL**。残余风险已接受：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求读完头就 401，但仍占连接）。控制面 5433/7233 只监听 127.0.0.1。
 - 应用层不加密。私钥泄露即失效：CrossMini 的 `CMAP_PERMIT_KEY_FILE` 一旦泄露，攻击者既能伪造请求也能签派发许可；轮换须同时更新 lap 上的 `CMAP_PERMIT_PUBLIC_KEY_FILE`。lap 的 `CMAP_RUNNER_KEY_FILE` 泄露则可伪造应答，须同步更新 CrossMini 的 `CMAP_REMOTE_RUNNER_PUBKEY_FILE`。
 - nonce 防重放缓存在内存，守护进程重启后窗口内（≤ 约 4 秒）理论上可重放；时钟偏差超过 2 秒的请求一律被拒，两机需要 NTP 同步。
-- 产物随结果以 base64 内联拉取，单个约 16 MiB 上限，适合报告类证据，不适合大文件。
+- 结果产物已改为流式传输（见上「产物流式传输与内容寻址存储」），单文件上限可配（默认 256 MiB）；派发时的冻结输入仍以 base64 内联，单个约 16 MiB 上限。
 - `RemoteRunnerAdapter` 的静态风险上限默认 `mutating`（与被包装的 Codex 一致），真正的上限由 lap 的 `RUNNER_MAX_RISK` 执行：派发前按 health 公布的白名单回落本地（`risk_exceeded`），探测后白名单才收紧的情形仍由 lap 准入拒绝兜底。白名单不含 `affinity.host`，指定主机不符仍由 lap 准入拒绝（`HOST_MISMATCH`）。
 - 远程 runner 至多两个：lap 与可选的本机 runner 守护进程（同为 Adapter ID `remote-runner-adapter`，按 `runner_id` 区分）；第三台机器不在 ADR-0006 范围内。

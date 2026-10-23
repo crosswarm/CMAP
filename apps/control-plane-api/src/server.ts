@@ -15,7 +15,9 @@ import type { AddressInfo } from 'node:net'
 import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createHash, randomBytes } from 'node:crypto'
+import { constants } from 'node:fs'
 import { lstat, open, readFile, realpath, stat } from 'node:fs/promises'
+import { pipeline } from 'node:stream/promises'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError, EventConflictError, validateEnrollmentMessage } from '#domain-model'
@@ -27,6 +29,7 @@ import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/g
 import { createOidcVerifier, OidcError, type OidcConfig, type OidcRole } from './oidc.ts'
 import { createRunnerGateway, type RunnerGatewayOptions } from './gateway.ts'
 import { hasKnownSecret } from '../../../packages/adapter-sdk/src/secret-patterns.ts'
+import { casPath, maxEvidenceBytes } from '../../../packages/adapter-sdk/src/content-store.ts'
 
 export interface ControlPlaneOptions {
   readonly store: Store
@@ -34,8 +37,10 @@ export interface ControlPlaneOptions {
   readonly tenant: string
   /** P2 本机操作人配置。不是 OIDC 身份，也不接受浏览器填写。 */
   readonly owner?: string
-  /** Agent 任务工作目录根。Artifact 下载只能读取 workRoot/taskId 下的普通文件。 */
+  /** Agent 任务工作目录根。Artifact 下载只能读取 `<workRoot>/.cas`（内容寻址存储）或 workRoot/taskId 下的普通文件。 */
   readonly workRoot?: string
+  /** 单个 Artifact 下载与网关上传的上限（字节），默认 CMAP_MAX_EVIDENCE_BYTES（256MiB）。 */
+  readonly maxArtifactBytes?: number
   /** Vite 构建产物目录；配置后仅托管 / 与 /assets/*。 */
   readonly frontendDir?: string
   /** 只查询模型建议；不得写入 Approval 或代替真人批准。 */
@@ -98,7 +103,6 @@ class ForbiddenFileError extends Error {}
 class FileTooLargeError extends Error {}
 class HashMismatchError extends Error {}
 
-const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 const DEFAULT_TERMINAL_LIMIT = 50
 const NO_ATTENTION: MissionAttention = { INPUT_REQUIRED: 0, AUTH_REQUIRED: 0, APPROVAL_REQUIRED: 0, FAILED_TERMINAL: 0 }
 
@@ -307,24 +311,25 @@ const artifactFilePath = (taskRoot: string, artifact: Artifact): string => {
   return resolve(taskRoot, join(...parts))
 }
 
-const readSmallFile = async (file: string): Promise<Buffer> => {
-  const handle = await open(file, 'r')
-  try {
-    const buf = Buffer.allocUnsafe(MAX_ARTIFACT_BYTES + 1)
-    const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
-    if (bytesRead > MAX_ARTIFACT_BYTES) throw new FileTooLargeError('Artifact 超过 2MiB')
-    return Buffer.from(buf.subarray(0, bytesRead))
-  } finally {
-    await handle.close()
-  }
-}
-
 const attachmentFilename = (id: string): string => {
   const safe = basename(id).replace(/["\\\x00-\x1f\x7f-\uffff]/g, '_').trim()
   return (safe || 'artifact').slice(0, 120)
 }
 
-const readArtifactBytes = async (workRoot: string, taskId: string, artifact: Artifact) => {
+/** M09 起新产物落内容寻址存储，按账本 sha256 定位；不在存储里的旧产物仍按任务目录路径读取。 */
+const casArtifactFile = async (workRoot: string, artifact: Artifact): Promise<string | undefined> => {
+  const hash = artifact.sha256.toLowerCase()
+  if (!/^[a-f0-9]{64}$/.test(hash)) return undefined
+  const file = casPath(workRoot, hash)
+  const info = await lstat(file).catch(() => undefined)
+  if (!info) return undefined
+  if (!info.isFile()) throw new ForbiddenFileError('Artifact 不是普通文件')
+  return file
+}
+
+const artifactFile = async (workRoot: string, taskId: string, artifact: Artifact): Promise<string> => {
+  const stored = await casArtifactFile(workRoot, artifact)
+  if (stored) return stored
   const taskRoot = resolve(workRoot, taskId)
   const taskRootInfo = await lstat(taskRoot).catch((e: NodeJS.ErrnoException) => {
     if (e.code === 'ENOENT') throw new NotFoundError('Task directory', taskId)
@@ -348,13 +353,28 @@ const readArtifactBytes = async (workRoot: string, taskId: string, artifact: Art
 
   const realFile = await realpath(file)
   if (!inside(realTaskRoot, realFile)) throw new ForbiddenFileError('Artifact symlink 逃逸')
+  return realFile
+}
 
-  const actual = await stat(realFile)
-  if (actual.size > MAX_ARTIFACT_BYTES) throw new FileTooLargeError('Artifact 超过 2MiB')
-  const bytes = await readSmallFile(realFile)
-  const sha256 = createHash('sha256').update(bytes).digest('hex')
-  if (sha256 !== artifact.sha256.toLowerCase()) throw new HashMismatchError('Artifact 内容哈希与账本不符')
-  return { bytes, sha256 }
+/**
+ * 打开并复核要下载的产物：非阻塞打开、按句柄判定普通文件与上限，先流式算一遍哈希与账本核对（不符即 409，不发字节），
+ * 再从同一句柄流式发出。shortcut: 两遍之间被原地改写的文件仍会发出改写后的字节（长度不变时）；客户端可按 x-content-sha256 复核。
+ */
+const openArtifactForDownload = async (workRoot: string, taskId: string, artifact: Artifact, maxBytes: number) => {
+  const handle = await open(await artifactFile(workRoot, taskId, artifact), constants.O_RDONLY | constants.O_NONBLOCK)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) throw new ForbiddenFileError('Artifact 不是普通文件')
+    if (info.size > maxBytes) throw new FileTooLargeError(`Artifact 超过 ${maxBytes} 字节上限`)
+    const hash = createHash('sha256')
+    for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk as Buffer)
+    const sha256 = hash.digest('hex')
+    if (sha256 !== artifact.sha256.toLowerCase()) throw new HashMismatchError('Artifact 内容哈希与账本不符')
+    return { handle, size: info.size, sha256 }
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
 }
 
 const downloadArtifact: Handler = async (ctx) => {
@@ -371,15 +391,20 @@ const downloadArtifact: Handler = async (ctx) => {
     return fail(ctx.res, 404, `Artifact 不存在：${artifactId}`)
   }
   try {
-    const { bytes, sha256 } = await readArtifactBytes(ctx.config.workRoot, taskId, artifact)
+    const { handle, size, sha256 } = await openArtifactForDownload(ctx.config.workRoot, taskId, artifact, ctx.config.maxArtifactBytes ?? maxEvidenceBytes())
     ctx.res.writeHead(200, {
       'content-type': 'application/octet-stream',
-      'content-length': bytes.length,
+      'content-length': size,
       'content-disposition': `attachment; filename="${attachmentFilename(artifact.artifact_id)}"`,
       'x-content-type-options': 'nosniff',
       'x-content-sha256': sha256,
     })
-    ctx.res.end(bytes)
+    if (size === 0) {
+      await handle.close()
+      ctx.res.end()
+      return
+    }
+    await pipeline(handle.createReadStream({ start: 0, end: size - 1 }), ctx.res).catch(() => ctx.res.destroy())
   } catch (e) {
     if (e instanceof NotFoundError) return fail(ctx.res, 404, e.message)
     if (e instanceof ForbiddenFileError) return fail(ctx.res, 403, e.message)
@@ -848,7 +873,11 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
   // 公网 Host 只在 OIDC 模式下放行：本机模式没有认证，不能经反向代理暴露。
   const publicOrigin = opts.oidc && opts.publicOrigin ? new URL(opts.publicOrigin) : null
   const gateway = opts.runnerGateway
-    ? createRunnerGateway({ ...opts.runnerGateway, store: opts.store, ...(opts.notifyRunnerReported ? { notifyRunnerReported: opts.notifyRunnerReported } : {}) })
+    ? createRunnerGateway({
+      ...opts.runnerGateway, store: opts.store, ...(opts.workRoot ? { workRoot: opts.workRoot } : {}),
+      ...(opts.maxArtifactBytes ? { maxArtifactBytes: opts.maxArtifactBytes } : {}),
+      ...(opts.notifyRunnerReported ? { notifyRunnerReported: opts.notifyRunnerReported } : {}),
+    })
     : null
   const server = createServer((req, res) => {
     void (async () => {
@@ -865,7 +894,10 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
           if ((origin && origin !== expected) || req.headers['sec-fetch-site'] === 'cross-site') {
             return fail(res, 403, '跨来源写入被拒绝')
           }
-          if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
+          // 唯一的非 JSON 写入：网关产物流式上传（M09），体是原始字节，由 runner 签名逐请求认证
+          const contentType = req.headers['content-type']?.split(';')[0]?.trim().toLowerCase()
+          const artifactUpload = req.url?.split('?')[0] === '/v1/gateway/artifacts' && contentType === 'application/octet-stream'
+          if (contentType !== 'application/json' && !artifactUpload) {
             return fail(res, 415, '写入必须使用 application/json')
           }
         }

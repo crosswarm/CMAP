@@ -3,7 +3,7 @@
  * 无细节的 401 拒绝且不执行；lap 的应答被篡改、剥签或换序时 CrossMini 拒收。真实 HTTP + 假 codex。
  */
 import { generateKeyPairSync } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -193,15 +193,19 @@ test('响应被篡改 / 剥签：CrossMini 拒收；结果端点按 EVIDENCE_HAS
     assert.deepEqual([health.state, health.detail], ['unavailable', 'REMOTE_RESPONSE_SIGNATURE_INVALID'])
     await rejectsWith(stripped.getStatus(binding), 'REMOTE_RESPONSE_SIGNATURE_INVALID')
 
-    // 结果里的产物字节被换（签名没重算）→ EVIDENCE_HASH_MISMATCH，CrossMini 工作区不出现产物
+    // 拉取的产物字节被换（签名没重算）→ EVIDENCE_HASH_MISMATCH，CrossMini 工作区与内容寻址存储都不出现产物
+    const casFiles = async () => (await readdir(join(f.cm, '.cas'), { recursive: true, withFileTypes: true }).catch(() => []))
+      .filter((d) => d.isFile()).map((d) => d.name)
     const tampered = await via({})
     await rejectsWith(tampered.collectResult(binding), 'EVIDENCE_HASH_MISMATCH')
     await assert.rejects(readFile(join(f.cm, TASK, 'evidence/report.txt')))
+    assert.deepEqual(await casFiles(), [])
 
-    // 即便 lap 自己对错误字节重新签名，CrossMini 仍复算哈希：EVIDENCE_HASH_MISMATCH，落盘文件被删除
+    // 即便 lap 自己对错误字节重新签名，CrossMini 仍按结果里声明的哈希核对：EVIDENCE_HASH_MISMATCH，不落盘
     const resigned = await via({ resign: true })
     await rejectsWith(resigned.collectResult(binding), 'EVIDENCE_HASH_MISMATCH')
     await assert.rejects(readFile(join(f.cm, TASK, 'evidence/report.txt')))
+    assert.deepEqual(await casFiles(), [])
 
     // 未改动的直连通路不受影响
     assert.equal((await f.adapter.collectResult(binding)).artifacts.length, 1)

@@ -228,14 +228,58 @@ test("readVerifiedArtifact 拒绝 FIFO 证据而不是永久阻塞", async (t) =
   );
 });
 
-test("readVerifiedArtifact 拒绝超过 16MiB 的证据，不读入内存", async (t) => {
+test("readVerifiedArtifact 拒绝超过上限（默认 256MiB）的证据，不读入内存", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "cmap-evidence-large-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, "big.bin"), "");
-  await truncate(join(dir, "big.bin"), 16 * 1024 * 1024 + 1);
+  await truncate(join(dir, "big.bin"), 256 * 1024 * 1024 + 1);
   await assert.rejects(
     readVerifiedArtifact(dir, { uri: "big.bin", role: "report", sha256: "0".repeat(64) }),
     (err) => err instanceof AdapterError && err.code === "EVIDENCE_FILE_TOO_LARGE",
+  );
+});
+
+test("M09 证据上限可由 CMAP_MAX_EVIDENCE_BYTES 配置；非法值 fail closed", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-evidence-limit-"));
+  const previous = process.env["CMAP_MAX_EVIDENCE_BYTES"];
+  t.after(async () => {
+    if (previous === undefined) delete process.env["CMAP_MAX_EVIDENCE_BYTES"];
+    else process.env["CMAP_MAX_EVIDENCE_BYTES"] = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const bytes = Buffer.alloc(1025, "x");
+  await writeFile(join(dir, "r.bin"), bytes);
+  const ref = { uri: "r.bin", role: "report", sha256: createHash("sha256").update(bytes).digest("hex") };
+  process.env["CMAP_MAX_EVIDENCE_BYTES"] = "1024";
+  await assert.rejects(readVerifiedArtifact(dir, ref), (err) => err instanceof AdapterError && err.code === "EVIDENCE_FILE_TOO_LARGE");
+  process.env["CMAP_MAX_EVIDENCE_BYTES"] = "1025";
+  assert.equal((await readVerifiedArtifact(dir, ref)).bytes.length, 1025);
+  process.env["CMAP_MAX_EVIDENCE_BYTES"] = "lots";
+  await assert.rejects(readVerifiedArtifact(dir, ref), RangeError);
+});
+
+test("M09 大于 16MiB 的证据按流式哈希复核通过；凭据跨读块边界仍被识别", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "cmap-evidence-17m-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const big = Buffer.alloc(17 * 1024 * 1024 + 3, "cmap-m09 ");
+  await writeFile(join(dir, "big.bin"), big);
+  const sha = createHash("sha256").update(big).digest("hex");
+  const verified = await readVerifiedArtifact(dir, { uri: "big.bin", role: "report", sha256: sha });
+  assert.equal(verified.sha256, sha);
+  assert.equal(verified.bytes.length, big.length);
+  const result = await normalizeAgentOutput({
+    status: "completed", summary: "big", findings: [], error: null,
+    criterion_results: [{ criterion_id: "C1", actual: "1", passed: true, evidence_artifact_ids: ["a1"] }],
+    artifacts: [{ artifact_id: "a1", role: "report", uri: "big.bin", media_type: "application/octet-stream", size_bytes: big.length, sha256: sha }],
+  }, envelope, dir);
+  assert.deepEqual([result.artifacts[0]!.sha256, result.artifacts[0]!.size_bytes], [sha, big.length]);
+
+  // 凭据正好横跨 64KiB 读块边界：流式扫描不能漏掉
+  const straddle = Buffer.concat([Buffer.alloc(64 * 1024 - 10, " "), Buffer.from("sk-" + "SyntheticOnly".repeat(4)), Buffer.alloc(64, " ")]);
+  await writeFile(join(dir, "straddle.txt"), straddle);
+  await assert.rejects(
+    readVerifiedArtifact(dir, { uri: "straddle.txt", role: "report", sha256: createHash("sha256").update(straddle).digest("hex") }),
+    (err) => err instanceof AdapterError && err.code === "EVIDENCE_SECRET_DETECTED",
   );
 });
 

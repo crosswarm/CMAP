@@ -5,7 +5,7 @@
  */
 
 /**
- * ADR-0006 thin protocol between the single control plane (CrossMini) and the lap runner daemon over Tailscale. Only the control plane initiates HTTP requests (dispatch, status, result, cancel, health); the runner never calls back. Dispatch carries a cmap1 dispatch permit bound to runner_id, adapter audience and the exact envelope SHA256; the runner verifies it with a pinned public key and at most 2 seconds of clock skew. Input files are frozen by the control plane and shipped inline; result artifacts are pulled by the control plane, which recomputes every SHA256 itself and never trusts runner-reported hashes. Bodies never carry credentials, database addresses or provider stderr; error bodies carry only category, code and retryable. Application-layer authentication (ADR-0006 Stage 3): every request, health included, carries requestAuthHeaders signed by the control plane permit key (Ed25519) over method, path+query, body sha256, millisecond timestamp (skew at most 2 seconds), nonce (single use inside the window) and audience runner_id; any failure is an identical unsigned 401 error with code UNAUTHORIZED and no detail, and nothing is executed. Every other response carries responseAuthHeaders signed by the runner key over audience, the request nonce, status and body sha256; the control plane pins the runner public key and treats a bad signature like an evidence hash mismatch.
+ * ADR-0006 thin protocol between the single control plane (CrossMini) and the lap runner daemon over Tailscale. Only the control plane initiates HTTP requests (dispatch, status, result, cancel, health); the runner never calls back. Dispatch carries a cmap1 dispatch permit bound to runner_id, adapter audience and the exact envelope SHA256; the runner verifies it with a pinned public key and at most 2 seconds of clock skew. Input files are frozen by the control plane and shipped inline; result artifacts are pulled by the control plane, which recomputes every SHA256 itself and never trusts runner-reported hashes. Result artifacts are streamed (M09): the result lists each artifact's sha256 and size_bytes, then the control plane fetches the raw bytes with GET /v1/tasks/{remote_task_id}/artifacts/{sha256} (see artifactStream), hashing while it writes them into its content-addressed store and discarding them on any mismatch. Inline base64 artifacts (inlineArtifact) are still accepted from runners that predate streaming. Bodies never carry credentials, database addresses or provider stderr; error bodies carry only category, code and retryable. Application-layer authentication (ADR-0006 Stage 3): every request, health included, carries requestAuthHeaders signed by the control plane permit key (Ed25519) over method, path+query, body sha256, millisecond timestamp (skew at most 2 seconds), nonce (single use inside the window) and audience runner_id; any failure is an identical unsigned 401 error with code UNAUTHORIZED and no detail, and nothing is executed. Every other response carries responseAuthHeaders signed by the runner key over audience, the request nonce, status and body sha256; the control plane pins the runner public key and treats a bad signature like an evidence hash mismatch.
  */
 export type RemoteRunnerMessageV1 =
   | RemoteRunnerDispatchV1
@@ -20,6 +20,7 @@ export type Identifier = string
 export type Sha256 = string
 export type Base64 = string
 export type RemoteTaskId = string
+export type ArtifactUri = string
 /**
  * @maxItems 128
  */
@@ -69,7 +70,7 @@ export interface RemoteRunnerStatusV1 {
   terminal_observed: boolean
 }
 /**
- * Response to GET /v1/tasks/{remote_task_id}/result. result must validate as TaskResultV1 on the control plane; identity fields are overwritten by the control plane. Each artifact is pulled inline and its sha256 is recomputed by the control plane before any ledger write.
+ * Response to GET /v1/tasks/{remote_task_id}/result. result must validate as TaskResultV1 on the control plane; identity fields are overwritten by the control plane. Each artifact is either declared for streaming (streamedArtifact, current runners) or carried inline (inlineArtifact, runners that predate streaming); either way its sha256 is recomputed by the control plane before any ledger write.
  */
 export interface RemoteRunnerResultV1 {
   schema: SchemaTag
@@ -79,10 +80,22 @@ export interface RemoteRunnerResultV1 {
   /**
    * @maxItems 64
    */
-  artifacts: {
-    uri: string
-    content_base64: Base64
-  }[]
+  artifacts: (RemoteRunnerStreamedArtifactV1 | RemoteRunnerInlineArtifactV1)[]
+}
+/**
+ * Metadata sent before the bytes: uri relative to the runner task directory, the runner's declared sha256 and exact size_bytes. The control plane then fetches the bytes from artifactStream and accepts them only if their recomputed sha256 and length equal these values and the stream's response signature; otherwise nothing is persisted (EVIDENCE_HASH_MISMATCH). Each side enforces its own configured size cap (CMAP_MAX_EVIDENCE_BYTES, default 256 MiB).
+ */
+export interface RemoteRunnerStreamedArtifactV1 {
+  uri: ArtifactUri
+  sha256: Sha256
+  size_bytes: number
+}
+/**
+ * Legacy inline transfer (at most 16 MiB raw bytes) from runners that predate streaming. Still accepted by the control plane; current runners send streamedArtifact instead.
+ */
+export interface RemoteRunnerInlineArtifactV1 {
+  uri: ArtifactUri
+  content_base64: Base64
 }
 /**
  * POST /v1/tasks/{remote_task_id}/cancel. reason is a control-plane code, never prompt text.

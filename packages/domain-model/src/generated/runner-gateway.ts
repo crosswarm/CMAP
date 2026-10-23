@@ -5,13 +5,14 @@
  */
 
 /**
- * ADR-0008 §3 outbound runner gateway. The runner initiates every HTTPS request; the control plane never connects to a runner, so runners behind NAT work. Message bodies reuse remote-runner.v1 semantics unchanged (dispatch with a cmap1 permit bound to runner_id, adapter audience and envelope SHA256; dispatch_accepted / status / result / error; cancel); only the transport direction changes. POST /v1/gateway/claim long-polls for work (wait_seconds at most 50) and renews every lease listed in held_leases; the reply carries at most one assignment plus pending cancels, which the control plane can no longer push. POST /v1/gateway/reports carries one remote-runner.v1 reply for a lease and also renews it. A lease the control plane reports as expired enters the existing execution-uncertain path (task INPUT_REQUIRED, binding kept): it is never reassigned or rerun. Results are written to the ledger before the workflow is signalled. Artifacts are still recomputed by the control plane; runner-reported hashes are never trusted. Authentication: every request carries requestAuthHeaders signed by the runner's enrolled Ed25519 key (runner-enrollment.v1); any failure, a revoked runner included, is one identical unsigned 401 error with code UNAUTHORIZED and nothing is executed or recorded. Every other reply carries responseAuthHeaders signed by the control-plane key the runner pinned at enrollment. Bodies never carry credentials, database addresses, provider stderr or tenant/owner identity: identity comes from the enrolled runner record, not from the request.
+ * ADR-0008 §3 outbound runner gateway. The runner initiates every HTTPS request; the control plane never connects to a runner, so runners behind NAT work. Message bodies reuse remote-runner.v1 semantics unchanged (dispatch with a cmap1 permit bound to runner_id, adapter audience and envelope SHA256; dispatch_accepted / status / result / error; cancel); only the transport direction changes. POST /v1/gateway/claim long-polls for work (wait_seconds at most 50) and renews every lease listed in held_leases; the reply carries at most one assignment plus pending cancels, which the control plane can no longer push. POST /v1/gateway/reports carries one remote-runner.v1 reply for a lease and also renews it. A lease the control plane reports as expired enters the existing execution-uncertain path (task INPUT_REQUIRED, binding kept): it is never reassigned or rerun. Results are written to the ledger before the workflow is signalled. Artifacts are still recomputed by the control plane; runner-reported hashes are never trusted. Result artifacts are streamed (M09): before reporting a result the runner uploads each streamedArtifact's bytes with POST /v1/gateway/artifacts (artifactUpload), and the result report then carries only their metadata; reports with inline base64 artifacts from runners that predate streaming are still accepted. Authentication: every request carries requestAuthHeaders signed by the runner's enrolled Ed25519 key (runner-enrollment.v1); any failure, a revoked runner included, is one identical unsigned 401 error with code UNAUTHORIZED and nothing is executed or recorded. Every other reply carries responseAuthHeaders signed by the control-plane key the runner pinned at enrollment. Bodies never carry credentials, database addresses, provider stderr or tenant/owner identity: identity comes from the enrolled runner record, not from the request.
  */
 export type RunnerGatewayMessageV1 =
   | RunnerGatewayClaimV1
   | RunnerGatewayClaimResultV1
   | RunnerGatewayReportV1
   | RunnerGatewayReportAckV1
+  | RunnerGatewayUploadAckV1
   | RunnerGatewayErrorV1
 export type SchemaTag = 'cmap/runner-gateway/v1'
 export type Identifier = string
@@ -127,7 +128,7 @@ export interface RemoteRunnerStatusV1 {
   terminal_observed: boolean
 }
 /**
- * Response to GET /v1/tasks/{remote_task_id}/result. result must validate as TaskResultV1 on the control plane; identity fields are overwritten by the control plane. Each artifact is pulled inline and its sha256 is recomputed by the control plane before any ledger write.
+ * Response to GET /v1/tasks/{remote_task_id}/result. result must validate as TaskResultV1 on the control plane; identity fields are overwritten by the control plane. Each artifact is either declared for streaming (streamedArtifact, current runners) or carried inline (inlineArtifact, runners that predate streaming); either way its sha256 is recomputed by the control plane before any ledger write.
  */
 export interface RemoteRunnerResultV1 {
   schema: 'cmap/remote-runner/v1'
@@ -137,10 +138,22 @@ export interface RemoteRunnerResultV1 {
   /**
    * @maxItems 64
    */
-  artifacts: {
-    uri: string
-    content_base64: string
-  }[]
+  artifacts: (RemoteRunnerStreamedArtifactV1 | RemoteRunnerInlineArtifactV1)[]
+}
+/**
+ * Metadata sent before the bytes: uri relative to the runner task directory, the runner's declared sha256 and exact size_bytes. The control plane then fetches the bytes from artifactStream and accepts them only if their recomputed sha256 and length equal these values and the stream's response signature; otherwise nothing is persisted (EVIDENCE_HASH_MISMATCH). Each side enforces its own configured size cap (CMAP_MAX_EVIDENCE_BYTES, default 256 MiB).
+ */
+export interface RemoteRunnerStreamedArtifactV1 {
+  uri: string
+  sha256: string
+  size_bytes: number
+}
+/**
+ * Legacy inline transfer (at most 16 MiB raw bytes) from runners that predate streaming. Still accepted by the control plane; current runners send streamedArtifact instead.
+ */
+export interface RemoteRunnerInlineArtifactV1 {
+  uri: string
+  content_base64: string
 }
 /**
  * permit: DispatchPermitErrorCode, no execution happened. admission: RunnerAdmissionErrorCode from the runner's own allowlist, no execution happened. adapter: AdapterError code from the wrapped adapter. protocol: malformed request, unknown task or oversized body, or UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure).
@@ -162,7 +175,17 @@ export interface RunnerGatewayReportAckV1 {
   lease: null | RunnerGatewayLeaseV1
 }
 /**
- * Gateway-level error. UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure); LEASE_EXPIRED / LEASE_UNKNOWN for reports on a lease that is closed, expired or not held by this runner (no ledger write); INVALID_REQUEST for malformed or oversized bodies. No detail crosses the wire.
+ * Reply to an artifact upload: the bytes were recomputed and kept under the lease.
+ */
+export interface RunnerGatewayUploadAckV1 {
+  schema: SchemaTag
+  kind: 'upload_ack'
+  lease_id: LeaseId
+  sha256: string
+  size_bytes: number
+}
+/**
+ * Gateway-level error. UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure); LEASE_EXPIRED / LEASE_UNKNOWN for reports or uploads on a lease that is closed, expired or not held by this runner (no ledger write); INVALID_REQUEST for malformed or oversized bodies; EVIDENCE_HASH_MISMATCH / EVIDENCE_SECRET_DETECTED / EVIDENCE_FILE_TOO_LARGE for rejected artifact uploads (nothing persisted). No detail crosses the wire.
  */
 export interface RunnerGatewayErrorV1 {
   schema: SchemaTag

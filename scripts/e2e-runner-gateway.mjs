@@ -1,7 +1,8 @@
 /**
  * runner 出站网关本机两进程模拟（ADR-0008 §3）。不经 Temporal、不调用模型。
  *
- *   TMPDIR=/private/tmp node scripts/e2e-runner-gateway.mjs --simulate [--keep]
+ *   TMPDIR=/private/tmp node scripts/e2e-runner-gateway.mjs --simulate [--keep] [--artifact-bytes N]
+ *   --artifact-bytes N：假 codex 产出 N 字节的产物，验证流式上传（M09，例如 N > 16MiB）。
  *
  * 进程 1（本脚本）：控制面 API（含 /v1/gateway/*，MemoryStore）+ Worker 侧 GatewayRunnerAdapter 与派发 Activities，
  *   两者共用一个账本，对应生产中共用的 PostgreSQL。
@@ -29,6 +30,12 @@ if (!process.argv.includes('--simulate')) {
   process.exit(2)
 }
 const keep = process.argv.includes('--keep')
+const bytesArg = process.argv.indexOf('--artifact-bytes')
+const artifactBytes = bytesArg > 0 ? Number(process.argv[bytesArg + 1]) : undefined
+if (artifactBytes !== undefined && (!Number.isSafeInteger(artifactBytes) || artifactBytes < 1)) {
+  console.error('--artifact-bytes 需要正整数')
+  process.exit(2)
+}
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const { MemoryStore } = await import('#domain-model')
@@ -36,7 +43,7 @@ const { createControlPlane } = await import('../apps/control-plane-api/src/serve
 const { GatewayRunnerAdapter, gatewayLeaseId } = await import('../adapters/runner-gateway/src/index.ts')
 const { createActivities } = await import('../workflows/activities.ts')
 const { syntheticRunner } = await import('../tests/workflow/fake-adapter.ts')
-const { ISSUER, envelope, makeFakeCodex, sha256, signer, trust } = await import('../tests/adapter/remote-runner-fixture.ts')
+const { ISSUER, bigArtifact, envelope, makeFakeCodex, sha256, signer, trust } = await import('../tests/adapter/remote-runner-fixture.ts')
 const { gatewayAuthorization, controlPlaneKey } = await import('../tests/adapter/runner-gateway-fixture.ts')
 
 const LEASE_TTL_MS = 3_000
@@ -53,13 +60,14 @@ process.on('exit', () => { for (const c of children) { try { c.kill('SIGKILL') }
 const root = await mkdtemp(join(tmpdir(), 'cmap-e2e-gateway-'))
 const cm = join(root, 'crossmini')
 await mkdir(cm)
-const codex = await makeFakeCodex(root)
+const codex = await makeFakeCodex(root, artifactBytes ? { artifactBytes } : {})
+const expectedSha = sha256(artifactBytes ? bigArtifact(artifactBytes) : 'ok')
 const launches = async () => (await readFile(codex.launches, 'utf8').catch(() => '')).split('\n').filter(Boolean).length
 
 step(1, '进程 1：控制面 API（网关）+ Worker 侧网关 Adapter，共用账本')
 const store = new MemoryStore()
 const api = await createControlPlane({
-  store, tenant: 'team-ycc', owner: 'crosswarm',
+  store, tenant: 'team-ycc', owner: 'crosswarm', workRoot: cm, // 与 Worker 共用工作区：上传落同一个内容寻址存储
   runnerGateway: { signingKey: controlPlaneKey.privateKey, leaseTtlMs: LEASE_TTL_MS, pollIntervalMs: 100 },
 })
 await api.listen(0)
@@ -140,9 +148,14 @@ ok(`binding ${bound.adapter}@${bound.runner_id}`)
 const collected = await acts.collectTaskResult('tsk-sim-ok')
 if (!collected.passed) fail(`判定未通过：${JSON.stringify(collected)}`)
 const [art] = await store.listArtifacts('tsk-sim-ok')
-if (art?.sha256 !== sha256('ok')) fail('产物哈希不符')
+if (art?.sha256 !== expectedSha) fail('产物哈希不符')
 const recomputed = sha256(await readFile(join(cm, 'tsk-sim-ok', art.uri)))
 if (recomputed !== art.sha256) fail('控制面落盘字节与账本哈希不符')
+const stored = sha256(await readFile(join(cm, '.cas', 'sha256', art.sha256.slice(0, 2), art.sha256.slice(2, 4), art.sha256)))
+if (stored !== art.sha256) fail('内容寻址存储里的字节与账本哈希不符')
+const outcomeArtifacts = (await store.getGatewayLease(gatewayLeaseId(bound))).outcome.artifacts
+if (outcomeArtifacts.some((a) => 'content_base64' in a)) fail('结果回报仍内联产物字节')
+ok(`产物 ${art.size_bytes} B 经流式上传：回报只带元数据，内容寻址存储复算一致`)
 if ((await launches()) !== 1) fail(`codex 执行次数 ${await launches()}`)
 ok(`判定通过；产物 ${art.uri} 控制面复算 sha256=${recomputed.slice(0, 12)}…；codex 执行 1 次；租约 ${(await store.getGatewayLease(gatewayLeaseId(bound))).state}`)
 

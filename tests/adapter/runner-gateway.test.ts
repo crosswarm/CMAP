@@ -4,14 +4,15 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, writeFile } from 'node:fs/promises'
+import { access, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { Readable } from 'node:stream'
 import { join } from 'node:path'
 
 import { issueDispatchPermit, verifyDispatchPermit, type RemoteRunnerDispatchV1, type TaskEnvelopeV1 } from '#domain-model'
-import { gatewayCall } from '../../apps/runner/src/outbound.ts'
+import { gatewayCall, gatewayUpload } from '../../apps/runner/src/outbound.ts'
 import { GATEWAY_ADAPTER_ID, gatewayLeaseId } from '../../adapters/runner-gateway/src/index.ts'
 import { controlPlaneKey, startGatewayFixture } from './runner-gateway-fixture.ts'
-import { ISSUER, lines, sha256, trust } from './remote-runner-fixture.ts'
+import { ISSUER, bigArtifact, lines, sha256, trust } from './remote-runner-fixture.ts'
 
 const issuePermitFor = (runnerId: string, envelope: TaskEnvelopeV1): string =>
   issueDispatchPermit({ privateKey: trust.privateKey, issuer: ISSUER, runnerId, adapterId: GATEWAY_ADAPTER_ID, envelope })
@@ -123,7 +124,7 @@ test('许可受众不是本 runner：runner 执行前拒绝并回报 permit 错�
   }
 })
 
-test('runner 自报的产物字节与哈希不符：控制面复算拒收（EVIDENCE_HASH_MISMATCH），不写 artifact 记录', async () => {
+test('旧版 runner 内联产物仍被接受，但字节与哈希不符时控制面复算拒收（EVIDENCE_HASH_MISMATCH），不写 artifact 记录', async () => {
   const f = await startGatewayFixture()
   try {
     // 不起真实 runner：用已登记的身份手工回报一份「哈希写的是 ok、字节却是 tampered」的结果
@@ -156,6 +157,88 @@ test('runner 自报的产物字节与哈希不符：控制面复算拒收（EVID
     assert.ok('passed' in collected && !collected.passed)
     assert.match(collected.summary, /EVIDENCE_HASH_MISMATCH/)
     assert.deepEqual(await f.store.listArtifacts('tsk-gw-liar'), [])
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('M09 大于 16MiB 的产物经出站网关流式上传：API 边收边算落内容寻址存储，回报只带元数据，Worker 复算后入账', async () => {
+  const size = 17 * 1024 * 1024 + 3
+  const big = bigArtifact(size)
+  const f = await startGatewayFixture({ artifactBytes: size })
+  try {
+    await f.startRunner('lap-gw')
+    await until(async () => (await f.store.getGatewayRunner('lap-gw'))!.last_seen_at !== null, 'runner 上线')
+    await f.addTask('tsk-gw-big')
+    await f.acts.dispatchTask('tsk-gw-big')
+    const collected = await f.acts.collectTaskResult('tsk-gw-big')
+    assert.ok('passed' in collected && collected.passed, JSON.stringify(collected))
+    const [artifact] = await f.store.listArtifacts('tsk-gw-big')
+    assert.deepEqual([artifact!.sha256, artifact!.size_bytes], [sha256(big), size])
+    assert.equal(sha256(await readFile(join(f.cm, 'tsk-gw-big', artifact!.uri))), sha256(big))
+    const h = sha256(big)
+    const cas = join(f.cm, '.cas', 'sha256', h.slice(0, 2), h.slice(2, 4), h)
+    assert.equal((await stat(cas)).mode & 0o777, 0o600)
+    assert.equal(sha256(await readFile(cas)), h)
+    // 账本里的结果回报不再夹带产物字节
+    const lease = (await f.store.getGatewayLease(gatewayLeaseId((await f.store.getTask('tsk-gw-big'))!.binding!)))!
+    assert.deepEqual((lease.outcome as { artifacts: unknown[] }).artifacts, [{ uri: 'evidence/report.txt', sha256: h, size_bytes: size }])
+    assert.equal((await lines(f.codex.launches)).length, 1)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('M09 上传字节与声明的 sha256 不符：API 422 EVIDENCE_HASH_MISMATCH 且不落盘；他人的租约不能上传；结果引用未经核验上传的产物 → EVIDENCE_FILE_MISSING', async () => {
+  const f = await startGatewayFixture()
+  try {
+    const { generateKeyPairSync } = await import('node:crypto')
+    const { gatewayRunnerRecord } = await import('./runner-gateway-fixture.ts')
+    const key = generateKeyPairSync('ed25519')
+    const otherKey = generateKeyPairSync('ed25519')
+    await f.store.registerGatewayRunner(gatewayRunnerRecord('liar', key.publicKey, { last_seen_at: new Date().toISOString() }))
+    await f.store.registerGatewayRunner(gatewayRunnerRecord('other', otherKey.publicKey, { owner: 'someone-else' }))
+    await f.addTask('tsk-gw-upload')
+    const client = { controlPlaneUrl: f.apiUrl, signingKey: key.privateKey, controlPlanePublicKey: controlPlaneKey.publicKey, runnerId: 'liar' }
+    const dispatching = f.acts.dispatchTask('tsk-gw-upload')
+    let claimed
+    for (;;) {
+      const { message } = await gatewayCall(client, '/v1/gateway/claim', { schema: 'cmap/runner-gateway/v1', kind: 'claim', runner_id: 'liar', wait_seconds: 1, held_leases: [] }, 5000)
+      if (message.kind === 'claim_result' && message.assignment) { claimed = message.assignment; break }
+    }
+    const leaseId = claimed.lease.lease_id
+    const report = (body: object) => gatewayCall(client, '/v1/gateway/reports', { schema: 'cmap/runner-gateway/v1', kind: 'report', runner_id: 'liar', lease_id: leaseId, body }, 5000)
+    await report({ schema: 'cmap/remote-runner/v1', kind: 'dispatch_accepted', runner_id: 'liar', remote_task_id: 'codex:tsk-gw-upload:1' })
+    await dispatching
+
+    const declared = { lease_id: leaseId, sha256: sha256('ok'), size_bytes: 2 }
+    const tampered = await gatewayUpload(client, declared, Readable.from([Buffer.from('xx')]), 5000)
+    assert.equal(tampered.status, 422)
+    assert.deepEqual(tampered.message, { schema: 'cmap/runner-gateway/v1', kind: 'error', code: 'EVIDENCE_HASH_MISMATCH', retryable: false })
+    const casFiles = async () => (await readdir(join(f.cm, '.cas'), { recursive: true, withFileTypes: true }).catch(() => []))
+      .filter((d) => d.isFile()).map((d) => d.name)
+    assert.deepEqual(await casFiles(), [])
+
+    // 别的 runner 不能往这条租约里上传（即使字节正确）
+    const foreign = await gatewayUpload({ ...client, signingKey: otherKey.privateKey, runnerId: 'other' }, declared, Readable.from([Buffer.from('ok')]), 5000)
+    assert.deepEqual([foreign.status, (foreign.message as { code?: string }).code], [409, 'LEASE_UNKNOWN'])
+    assert.deepEqual(await casFiles(), [])
+
+    await report({ schema: 'cmap/remote-runner/v1', kind: 'status', remote_task_id: 'codex:tsk-gw-upload:1', status: 'completed', terminal_observed: true })
+    await report({
+      schema: 'cmap/remote-runner/v1', kind: 'result', remote_task_id: 'codex:tsk-gw-upload:1',
+      result: {
+        schema: 'cmap/task-result/v1', mission_id: 'mis-remote', task_id: 'tsk-gw-upload', attempt: 1, status: 'completed', summary: 'ok',
+        criterion_results: [{ criterion_id: 'C1', actual: 'true', passed: true, evidence_artifact_ids: ['a1'] }],
+        artifacts: [{ artifact_id: 'a1', role: 'report', uri: 'evidence/report.txt', media_type: 'text/plain', size_bytes: 2, sha256: sha256('ok') }],
+      },
+      artifacts: [{ uri: 'evidence/report.txt', sha256: sha256('ok'), size_bytes: 2 }],
+    })
+    const collected = await f.acts.collectTaskResult('tsk-gw-upload')
+    assert.ok('passed' in collected && !collected.passed)
+    assert.match(collected.summary, /EVIDENCE_FILE_MISSING/)
+    assert.deepEqual(await f.store.listArtifacts('tsk-gw-upload'), [])
+    await assert.rejects(access(join(f.cm, 'tsk-gw-upload', 'evidence/report.txt')))
   } finally {
     await f.cleanup()
   }

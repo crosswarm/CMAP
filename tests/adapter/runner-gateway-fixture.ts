@@ -49,16 +49,19 @@ export interface GatewayFixtureOptions {
   readonly acceptTimeoutMs?: number
   readonly store?: Store
   readonly notifyRunnerReported?: (missionId: string, workflowId: string) => Promise<void>
+  /** 假 codex 产物长度（M09 大产物）；不设为 'ok'。 */
+  readonly artifactBytes?: number
 }
 
 export const startGatewayFixture = async (opts: GatewayFixtureOptions = {}) => {
   const root = await mkdtemp(join(tmpdir(), 'cmap-gateway-'))
-  const codex = await makeFakeCodex(root)
+  const codex = await makeFakeCodex(root, opts.artifactBytes === undefined ? {} : { artifactBytes: opts.artifactBytes })
   const cm = join(root, 'crossmini')
   await mkdir(cm)
   const store = opts.store ?? new MemoryStore()
   const api = await createControlPlane({
-    store, tenant: 'team-ycc', owner: 'crosswarm',
+    // API 与 Worker 共用控制面工作区：网关上传的产物落在同一个内容寻址存储里
+    store, tenant: 'team-ycc', owner: 'crosswarm', workRoot: cm,
     runnerGateway: { signingKey: controlPlaneKey.privateKey, pollIntervalMs: 20, leaseTtlMs: opts.leaseTtlMs ?? 120_000 },
     ...(opts.notifyRunnerReported ? { notifyRunnerReported: opts.notifyRunnerReported } : {}),
   })

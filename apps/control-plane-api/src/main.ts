@@ -62,8 +62,15 @@ const getTemporal = () => temporal ??= Connection.connect({
   address: process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233', connectTimeout: 5000,
 }).catch((error: unknown) => { temporal = undefined; throw error })
 
+// 下载与网关上传的单产物上限；不设时取 CMAP_MAX_EVIDENCE_BYTES（默认 256MiB）
+const maxArtifactRaw = process.env['CMAP_API_MAX_ARTIFACT_BYTES']?.trim()
+const maxArtifactBytes = maxArtifactRaw ? Number(maxArtifactRaw) : undefined
+if (maxArtifactBytes !== undefined && (!/^[1-9][0-9]*$/.test(maxArtifactRaw!) || !Number.isSafeInteger(maxArtifactBytes))) {
+  throw new RangeError('CMAP_API_MAX_ARTIFACT_BYTES must be a positive integer')
+}
+
 const server = await createControlPlane({
-  store, tenant, owner, workRoot, frontendDir, ...(oidc ? { oidc } : {}), ...(publicOrigin ? { publicOrigin } : {}),
+  store, tenant, owner, workRoot, frontendDir, ...(maxArtifactBytes ? { maxArtifactBytes } : {}), ...(oidc ? { oidc } : {}), ...(publicOrigin ? { publicOrigin } : {}),
   ...(runnerGateway ? { runnerGateway } : {}),
   getApprovalAdvice: (id) => getApprovalAdviceFromJev(id, { repoRoot, port }),
   startMission: async (missionId, workflowId) => {

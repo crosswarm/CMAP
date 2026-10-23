@@ -6,10 +6,12 @@
  *  1. 派发许可受众绑定所选 runner_id 与本 Adapter；runner 用固定的控制面许可公钥验签，拒绝即不执行。
  *  2. runner 的每个回报由 API 用其登记公钥验签后才落账（runner-gateway.v1 requestAuthHeaders）；
  *     这里只采信已落账的回报，产物仍落盘后独立复算 sha256（materializeRemoteResult），不采信自报哈希。
+ *     流式产物（M09）只认在本租约下经 API 核验登记的上传：别处已有同哈希的内容不能被结果借用。
  *  3. 执行不确定不改派、不重跑：租约过期、runner 被吊销、租约丢失都报 BINDING_NOT_FOUND，由控制面走既有不确定路径。
  *  4. 入队后等受理超时：撤回（未领取的永不下发；已领取的转为取消）并报不可达，Activity 照旧按 DISPATCH_UNCERTAIN 升级。
  */
 import { createHash } from 'node:crypto'
+import { lstat } from 'node:fs/promises'
 
 import type { RemoteTaskBinding, RiskLevel, Store, TaskEnvelopeV1, TaskResultV1 } from '#domain-model'
 import { RISK_LEVELS, RunnerAdmissionError, isLeaseExpired, type GatewayLease } from '#domain-model'
@@ -19,6 +21,7 @@ import type {
 } from '#adapter-sdk'
 import { AdapterError, assertAdapterAuthorization, snapshotAdapterAuthorization, snapshotDispatchContext } from '#adapter-sdk'
 import { materializeRemoteResult, raiseRemoteError, readFrozenInputs } from '../../remote-runner/src/index.ts'
+import { leaseUploadPath } from '../../../packages/adapter-sdk/src/content-store.ts'
 
 export const GATEWAY_ADAPTER_ID = 'gateway-runner-adapter'
 const RR = 'cmap/remote-runner/v1'
@@ -202,7 +205,17 @@ export class GatewayRunnerAdapter implements AgentAdapter {
     const { id, lease } = await this.#lease(binding)
     if (lease.state !== 'closed') throw new AdapterError('RESULT_NOT_READY', '出站 runner 尚未回报终态', true, 'gateway-result-not-ready')
     const outcome = lease.outcome
-    if (outcome?.kind === 'result') return materializeRemoteResult(this.#workRoot, id, outcome)
+    if (outcome?.kind === 'result') {
+      const leaseId = gatewayLeaseId(binding)
+      return materializeRemoteResult(this.#workRoot, id, outcome, async (art, role) => {
+        const file = leaseUploadPath(this.#workRoot, leaseId, art.sha256)
+        // 字节一致性在复制进任务目录后由 materializeRemoteResult 再独立复算
+        if (!(await lstat(file).catch(() => undefined))?.isFile()) {
+          throw new AdapterError('EVIDENCE_FILE_MISSING', `远程产物未在本租约下经核验上传：${role}`, false, `evidence-missing:${role}`)
+        }
+        return file
+      })
+    }
     if (outcome?.kind === 'error') {
       throw new AdapterError(outcome.code, `出站 runner 报告：${outcome.category}:${outcome.code}`, outcome.retryable, `remote:${outcome.code}`)
     }

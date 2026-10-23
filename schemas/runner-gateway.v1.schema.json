@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmap.local/schemas/runner-gateway.v1.schema.json",
   "title": "RunnerGatewayMessageV1",
-  "description": "ADR-0008 §3 outbound runner gateway. The runner initiates every HTTPS request; the control plane never connects to a runner, so runners behind NAT work. Message bodies reuse remote-runner.v1 semantics unchanged (dispatch with a cmap1 permit bound to runner_id, adapter audience and envelope SHA256; dispatch_accepted / status / result / error; cancel); only the transport direction changes. POST /v1/gateway/claim long-polls for work (wait_seconds at most 50) and renews every lease listed in held_leases; the reply carries at most one assignment plus pending cancels, which the control plane can no longer push. POST /v1/gateway/reports carries one remote-runner.v1 reply for a lease and also renews it. A lease the control plane reports as expired enters the existing execution-uncertain path (task INPUT_REQUIRED, binding kept): it is never reassigned or rerun. Results are written to the ledger before the workflow is signalled. Artifacts are still recomputed by the control plane; runner-reported hashes are never trusted. Authentication: every request carries requestAuthHeaders signed by the runner's enrolled Ed25519 key (runner-enrollment.v1); any failure, a revoked runner included, is one identical unsigned 401 error with code UNAUTHORIZED and nothing is executed or recorded. Every other reply carries responseAuthHeaders signed by the control-plane key the runner pinned at enrollment. Bodies never carry credentials, database addresses, provider stderr or tenant/owner identity: identity comes from the enrolled runner record, not from the request.",
+  "description": "ADR-0008 §3 outbound runner gateway. The runner initiates every HTTPS request; the control plane never connects to a runner, so runners behind NAT work. Message bodies reuse remote-runner.v1 semantics unchanged (dispatch with a cmap1 permit bound to runner_id, adapter audience and envelope SHA256; dispatch_accepted / status / result / error; cancel); only the transport direction changes. POST /v1/gateway/claim long-polls for work (wait_seconds at most 50) and renews every lease listed in held_leases; the reply carries at most one assignment plus pending cancels, which the control plane can no longer push. POST /v1/gateway/reports carries one remote-runner.v1 reply for a lease and also renews it. A lease the control plane reports as expired enters the existing execution-uncertain path (task INPUT_REQUIRED, binding kept): it is never reassigned or rerun. Results are written to the ledger before the workflow is signalled. Artifacts are still recomputed by the control plane; runner-reported hashes are never trusted. Result artifacts are streamed (M09): before reporting a result the runner uploads each streamedArtifact's bytes with POST /v1/gateway/artifacts (artifactUpload), and the result report then carries only their metadata; reports with inline base64 artifacts from runners that predate streaming are still accepted. Authentication: every request carries requestAuthHeaders signed by the runner's enrolled Ed25519 key (runner-enrollment.v1); any failure, a revoked runner included, is one identical unsigned 401 error with code UNAUTHORIZED and nothing is executed or recorded. Every other reply carries responseAuthHeaders signed by the control-plane key the runner pinned at enrollment. Bodies never carry credentials, database addresses, provider stderr or tenant/owner identity: identity comes from the enrolled runner record, not from the request.",
   "oneOf": [
     { "$ref": "#/$defs/claim" },
     { "$ref": "#/$defs/claimResult" },
     { "$ref": "#/$defs/report" },
     { "$ref": "#/$defs/reportAck" },
+    { "$ref": "#/$defs/uploadAck" },
     { "$ref": "#/$defs/error" }
   ],
   "$defs": {
@@ -137,9 +138,35 @@
         "lease": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/lease" }] }
       }
     },
+    "artifactUpload": {
+      "title": "RunnerGatewayArtifactUploadV1",
+      "description": "Query of POST /v1/gateway/artifacts?lease_id=&sha256=&size= (metadata first; the raw artifact bytes are the request body, application/octet-stream). requestAuthHeaders sign path+query, so the declared sha256 and size are covered by the runner signature, and x-cmap-content-sha256 must equal sha256. Only for a lease this runner holds in state leased. The control plane streams the body into its content-addressed store, hashing as it writes; the upload is kept only if the bytes match both the declared sha256 and size, otherwise nothing is persisted and the reply is 422 EVIDENCE_HASH_MISMATCH (EVIDENCE_SECRET_DETECTED when the bytes match a known credential pattern). A declared size above the control plane cap is refused before reading with 413 EVIDENCE_FILE_TOO_LARGE. The kept upload is recorded under the lease: a result may only reference artifacts uploaded under its own lease.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_id", "sha256", "size"],
+      "properties": {
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,12})$" }
+      }
+    },
+    "uploadAck": {
+      "title": "RunnerGatewayUploadAckV1",
+      "description": "Reply to an artifact upload: the bytes were recomputed and kept under the lease.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "lease_id", "sha256", "size_bytes"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "upload_ack" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 1099511627776 }
+      }
+    },
     "error": {
       "title": "RunnerGatewayErrorV1",
-      "description": "Gateway-level error. UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure); LEASE_EXPIRED / LEASE_UNKNOWN for reports on a lease that is closed, expired or not held by this runner (no ledger write); INVALID_REQUEST for malformed or oversized bodies. No detail crosses the wire.",
+      "description": "Gateway-level error. UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure); LEASE_EXPIRED / LEASE_UNKNOWN for reports or uploads on a lease that is closed, expired or not held by this runner (no ledger write); INVALID_REQUEST for malformed or oversized bodies; EVIDENCE_HASH_MISMATCH / EVIDENCE_SECRET_DETECTED / EVIDENCE_FILE_TOO_LARGE for rejected artifact uploads (nothing persisted). No detail crosses the wire.",
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "kind", "code", "retryable"],

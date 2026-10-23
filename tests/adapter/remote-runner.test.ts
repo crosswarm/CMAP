@@ -1,7 +1,7 @@
 /**
  * 远程 runner 薄协议单测（ADR-0006）：真实 HTTP、两个本机端口模拟 lap 与另一台 runner，假 codex 计数。
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -14,7 +14,7 @@ import { AdapterError, type DispatchContext } from '#adapter-sdk'
 import { RemoteRunnerAdapter } from '../../adapters/remote-runner/src/index.ts'
 import { readRunnerDaemonConfig } from '../../apps/runner/src/server.ts'
 import {
-  ISSUER, REMOTE_ADAPTER_ID, close, deadUrl, envelope, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signedFetch, signer, startLap, startTamperProxy, trust,
+  ISSUER, REMOTE_ADAPTER_ID, bigArtifact, close, deadUrl, envelope, lapEnv, lines, makeFakeCodex, remoteAuthorization, remoteKeys, sha256, signedFetch, signer, startLap, startTamperProxy, trust,
 } from './remote-runner-fixture.ts'
 
 const setup = async () => {
@@ -74,6 +74,40 @@ test('lap 验签后执行一次，显式 -m；CrossMini 拉回产物并独立复
     assert.deepEqual(await lines(codex.models), ['gpt-test-lap'])
 
     assert.deepEqual(await adapter.startTask(e, await ctxFor(cm, 'tsk-unit-ok', token)), binding)
+    assert.equal((await lines(codex.launches)).length, 1)
+  } finally {
+    await close(lap.server)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('M09 大于 16MiB 的产物：结果只带元数据，CrossMini 流式拉取、边收边算落内容寻址存储，再复算入任务目录', async () => {
+  const size = 17 * 1024 * 1024 + 3
+  const big = bigArtifact(size)
+  const root = await mkdtemp(join(tmpdir(), 'cmap-remote-big-'))
+  const codex = await makeFakeCodex(root, { artifactBytes: size })
+  const cm = join(root, 'crossmini')
+  await mkdir(cm)
+  const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap') })
+  try {
+    const adapter = adapterFor(lap.url, cm)
+    const e = envelope('tsk-unit-big')
+    const binding = await adapter.startTask(e, await ctxFor(cm, 'tsk-unit-big', signer(e, { runnerId: 'lap', adapterId: REMOTE_ADAPTER_ID })))
+    await waitTerminal(adapter, binding)
+
+    // 结果应答本身不再内联产物字节
+    const raw = await signedFetch(lap.url, { path: `/v1/tasks/${encodeURIComponent(binding.remote_task_id)}/result`, audience: 'lap' })
+    const body = await raw.json() as { artifacts: Record<string, unknown>[] }
+    assert.deepEqual(body.artifacts, [{ uri: 'evidence/report.txt', sha256: sha256(big), size_bytes: size }])
+
+    const result = await adapter.collectResult(binding)
+    assert.deepEqual([result.artifacts[0]!.sha256, result.artifacts[0]!.size_bytes], [sha256(big), size])
+    assert.equal(sha256(await readFile(join(cm, 'tsk-unit-big', 'evidence/report.txt'))), sha256(big))
+    const h = sha256(big)
+    const cas = join(cm, '.cas', 'sha256', h.slice(0, 2), h.slice(2, 4), h)
+    assert.equal(sha256(await readFile(cas)), h)
+    assert.equal((await stat(cas)).mode & 0o777, 0o600)
+    assert.deepEqual(await readdir(join(cm, '.cas', 'tmp')), [])
     assert.equal((await lines(codex.launches)).length, 1)
   } finally {
     await close(lap.server)

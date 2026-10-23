@@ -6,6 +6,7 @@
  *       各自监听 127.0.0.1 的空闲端口；临时生成控制面签名密钥（0600）并让守护进程固定其公钥。
  *       默认用真实 codex（经计数包装器；需 CMAP_CODEX_MODEL，建议 TMPDIR=/private/tmp）；
  *       --fake-codex 用确定性假 codex，不调用模型。
+ *       --artifact-bytes N（配合 --fake-codex）：假 codex 产出 N 字节的产物，验证流式传输（M09，例如 N > 16MiB）。
  *   node scripts/e2e-remote-runner.mjs
  *       Stage 4 骨架：对真实 lap 运行同样的派发与判据。需要
  *       CMAP_REMOTE_RUNNER_URL、CMAP_REMOTE_RUNNER_ID、CMAP_PERMIT_KEY_FILE（CrossMini 的签名密钥）、
@@ -36,6 +37,12 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const simulate = process.argv.includes('--simulate')
 const fakeCodex = process.argv.includes('--fake-codex')
 const keep = process.argv.includes('--keep')
+const bytesArg = process.argv.indexOf('--artifact-bytes')
+const artifactBytes = bytesArg > 0 ? Number(process.argv[bytesArg + 1]) : undefined
+if (artifactBytes !== undefined && (!Number.isSafeInteger(artifactBytes) || artifactBytes < 1 || !fakeCodex)) {
+  console.error('--artifact-bytes 需要正整数，且只配合 --fake-codex 使用')
+  process.exit(2)
+}
 const ISSUER = 'cmap:local-control-plane'
 
 const step = (n, msg) => console.log(`\n[${n}] ${msg}`)
@@ -83,10 +90,11 @@ if (a[0] !== 'exec') process.exit(0)
 fs.appendFileSync(${JSON.stringify(launches)}, process.pid + '\\n')
 const wd = a[a.indexOf('-C') + 1], out = a[a.indexOf('-o') + 1]
 fs.mkdirSync(path.join(wd, 'evidence'), { recursive: true })
-fs.writeFileSync(path.join(wd, 'evidence/hello.txt'), 'hello\\n')
+const bytes = ${artifactBytes ? `Buffer.alloc(${artifactBytes}, 'cmap-m09 ')` : "Buffer.from('hello\\n')"}
+fs.writeFileSync(path.join(wd, 'evidence/hello.txt'), bytes)
 fs.writeFileSync(out, JSON.stringify({ status: 'completed', summary: 'wrote hello',
   criterion_results: [{ criterion_id: 'LINES', actual: '1', passed: true, evidence_artifact_ids: ['hello'] }],
-  artifacts: [{ artifact_id: 'hello', role: 'hello_report', uri: 'evidence/hello.txt', media_type: 'text/plain', size_bytes: 6, sha256: ${JSON.stringify(sha256('hello\n'))} }],
+  artifacts: [{ artifact_id: 'hello', role: 'hello_report', uri: 'evidence/hello.txt', media_type: 'text/plain', size_bytes: bytes.length, sha256: require('node:crypto').createHash('sha256').update(bytes).digest('hex') }],
   findings: [], error: null }))
 `)
     } else {
@@ -252,6 +260,13 @@ for (const art of result.artifacts) {
   const bytes = await readFile(join(crossmini, TASK_ID, art.uri))
   if (sha256(bytes) !== art.sha256) fail(`产物 ${art.role} 哈希与 CrossMini 落盘字节不符`)
   ok(`产物 ${art.role}（${bytes.length} B）已落在 CrossMini，sha256 复算一致`)
+  const stored = await readFile(join(crossmini, '.cas', 'sha256', art.sha256.slice(0, 2), art.sha256.slice(2, 4), art.sha256)).catch(() => undefined)
+  if (!stored || sha256(stored) !== art.sha256) fail(`产物 ${art.role} 不在内容寻址存储或字节不符`)
+  ok(`内容寻址存储 .cas/sha256/${art.sha256.slice(0, 2)}/${art.sha256.slice(2, 4)}/${art.sha256.slice(0, 12)}… 复算一致`)
+}
+if (artifactBytes !== undefined) {
+  if (result.artifacts[0]?.size_bytes !== artifactBytes || sha256(Buffer.alloc(artifactBytes, 'cmap-m09 ')) !== result.artifacts[0]?.sha256) fail('大产物长度或哈希与假 codex 写出的不符')
+  ok(`大产物 ${artifactBytes} B 经流式拉取，长度与哈希与 lap 原件一致`)
 }
 const criterion = result.criterion_results.find((c) => c.criterion_id === 'LINES')
 ok(`LINES actual=${JSON.stringify(criterion?.actual)}`)

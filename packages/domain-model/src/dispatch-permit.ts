@@ -303,6 +303,8 @@ export const signRunnerRequest = (input: {
   method: string
   target: string
   body?: Uint8Array | string
+  /** 流式请求体（M09 产物上传）：调用方已知的体 sha256，代替 body；服务端边收边算核对。 */
+  contentSha256?: string
   audience: string
   nowMs?: number
   scheme?: RunnerAuthScheme
@@ -310,10 +312,11 @@ export const signRunnerRequest = (input: {
   const scheme = input.scheme ?? 'runner'
   assertEd25519(input.privateKey, 'private')
   assertLineSafe(input.method, input.target, input.audience)
+  if (input.contentSha256 !== undefined && !AUTH_SHA256.test(input.contentSha256)) authFail()
   const fields = {
     method: input.method,
     target: input.target,
-    contentSha256: bodySha256(input.body),
+    contentSha256: input.contentSha256 ?? bodySha256(input.body),
     timestamp: String(input.nowMs ?? Date.now()),
     nonce: randomBytes(18).toString('base64url'),
     audience: input.audience,
@@ -369,18 +372,26 @@ export const verifyRunnerRequest = (input: {
 
 export const runnerBodySha256 = bodySha256
 
-/** lap 对响应体签名；body 必须是实际发出的字节。 */
+/** 体的 sha256：流式体（M09 产物流）由调用方给出已知哈希，否则按实际字节计算。 */
+const responseBodySha256 = (input: { body?: Uint8Array | string; bodySha256?: string }): string => {
+  if (input.bodySha256 === undefined) return bodySha256(input.body)
+  if (!AUTH_SHA256.test(input.bodySha256)) authFail()
+  return input.bodySha256
+}
+
+/** lap 对响应体签名；body 必须是实际发出的字节，流式体给出其 bodySha256。 */
 export const signRunnerResponse = (input: {
   privateKey: KeyObject
   audience: string
   requestNonce: string
   status: number
   body?: Uint8Array | string
+  bodySha256?: string
   scheme?: RunnerAuthScheme
 }): string => {
   assertEd25519(input.privateKey, 'private')
   assertLineSafe(input.audience, input.requestNonce)
-  return b64url(sign(null, responseSigningBytes(input.scheme ?? 'runner', { ...input, bodySha256: bodySha256(input.body) }), input.privateKey))
+  return b64url(sign(null, responseSigningBytes(input.scheme ?? 'runner', { ...input, bodySha256: responseBodySha256(input) }), input.privateKey))
 }
 
 /** CrossMini 对收到的响应验签；失败即不采信（调用方按证据完整性失败处理）。 */
@@ -390,6 +401,8 @@ export const verifyRunnerResponse = (input: {
   requestNonce: string
   status: number
   body?: Uint8Array | string
+  /** 流式体：先按声明的 sha256 验签再读字节，读完由调用方复算核对。 */
+  bodySha256?: string
   signature: string | null | undefined
   scheme?: RunnerAuthScheme
 }): undefined => {
@@ -403,6 +416,6 @@ export const verifyRunnerResponse = (input: {
     return authFail()
   }
   if (signatureBytes.length !== 64) authFail()
-  if (!verify(null, responseSigningBytes(input.scheme ?? 'runner', { ...input, bodySha256: bodySha256(input.body) }), input.publicKey, signatureBytes)) authFail()
+  if (!verify(null, responseSigningBytes(input.scheme ?? 'runner', { ...input, bodySha256: responseBodySha256(input) }), input.publicKey, signatureBytes)) authFail()
   return undefined
 }

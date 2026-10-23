@@ -82,3 +82,29 @@ describe('runner-gateway schema', () => {
     ]) assert.equal(validate(value), false, `${name}: ${JSON.stringify(value)}`)
   })
 })
+
+describe('runner-gateway 产物流式上传（M09）', () => {
+  const def = (name) => ajv.getSchema(`${read('runner-gateway').$id}#/$defs/${name}`)
+
+  test('结果回报只带产物元数据；上传应答有效', () => {
+    const report = structuredClone(valid.reportResult)
+    report.body.artifacts = [{ uri: 'evidence/big.bin', sha256: H, size_bytes: 17 * 1024 * 1024 }]
+    assert.equal(validate(report), true, JSON.stringify(validate.errors))
+    assert.equal(validate({ schema: S, kind: 'upload_ack', lease_id: 'lse_01', sha256: H, size_bytes: 3 }), true, JSON.stringify(validate.errors))
+    assert.equal(validate({ schema: S, kind: 'upload_ack', lease_id: 'lse_01', sha256: H }), false)
+    assert.equal(validate({ schema: S, kind: 'error', code: 'EVIDENCE_HASH_MISMATCH', retryable: false }), true)
+  })
+
+  test('上传查询：租约、sha256、十进制长度都必填，别的字段与畸形值无效', () => {
+    const v = def('artifactUpload')
+    const q = { lease_id: 'lse_01', sha256: H, size: '17825792' }
+    assert.equal(v(q), true, JSON.stringify(v.errors))
+    for (const p of [{ size: '-1' }, { size: '01' }, { size: '1.5' }, { sha256: 'abc' }, { lease_id: '../x' }, { tenant: 't' }]) {
+      assert.equal(v({ ...q, ...p }), false, JSON.stringify(p))
+    }
+    for (const k of Object.keys(q)) {
+      const { [k]: _omit, ...rest } = q
+      assert.equal(v(rest), false, `缺 ${k}`)
+    }
+  })
+})

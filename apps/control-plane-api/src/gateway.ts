@@ -10,21 +10,29 @@
  * 其余应答由控制面网关密钥签名，绑定所答请求的 nonce。身份（tenant/owner）只来自登记记录，不来自请求体。
  *
  * 结果先落账（租约关闭、结果入库）再向 Workflow 按门铃；门铃丢了 Workflow 靠超时回读兜底，所以发送失败只记录。
+ *
+ * 产物流式上传（M09）：POST /v1/gateway/artifacts?lease_id=&sha256=&size= 以原始字节为体，签名覆盖查询串与体 sha256。
+ * 边收边算写进内容寻址存储，与声明的 sha256、长度（即 runner 签名所覆盖的值）都一致才保留，并登记在该租约下；
+ * 不一致不落盘、回 422 EVIDENCE_HASH_MISMATCH。Worker 收结果时只认本租约下登记的上传，并再独立复算一次。
  */
 import { createHash, createPublicKey, randomBytes, type KeyObject } from 'node:crypto'
+import { link, mkdir } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { dirname } from 'node:path'
 
 import {
-  ed25519PublicKeyFromRaw, rawEd25519PublicKey, validateEnrollmentMessage, validateGatewayMessage, verifyEnrollmentProof,
+  ed25519PublicKeyFromRaw, isLeaseExpired, rawEd25519PublicKey, validateEnrollmentMessage, validateGatewayMessage, verifyEnrollmentProof,
   type GatewayLease, type Store, type RunnerGatewayMessageV1,
 } from '#domain-model'
+import { AdapterError } from '#adapter-sdk'
+import { leaseUploadPath, maxEvidenceBytes, putContent } from '../../../packages/adapter-sdk/src/content-store.ts'
 import {
   GATEWAY_RUNNER_ID_HEADER, RUNNER_AUTH_HEADERS, RUNNER_AUTH_MAX_SKEW_MS, runnerBodySha256, signRunnerResponse, verifyRunnerRequest,
 } from '../../../packages/domain-model/src/dispatch-permit.ts'
 
 const SCHEMA = 'cmap/runner-gateway/v1'
 const CLAIM_MAX_BYTES = 64 * 1024
-/** 结果随回报内联产物字节（与 remote-runner.v1 同样的 base64 上限）。 */
+/** 旧版 runner 的结果回报仍内联产物字节（与 remote-runner.v1 同样的 base64 上限）；新 runner 改为流式上传。 */
 const REPORT_MAX_BYTES = 64 * 1024 * 1024
 const UNAUTHORIZED_BODY = JSON.stringify({ schema: SCHEMA, kind: 'error', code: 'UNAUTHORIZED', retryable: false })
 const ENROLLMENT = 'cmap/runner-enrollment/v1'
@@ -85,6 +93,10 @@ const leaseView = (lease: GatewayLease) => ({ lease_id: lease.lease_id, expires_
 export const createRunnerGateway = (opts: RunnerGatewayOptions & {
   readonly store: Store
   readonly notifyRunnerReported?: (missionId: string, workflowId: string) => Promise<void>
+  /** 控制面工作区（与 Worker 共用）：上传的产物落在 `<workRoot>/.cas`。未配置则拒绝上传。 */
+  readonly workRoot?: string
+  /** 单个上传产物的上限，默认 CMAP_MAX_EVIDENCE_BYTES（256MiB）。 */
+  readonly maxArtifactBytes?: number
 }) => {
   const { store } = opts
   const now = opts.nowMs ?? Date.now
@@ -162,6 +174,34 @@ export const createRunnerGateway = (opts: RunnerGatewayOptions & {
     return { schema: SCHEMA, kind: 'report_ack', lease_id: msg.lease_id, lease: closed ? null : leaseView(out.lease) }
   }
 
+  const maxUploadBytes = opts.maxArtifactBytes ?? maxEvidenceBytes()
+
+  /** 已认证、体尚未读：先核对查询（契约 artifactUpload）与租约，再流式落盘。 */
+  const upload = async (req: IncomingMessage, url: URL, auth: { runnerId: string; contentSha256: string }) => {
+    const q = Object.fromEntries(url.searchParams)
+    const leaseId = q['lease_id'] ?? ''
+    if (req.method !== 'POST' || Object.keys(q).length !== 3 || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(leaseId) ||
+      q['sha256'] !== auth.contentSha256 || !/^(0|[1-9][0-9]{0,12})$/.test(q['size'] ?? '')) throw new Rejected(400, 'INVALID_REQUEST')
+    const size = Number(q['size'])
+    if (!opts.workRoot) throw new Rejected(503, 'INTERNAL')
+    if (size > maxUploadBytes) throw new Rejected(413, 'EVIDENCE_FILE_TOO_LARGE')
+    const lease = await store.getGatewayLease(leaseId)
+    if (!lease || lease.runner_id !== auth.runnerId || lease.state !== 'leased') throw new Rejected(409, 'LEASE_UNKNOWN')
+    if (isLeaseExpired(lease, now())) throw new Rejected(409, 'LEASE_EXPIRED')
+    await store.touchGatewayRunner(auth.runnerId, new Date(now()).toISOString())
+    let stored
+    try {
+      stored = await putContent(opts.workRoot, req, { sha256: auth.contentSha256, size_bytes: size, role: 'upload' }, maxUploadBytes)
+    } catch (error) {
+      if (error instanceof AdapterError && error.code.startsWith('EVIDENCE_')) throw new Rejected(error.code === 'EVIDENCE_FILE_TOO_LARGE' ? 413 : 422, error.code)
+      throw error
+    }
+    const registered = leaseUploadPath(opts.workRoot, leaseId, stored.sha256)
+    await mkdir(dirname(registered), { recursive: true, mode: 0o700 })
+    await link(stored.path, registered).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error })
+    return { schema: SCHEMA, kind: 'upload_ack', lease_id: leaseId, sha256: stored.sha256, size_bytes: stored.size_bytes }
+  }
+
   const controlPlanePublicKey = rawEd25519PublicKey(createPublicKey(opts.signingKey))
 
   /**
@@ -193,7 +233,7 @@ export const createRunnerGateway = (opts: RunnerGatewayOptions & {
   }
 
   return {
-    handles: (path: string): boolean => path === '/v1/gateway/claim' || path === '/v1/gateway/reports' || path === '/v1/runners/enroll',
+    handles: (path: string): boolean => path === '/v1/gateway/claim' || path === '/v1/gateway/reports' || path === '/v1/gateway/artifacts' || path === '/v1/runners/enroll',
 
     async handle(req: IncomingMessage, res: ServerResponse, url: URL, shutdown: AbortSignal): Promise<void> {
       if (url.pathname === '/v1/runners/enroll') return req.method === 'POST' ? enroll(req, res) : sendUnauthorized(res)
@@ -206,6 +246,7 @@ export const createRunnerGateway = (opts: RunnerGatewayOptions & {
       }
       const isClaim = url.pathname === '/v1/gateway/claim'
       try {
+        if (url.pathname === '/v1/gateway/artifacts') return send(200, await upload(req, url, auth))
         const raw = await readRaw(req, isClaim ? CLAIM_MAX_BYTES : REPORT_MAX_BYTES)
         if (raw === undefined) throw new Rejected(413, 'INVALID_REQUEST')
         if (runnerBodySha256(raw) !== auth.contentSha256) return sendUnauthorized(res)

@@ -13,6 +13,8 @@
 import type { KeyObject } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { join, relative, resolve } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -22,7 +24,7 @@ import {
 import { AdapterError } from '#adapter-sdk'
 import { CodexAdapter } from '../../../adapters/codex-adapter/src/index.ts'
 import { REMOTE_ADAPTER_ID, validateRemoteMessage } from '../../../adapters/remote-runner/src/index.ts'
-import { readVerifiedArtifact } from '../../../packages/adapter-sdk/src/structured-output.ts'
+import { openEvidenceFile, readVerifiedArtifact, verifyArtifactFile } from '../../../packages/adapter-sdk/src/structured-output.ts'
 import { existingChildDir, publishInput, safeChildDir, safeMkdir } from '../../../workflows/artifact-files.ts'
 import { buildRunnerDescriptor } from '../../worker/src/runner-config.ts'
 import {
@@ -201,6 +203,8 @@ export const createRunnerCore = async (opts: RunnerCoreOptions) => {
   })
   const runner = buildRunnerDescriptor(opts.env, [await adapter.discover()])
   const bindings = new Map<string, RemoteTaskBinding>()
+  /** 已回报的流式产物：remote_task_id → sha256 → 声明（守护进程重启后由 result() 重新复核填充）。 */
+  const streamed = new Map<string, Map<string, { uri: string; role: string; sha256: string; size_bytes: number }>>()
 
   const bindingFor = (id: string): RemoteTaskBinding => {
     if (!REMOTE_TASK_ID.test(id)) throw new ProtocolFault(404, 'NOT_FOUND')
@@ -230,19 +234,45 @@ export const createRunnerCore = async (opts: RunnerCoreOptions) => {
       const observed = await adapter.getStatus(bindingFor(id))
       return { schema: SCHEMA, kind: 'status', remote_task_id: id, status: observed.status, terminal_observed: observed.terminal_observed } as const
     },
-    /** 产物由控制面复算：这里只按本机工作区读出已复核的字节，哈希仍由控制面独立复算。 */
+    /**
+     * 结果只带产物元数据（M09）：本机流式复核每个产物，回报 sha256 与长度；字节由 openArtifact 单独流出，
+     * 哈希仍由控制面独立复算。
+     */
     async result(id: string) {
       const collected = await adapter.collectResult(bindingFor(id))
       const { child } = await existingChildDir(opts.workRoot, REMOTE_TASK_ID.exec(id)![1]!)
-      const artifacts: { uri: string; content_base64: string }[] = []
+      const artifacts: { uri: string; sha256: string; size_bytes: number }[] = []
       const described = []
+      const index = new Map<string, { uri: string; role: string; sha256: string; size_bytes: number }>()
       for (const art of collected.artifacts) {
-        const { bytes } = await readVerifiedArtifact(child, art)
+        const { sha256, size_bytes } = await verifyArtifactFile(child, art)
         const uri = relative(child, resolve(child, art.uri))
-        artifacts.push({ uri, content_base64: bytes.toString('base64') })
-        described.push({ ...art, uri })
+        artifacts.push({ uri, sha256, size_bytes })
+        described.push({ ...art, uri, sha256, size_bytes })
+        index.set(sha256, { uri, role: art.role, sha256, size_bytes })
       }
+      streamed.set(id, index)
       return { schema: SCHEMA, kind: 'result', remote_task_id: id, result: { ...collected, artifacts: described }, artifacts } as const
+    },
+    /**
+     * 打开一个已回报产物的字节流。长度必须仍等于回报时的长度（文件被换掉即拒绝）；内容是否一致由控制面复算。
+     * 句柄在流结束或出错时关闭。
+     */
+    async openArtifact(id: string, sha256: string): Promise<{ size: number; stream: Readable }> {
+      if (!streamed.get(id)) await this.result(id)
+      const art = streamed.get(id)?.get(sha256)
+      if (!art) throw new ProtocolFault(404, 'NOT_FOUND')
+      const { child } = await existingChildDir(opts.workRoot, REMOTE_TASK_ID.exec(id)![1]!)
+      const { file, size } = await openEvidenceFile(child, art)
+      if (size !== art.size_bytes) {
+        await file.close()
+        throw new AdapterError('EVIDENCE_HASH_MISMATCH', '产物在回报后被改动', false, 'evidence-changed-after-result')
+      }
+      if (size === 0) {
+        await file.close()
+        return { size, stream: Readable.from([]) }
+      }
+      return { size, stream: file.createReadStream({ start: 0, end: size - 1 }) }
     },
     async cancel(id: string, reason: string) {
       await adapter.cancel(bindingFor(id), reason)
@@ -299,6 +329,14 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
     send(res, 204)
   }
 
+  /** 产物字节流（remote-runner.v1 artifactStream）：签名覆盖产物 sha256，先签后流；内容由控制面边收边算核对。 */
+  const artifact = async (id: string, sha256: string, res: ServerResponse): Promise<void> => {
+    const { size, stream } = await core.openArtifact(id, sha256)
+    const signature = signRunnerResponse({ privateKey: opts.signingKey, audience: runnerId, requestNonce: requestNonce.get(res)!, status: 200, bodySha256: sha256 })
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': size, [RUNNER_AUTH_HEADERS.signature]: signature })
+    await pipeline(stream, res).catch(() => res.destroy())
+  }
+
   const health = async (res: ServerResponse): Promise<void> => {
     const observed = await adapter.health()
     // 公布本机准入白名单，CrossMini 派发前据此回落；派发时 assertRunnerAdmission 仍是最后一道闸。
@@ -316,7 +354,7 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
       const raw = await readBody(req)
       if (runnerBodySha256(raw) !== contentSha256) return sendUnauthorized(res)
       const path = url.pathname
-      const task = /^\/v1\/tasks\/([^/]+)(\/result|\/cancel)?$/.exec(path)
+      const task = /^\/v1\/tasks\/([^/]+)(\/result|\/cancel|\/artifacts\/[a-f0-9]{64})?$/.exec(path)
       if (req.method === 'GET' && path === '/v1/health') return await health(res)
       if (req.method === 'POST' && path === '/v1/tasks') return await dispatch(raw, res)
       if (task) {
@@ -324,6 +362,7 @@ export const createRunnerDaemon = async (opts: RunnerDaemonOptions): Promise<{ s
         if (req.method === 'GET' && !task[2]) return send(res, 200, await core.status(id))
         if (req.method === 'GET' && task[2] === '/result') return send(res, 200, await core.result(id))
         if (req.method === 'POST' && task[2] === '/cancel') return await cancel(id, raw, res)
+        if (req.method === 'GET' && task[2]?.startsWith('/artifacts/')) return await artifact(id, task[2].slice('/artifacts/'.length), res)
       }
       throw new ProtocolFault(404, 'NOT_FOUND')
     } catch (error) {

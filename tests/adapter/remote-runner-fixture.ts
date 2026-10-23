@@ -47,8 +47,14 @@ export const envelope = (taskId: string, policy: Partial<TaskEnvelopeV1['executi
   output_contract: { schema_uri: 'https://cmap.local/schemas/task-result/v1' },
 })
 
-/** 假 codex：hold 文件存在时一直挂着（模拟长任务），每次真正执行追加一行 pid，-m 的值写入 models。 */
-export const makeFakeCodex = async (dir: string): Promise<{ bin: string; launches: string; models: string; hold: string }> => {
+/** 大产物的确定性内容（M09）：测试与假 codex 用同一种填充，哈希可在两侧独立算出。 */
+export const bigArtifact = (size: number): Buffer => Buffer.alloc(size, 'cmap-m09 ')
+
+/**
+ * 假 codex：hold 文件存在时一直挂着（模拟长任务），每次真正执行追加一行 pid，-m 的值写入 models。
+ * artifactBytes 设置时产物为该长度的 bigArtifact，否则为 'ok'。
+ */
+export const makeFakeCodex = async (dir: string, opts: { artifactBytes?: number } = {}): Promise<{ bin: string; launches: string; models: string; hold: string }> => {
   const bin = join(dir, 'fake-codex.cjs')
   const launches = join(dir, 'launches')
   const models = join(dir, 'models')
@@ -65,11 +71,12 @@ const workDir = args[args.indexOf('-C') + 1]
 const out = args[args.indexOf('-o') + 1]
 const finish = () => {
   fs.mkdirSync(path.join(workDir, 'evidence'), { recursive: true })
-  fs.writeFileSync(path.join(workDir, 'evidence/report.txt'), 'ok')
+  const bytes = ${opts.artifactBytes === undefined ? "Buffer.from('ok')" : `Buffer.alloc(${opts.artifactBytes}, 'cmap-m09 ')`}
+  fs.writeFileSync(path.join(workDir, 'evidence/report.txt'), bytes)
   fs.writeFileSync(out, JSON.stringify({
     status: 'completed', summary: 'ok',
     criterion_results: [{ criterion_id: 'C1', actual: 'true', passed: true, evidence_artifact_ids: ['a1'] }],
-    artifacts: [{ artifact_id: 'a1', role: 'report', uri: 'evidence/report.txt', media_type: 'text/plain', size_bytes: 2, sha256: ${JSON.stringify(sha256('ok'))} }],
+    artifacts: [{ artifact_id: 'a1', role: 'report', uri: 'evidence/report.txt', media_type: 'text/plain', size_bytes: bytes.length, sha256: require('node:crypto').createHash('sha256').update(bytes).digest('hex') }],
     findings: [], error: null,
   }))
 }
@@ -158,14 +165,16 @@ export const signedFetch = (url: string, init: {
 }
 
 const tamperArtifacts = (path: string, text: string): string => {
+  // 流式产物（M09）：把拉取到的字节整个换掉
+  if (path.includes('/artifacts/')) return 'tampered'
   if (!path.endsWith('/result')) return text
   const body = JSON.parse(text)
-  for (const art of body.artifacts ?? []) art.content_base64 = Buffer.from('tampered').toString('base64')
+  for (const art of body.artifacts ?? []) if ('content_base64' in art) art.content_base64 = Buffer.from('tampered').toString('base64')
   return JSON.stringify(body)
 }
 
 /**
- * 中间人：默认把结果里的产物字节换掉、保留 lap 自报哈希。请求头（含 CrossMini 的请求签名）原样转发；
+ * 中间人：默认把产物字节换掉（流式拉取的字节，或旧版结果里的内联字节）、保留 lap 自报哈希。请求头（含 CrossMini 的请求签名）原样转发；
  * 应答的 lap 签名默认原样带回——于是被改动的应答签名对不上。resign 模拟「lap 自己签了一份错误字节」，
  * dropSignature 模拟签名被剥掉。
  */
