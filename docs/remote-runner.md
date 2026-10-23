@@ -85,7 +85,9 @@ Worker 新增变量（不设 `CMAP_LOCAL_RUNNER_URL` 则行为不变，仍是进
 - 本机 Codex 从此以 `-m $CMAP_CODEX_MODEL` 显式指定模型（守护进程必填），不再依赖 CrossMini `~/.codex` 默认模型。
 - 本机任务的 `binding.runner_id` 与产物 provenance 由 Worker 的 `RUNNER_ID` 变为本机守护进程的 `RUNNER_ID`；切换前已绑定、尚未结束的进程内任务（`codex-adapter`）在切换后的 Worker 上找不到 Adapter，切换前应等其收尾。
 - 这不是第二台机器：守护进程与控制面同机，只经回环访问，不扩大 ADR-0006 的范围。
-- 验证：`tests/workflow/local-runner.test.ts`（两台守护进程同时注册：各自执行 1 次、binding/provenance 按 runner 区分、Worker 重启按 runner 找回 lap、取消落到所属 runner、重复注册拒绝）；2026-10-22 CrossMini 真实实测通过：守护进程以后台进程运行于 127.0.0.1:8791，`e2e-mission` 完成且 binding 为 `remote-runner-adapter@crossmini-runner`；执行中 SIGKILL Worker 后 Codex 进程组存活，新 Worker 拉起后完成，TASK_STARTED 与运行记录各 1 条。尚未安装为 launchd 常驻；`e2e-mission.mjs --restart-worker` 在此模式下读不到守护进程工作区的运行记录，需手工编排。
+- 验证：`tests/workflow/local-runner.test.ts`（两台守护进程同时注册：各自执行 1 次、binding/provenance 按 runner 区分、Worker 重启按 runner 找回 lap、取消落到所属 runner、重复注册拒绝）；2026-10-22 CrossMini 真实实测通过：守护进程以后台进程运行于 127.0.0.1:8791，`e2e-mission` 完成且 binding 为 `remote-runner-adapter@crossmini-runner`；执行中 SIGKILL Worker 后 Codex 进程组存活，新 Worker 拉起后完成，TASK_STARTED 与运行记录各 1 条。尚未安装为 launchd 常驻。
+
+`e2e-mission.mjs --restart-worker` 默认从 `<CMAP_WORK_ROOT>/.runs` 读运行记录；本机 runner 模式下记录在守护进程工作区，需另设 `CMAP_RUNNER_RUNS_DIR=<守护进程 CMAP_WORK_ROOT>/.runs`（只影响该脚本，不影响 Worker 或守护进程）。2026-10-23 在本机用该变量真实跑通一次：守护进程 `crossmini-runner` 监听 127.0.0.1:8791（独立工作区，复用 `~/.cmap/local-runner/` 下测试密钥），脚本自拉 Worker（`CMAP_LOCAL_RUNNER_URL` 等同上表），隔离 schema `cmap_l02` 与队列 `cmap-l02`；执行中 SIGKILL Worker、新 Worker 拉起后 Mission COMPLETED，Codex 进程组存活、只执行 1 次（运行记录与 TASK_STARTED 各 1 条），耗时 128.6 秒。
 
 ## lap（runner 守护进程）配置
 

@@ -17,6 +17,8 @@
  *                                          重启安全（S1）：脚本自己拉起 Worker，Codex 执行期间 SIGKILL 它再拉起新的，
  *                                          判据只认账本状态与 Codex 执行次数（进程组计数 + 运行记录），不认退出码。
  *                                          此模式下不要另开 Worker；Codex 需要 TMPDIR=/private/tmp
+ *                                          本机 runner 模式（设 CMAP_LOCAL_RUNNER_URL）下运行记录在守护进程工作区，
+ *                                          需设 CMAP_RUNNER_RUNS_DIR=<守护进程 CMAP_WORK_ROOT>/.runs（默认 <CMAP_WORK_ROOT>/.runs）
  *
  * 前置：
  *   docker compose -f infra/docker-compose/docker-compose.yml up -d
@@ -51,6 +53,8 @@ const connectionString =
   process.env['CMAP_DATABASE_URL'] ?? 'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
 const workRoot = process.env['CMAP_WORK_ROOT'] ?? join(repoRoot, '.cmap-work')
+// 本机 runner 模式（设了 CMAP_LOCAL_RUNNER_URL）下运行记录在守护进程的工作区，不在 Worker 的 CMAP_WORK_ROOT
+const runsDir = process.env['CMAP_RUNNER_RUNS_DIR'] ?? join(workRoot, '.runs')
 
 // 返工场景：任何有限数字都不能小于最小有限数，控制面比较必定拒绝。
 // 要求 5 个会被补建文件满足，要求 -1 仍可能被 Agent 虚报满足；磁盘数量另行核验。
@@ -173,9 +177,9 @@ try {
     let record
     for (let i = 0; i < 600 && !record; i += 1) {
       await sleep(200)
-      for (const name of await readdir(join(workRoot, '.runs')).catch(() => [])) {
+      for (const name of await readdir(runsDir).catch(() => [])) {
         if (!name.endsWith('.json')) continue
-        const r = JSON.parse(await readFile(join(workRoot, '.runs', name), 'utf8').catch(() => 'null') ?? 'null')
+        const r = JSON.parse(await readFile(join(runsDir, name), 'utf8').catch(() => 'null') ?? 'null')
         if (r?.envelope?.identity?.mission_id === missionId && r.pid) record = r
       }
     }
