@@ -1,6 +1,6 @@
 # ADR-0008：多用户控制面
 
-- 状态：已接受（方向由 Cross 于 2026-10-23 决定：公网服务器 + 通用 OIDC；**未实现**）
+- 状态：已接受（方向由 Cross 于 2026-10-23 决定：公网边缘 + 通用 OIDC，核心服务留在 CrossMini；**未实现**）
 - 日期：2026-10-23
 - 取代：[ADR-0006](0006-single-user-dual-host-exception.md)（单用户双主机例外，实现后废止）
 - 重启：[ADR-0002](0002-control-plane-host.md)（控制面部署于公网主机）
@@ -12,11 +12,20 @@ ADR-0006 只允许 Cross 一个人、两台机器、Tailscale 私网，由控制
 
 ## 决策
 
-### 1. 部署形态
+### 1. 部署形态：公网边缘在 qcl，核心留在 CrossMini
 
-- 控制面部署在一台公网 Linux 主机（qcl 或新主机，待定）上，只对外暴露 443，由反向代理终结 TLS。
-- Temporal、PostgreSQL、Keycloak 只在主机内部网络可达，不对外开端口。
-- 控制面仍不执行 Agent：主机上只跑 API、Worker、网关与基础设施。
+修订（2026-10-23，Cross 决定）：qcl 只放必须在公网处理的部分，其余服务仍在 CrossMini。
+
+- **qcl（腾讯云北京，`cmap.spux.cn`）只跑边缘**：反向代理（只对外开 443，80 仅用于证书签发与跳转）、Keycloak 及其专用 PostgreSQL。qcl 不保存账本、产物、提示词或提供方凭据。
+- **CrossMini 保持核心**：Temporal、账本 PostgreSQL、API（含 WebUI 与 runner 网关）、Worker、产物存储都在这里，API 仍只监听 127.0.0.1。
+- **互联：CrossMini 主动建反向 SSH 隧道**。CrossMini 用专用密钥登录 qcl 的受限账号，只把 qcl 本机的一个回环端口转发到 CrossMini 的 API 端口。该账号在 `authorized_keys` 中设 `restrict,port-forwarding,permitlisten="127.0.0.1:<端口>"`，不能开 shell。由 launchd 常驻并自动重连。qcl 不加入 tailnet，家里的网络不开任何入站。
+- **路由**：反向代理把 `/auth/` 转给 Keycloak，其余请求经隧道转给 CrossMini 的 API。
+  - 浏览器、成员 runner、WebUI 只认 `https://cmap.spux.cn`。
+  - API 以配置的公网 Host 为准，转发头只信任来自隧道回环端口的请求。
+  - OIDC 模式下每个请求都必须带有效 JWT。
+- **信任面**：qcl 被攻破时，攻击者能篡改登录页、窃取会话，能碰到的只有需要有效 JWT 的 API。账本、产物、Temporal、提供方凭据都不在 qcl 上。这是本方案相对整套上公网的主要收益。
+- **可用性**：CrossMini 或隧道断开时，公网入口只剩登录页；runner 的长轮询失败后按租约语义进入"执行不确定"，不改派。CrossMini 需要 24 小时开机。
+- **qcl 现有服务**：保留 frp 并备份其配置；其余（旧 aiticket 前端与 nginx、qdrant、playwright-mcp、RustDesk 中继等）先导出清单与数据卷备份到 CrossMini，再停用清理。
 
 ### 2. 人的身份：Keycloak（OIDC）
 
@@ -52,12 +61,12 @@ ADR-0006 只允许 Cross 一个人、两台机器、Tailscale 私网，由控制
 
 - `events` 表只允许追加：控制面运行账号对它没有 UPDATE/DELETE 权限，并加数据库触发器兜底。
 - 产物改为流式上传到内容寻址存储（按 sha256 寻址），取代 base64 内联与 16MiB 上限；静态加密与保留期另行跟进。
-- 每日备份（`scripts/backup-db.mjs`）落到主机外的位置。
+- 每日备份（`scripts/backup-db.mjs`）落到主机外的位置；qcl 上的 Keycloak 库同样每日备份并拉回 CrossMini。
 
 ### 7. 现有两台机器的迁移
 
 - CrossMini 与 lap 都作为 Cross 的 runner 用注册令牌登记，改为出站模式。ADR-0006 的拨入路径保留到出站模式实测通过，然后废止。
-- Temporal 栈从已停更的 `auto-setup` 换成官方 `temporalio/server` 加 `admin-tools`，在新主机上部署。
+- Temporal 栈留在 CrossMini；从已停更的 `auto-setup` 换成官方 `temporalio/server` 加 `admin-tools` 另行进行，不与本 ADR 绑定。
 
 ## 上线闸口
 
@@ -71,6 +80,6 @@ ADR-0006 只允许 Cross 一个人、两台机器、Tailscale 私网，由控制
 
 ## 需要 Cross 提供
 
-- 公网主机（qcl 或新主机）及其 root/sudo 访问方式；
-- 域名与 DNS 解析权限（签发 TLS 证书需要）；
-- 第一批成员名单与各自的角色。
+- [x] 公网主机：qcl（Ubuntu 24.04，可清理重装，保留 frp）
+- [x] 域名：`cmap.spux.cn`，A 记录已指向 qcl（2026-10-23 核实；HTTP 访问未被备案拦截）
+- [ ] 第一批成员名单与各自的角色
