@@ -137,3 +137,12 @@
 - `e85a382` L07 外部内容包进以内容哈希为定界符的数据区块，补注入回归；未做真实模型注入评测。
 - `53e598e` L08 standalone 结果目录移到 `~/.cmap/codex-results`（0700），测试改用隔离 HOME；过期文档已更新。
 - 主会话验收：`3970b45` 上 `npm run check` 全过（test 493、api 91、pg 90、workflow 339）。
+
+## Q04–Q07（通过）
+
+- `20a39f9` Q04 QUOTA_EXHAUSTED 后派生同轮续接任务并记 QUOTA_HANDOFF：原 Agent 记入排除项；只读级新工作区，写副作用先确认原 Agent 已退出再以工作区快照冻结输入续接，并重新审批；每节点续接上限 2；Agent 自报的额度耗尽不触发交接（`AGENT_REPORTED_QUOTA_EXHAUSTED`）。
+- `d1b3bf0` Q05 额度恢复判定与 QUOTA_RESTORED，WebUI 显示账号额度与交接链路；`/v1/quota-snapshots` 尚未按租户收窄。
+- `a025ba3` Q06 可切换调度者（`CMAP_DISPATCHERS`），只在确定性候选内挑选，分配直接生效（Cross 决定）；`7940112` Claude 调度者默认 Haiku。真实调度各一次：Jev 976 毫秒、Claude 9.5 秒（当时用 Opus）；Claude 七日额度 97% 时会被自动跳过。
+- `fda7f81` Q07 真实 Temporal/PostgreSQL/Codex 三段式全链路通过：额度低改派 → 中途触顶续接（mutating，两次审批，半成品经快照传递）→ 恢复后派回并记 QUOTA_RESTORED；`4a8c58b` 提示词区分额度续接与返工。
+- 主会话验收：`7940112` 上 `npm run check` 全过（test 498、api 92、pg 91、workflow 352）。
+- 遗留：续接快照未覆盖远程 runner 工作区；inspect/v1 未接入续接。

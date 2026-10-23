@@ -41,7 +41,7 @@
       "续接超限升级给人",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "Q05",
@@ -51,7 +51,7 @@
       "先写失败测试",
       "npm run check 全过；build:web 通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "Q06",
@@ -62,7 +62,7 @@
       "先写失败测试：调度者只能选候选内、调度者额度低切换、全部不可用回落确定性顺序、单候选不调用",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "Q07",
@@ -72,7 +72,7 @@
       "新增 e2e 脚本，独立 schema/队列",
       "三段场景全部通过，事件链与产物可追溯"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M01",
