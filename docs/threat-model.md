@@ -288,7 +288,7 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 - [x] 非授权 tenant 提交任务（P4-01：tenant 只取 token，缺 claim 403、请求体自报 400；runner 准入 `TENANT_DENIED`）
 - [x] runner 收到白名单外 owner 的任务（P4-02：`OWNER_DENIED`；网关路由另有 owner 亲和）
-- [ ] Agent 尝试自批授权（P4-03 🟡：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 与 Codex（workspace-write、read-only）均已实测挡住回环端口，见 T4；YonWork 不在本机执行任意命令）
+- [x] Agent 尝试自批授权（P4-03：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 与 Codex（workspace-write、read-only）均已实测挡住回环端口，见 T4；YonWork 不在本机执行任意命令）
 - [x] `controlled` 的批准放行了同批次 `mutating` 任务（P4-04：mutating 无自身审批或审批 scope 不符即 `APPROVAL_INVALID`）
 - [ ] 任务读取 `context.paths` 声明外的路径（P4-05a：契约拒绝绝对路径与 `..`；P4-05b **未覆盖**：运行时没有读取范围校验，codex 沙箱不限制读取，见 T7）
 - [ ] Agent 推送 `main` 或 `release/*`（P4-06 **未覆盖**：`deny_push` 只是信封字段，CMAP 无强制执行点，见 T1）
