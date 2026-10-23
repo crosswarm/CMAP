@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '#domain-model'
 import type { Mission, QuotaSnapshotV1, RiskLevel, TaskEnvelopeV1 } from '#domain-model'
-import type { AdapterHealth } from '#adapter-sdk'
+import { AdapterError, type AdapterHealth } from '#adapter-sdk'
 import { createActivities } from '../../workflows/activities.ts'
 import { FakeAdapter, syntheticRunner, syntheticActivityDeps } from './fake-adapter.ts'
 
@@ -172,6 +172,20 @@ test('派发前健康探测拿到的额度快照落账', async () => {
   const { acts, store, taskId } = await fixture([a])
   await acts.dispatchTask(taskId)
   assert.deepEqual(await store.getLatestQuotaSnapshot('codex', 'b'.repeat(64)), quota)
+})
+
+// ADR-0009 §3：Adapter 归一出的 QUOTA_EXHAUSTED 作为终态失败落账，与执行不确定区分。
+test('收取时 Adapter 报 QUOTA_EXHAUSTED：任务结果为 failed 且 error.code 为 QUOTA_EXHAUSTED', async () => {
+  const a = candidate('primary')
+  a.collectResult = async () => { throw new AdapterError('QUOTA_EXHAUSTED', 'Codex 报告额度已耗尽', false, 'quota-exhausted:codex') }
+  const { acts, store, taskId } = await fixture([a])
+  await acts.dispatchTask(taskId)
+  const collected = await acts.collectTaskResult(taskId)
+  assert.equal((collected as any).status, 'failed')
+  const result = (await store.getTask(taskId))!.result!
+  assert.equal(result.status, 'failed')
+  assert.equal(result.error?.code, 'QUOTA_EXHAUSTED')
+  assert.equal(result.error?.retryable, false)
 })
 
 // ---------------------------------------------------------------- ADR-0009 §2 额度维度

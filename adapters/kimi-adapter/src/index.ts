@@ -79,6 +79,8 @@ interface RunState {
   outputOverflow: boolean
   stderrBytes: number
   stderrOverflow: boolean
+  /** stderr 与非 JSON 输出的前 MAX_STDERR_BYTES 字节，只用于识别额度耗尽，不外露。 */
+  diagnostic: string
   lastAssistant: string | null
   terminalStatus: NormalizedAgentStatus['status'] | null
   terminalDetail: string | undefined
@@ -235,6 +237,7 @@ export class KimiAdapter implements AgentAdapter {
       outputOverflow: false,
       stderrBytes: 0,
       stderrOverflow: false,
+      diagnostic: '',
       lastAssistant: null,
       terminalStatus: null,
       terminalDetail: undefined,
@@ -265,6 +268,7 @@ export class KimiAdapter implements AgentAdapter {
       try {
         parsed = JSON.parse(trimmed)
       } catch {
+        keepDiagnostic(state, trimmed)
         emit({ kind: 'progress', at: new Date().toISOString() })
         return
       }
@@ -287,6 +291,7 @@ export class KimiAdapter implements AgentAdapter {
     state.child.stderr?.on('data', (chunk: Buffer) => {
       state.stderrBytes += chunk.byteLength
       if (state.stderrBytes > MAX_STDERR_BYTES) state.stderrOverflow = true
+      keepDiagnostic(state, chunk.toString('utf8'))
     })
 
     state.child.on('close', (code, signal) => {
@@ -552,6 +557,14 @@ const verifyCredentialRefs = async (credentialHome?: string): Promise<void> => {
   await access(join(home, 'oauth'), constants.R_OK)
 }
 
+const keepDiagnostic = (state: RunState, text: string): void => {
+  if (state.diagnostic.length < MAX_STDERR_BYTES) state.diagnostic = (state.diagnostic + text + '\n').slice(0, MAX_STDERR_BYTES)
+}
+
+/** ADR-0009 §3：HTTP 429 且带额度码或额度文案才算额度耗尽；普通 429 限流不算。 */
+const isKimiQuotaExhausted = (text: string): boolean =>
+  /\b429\b/.test(text) && (/exceeded_current_quota_error/.test(text) || /exceeded your current (token )?quota/i.test(text))
+
 const finalizeState = async (
   state: RunState,
 ): Promise<NormalizedAgentEvent> => {
@@ -592,6 +605,12 @@ const finalizeState = async (
         'kimi-output-limit',
       ),
       'output limit exceeded',
+    )
+  }
+  if (state.exitCode !== 0 && isKimiQuotaExhausted(state.diagnostic)) {
+    return fail(
+      new AdapterError('QUOTA_EXHAUSTED', 'Kimi 报告额度已耗尽', false, 'quota-exhausted:kimi'),
+      'quota exhausted',
     )
   }
   if (state.exitCode !== 0) {

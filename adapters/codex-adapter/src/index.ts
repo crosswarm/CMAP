@@ -646,6 +646,10 @@ export class CodexAdapter implements AgentAdapter {
       throw new AdapterError('TASK_CANCELED', 'Codex task was canceled', false, 'codex-canceled')
     }
     if (state.recovered && !state.resultComplete) throw uncertainRun(binding)
+    // 明确的额度耗尽（ADR-0009 §3）：Agent 已自行停止，可安全交接；识别不了的照旧按普通失败
+    if (!state.recovered && state.exitCode !== 0 && CODEX_QUOTA_EXHAUSTED.test(codexErrorText(state))) {
+      throw new AdapterError('QUOTA_EXHAUSTED', 'Codex 报告额度已耗尽', false, 'quota-exhausted:codex')
+    }
 
     let raw: string
     try {
@@ -779,6 +783,16 @@ export class CodexAdapter implements AgentAdapter {
  * 这里收紧到可安全作文件名：首字符字母数字，不含路径分隔符，长度留足 `.json/.out/.err` 后缀余量。
  */
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+
+/** 实测触顶文本（codex 0.159）：弯撇号与直撇号两种写法，以及 “Quota exceeded”。 */
+const CODEX_QUOTA_EXHAUSTED = /You[’']ve hit your usage limit|Quota exceeded/
+/** 只看 stderr 与错误事件，不看 Agent 自己的消息——后者可能只是在复述日志里的文字。 */
+const codexErrorText = (state: RunState): string => [
+  state.stderr,
+  ...state.events.map((e) => e.kind === 'failed' ? e.message ?? ''
+    : e.payload?.['type'] === 'turn.failed' ? JSON.stringify(e.payload['error'] ?? '')
+    : (e.payload?.['item'] as { type?: unknown } | undefined)?.type === 'error' ? JSON.stringify(e.payload!['item']) : ''),
+].join('\n')
 
 /** 进程已退出且没有完整结果，或根本没有可用的运行记录：不知道 codex 到底做了什么。 */
 const uncertainRun = (binding: RemoteTaskBinding): AdapterError =>

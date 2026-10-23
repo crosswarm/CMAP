@@ -1096,3 +1096,28 @@ const restoreEnv = (snapshot: Map<string, string | undefined>): void => {
     else process.env[key] = value
   }
 }
+
+// ADR-0009 §3：Kimi 明确的额度耗尽（HTTP 429 + 额度码或额度文案）归一为 QUOTA_EXHAUSTED；识别不了的照旧 TASK_FAILED。
+const kimiExit = async (taskId: string, body: string) => {
+  const root = await mkdtemp(join(tmpdir(), 'cmap-kimi-quota-'))
+  await makeCredentialHome(root)
+  const sandboxBin = await makeSandbox(root)
+  const a = adapter(await makeKimi(root, body), sandboxBin, root)
+  return a.collectResult(await startAndWait(a, envelope(taskId), root))
+}
+const rejectsCode = (p: Promise<unknown>, code: string) =>
+  assert.rejects(p, (err) => err instanceof AdapterError && err.code === code && !err.retryable)
+
+test('Kimi: 429 + exceeded_current_quota_error 归一为 QUOTA_EXHAUSTED', async () => {
+  await rejectsCode(kimiExit('tsk-kimi-quota-code', `process.stderr.write("Error code: 429 - {'error': {'message': 'quota', 'type': 'exceeded_current_quota_error'}}\\n"); process.exit(1)`), 'QUOTA_EXHAUSTED')
+})
+
+test('Kimi: 429 + “exceeded your current (token) quota” 文案归一为 QUOTA_EXHAUSTED', async () => {
+  await rejectsCode(kimiExit('tsk-kimi-quota-text', `process.stdout.write("APIStatusError 429: You exceeded your current token quota, please check your plan\\n"); process.exit(1)`), 'QUOTA_EXHAUSTED')
+  await rejectsCode(kimiExit('tsk-kimi-quota-text2', `process.stderr.write("HTTP 429 You exceeded your current quota\\n"); process.exit(1)`), 'QUOTA_EXHAUSTED')
+})
+
+test('Kimi: 未识别的失败（普通 429 限流、无 429 的额度字样）按普通失败处理', async () => {
+  await rejectsCode(kimiExit('tsk-kimi-ratelimit', `process.stderr.write("Error code: 429 - rate limit reached, slow down\\n"); process.exit(1)`), 'TASK_FAILED')
+  await rejectsCode(kimiExit('tsk-kimi-no429', `process.stderr.write("exceeded_current_quota_error\\n"); process.exit(1)`), 'TASK_FAILED')
+})

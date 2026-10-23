@@ -204,6 +204,28 @@ test('lap 在已签名 health 里附带额度快照（ADR-0009），CrossMini �
   }
 })
 
+test('lap 上 Codex 触顶：QUOTA_EXHAUSTED 经协议原样回到 CrossMini（ADR-0009 §3），不带 stderr', async () => {
+  const { root, cm } = await setup()
+  const bin = join(root, 'quota-codex.cjs')
+  await writeFile(bin, `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('fake'); process.exit(0) }
+process.stderr.write('ERROR: You’ve hit your usage limit. Try again in 3 days.\\n')
+process.exit(1)
+`, { mode: 0o755 })
+  const lap = await startLap({ env: lapEnv('lap', bin), workRoot: join(root, 'lap') })
+  try {
+    const adapter = adapterFor(lap.url, cm)
+    const e = envelope('tsk-unit-quota')
+    const binding = await adapter.startTask(e, await ctxFor(cm, 'tsk-unit-quota', signer(e, { runnerId: 'lap', adapterId: REMOTE_ADAPTER_ID })))
+    await waitTerminal(adapter, binding)
+    await assert.rejects(adapter.collectResult(binding), (error: unknown) =>
+      error instanceof AdapterError && error.code === 'QUOTA_EXHAUSTED' && !error.retryable && !error.message.includes('usage limit'))
+  } finally {
+    await close(lap.server)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('health 应答缺准入白名单（旧版 lap）即使 lap 自己签名也判 unavailable，不退回静态能力声明', async () => {
   const { root, codex, cm } = await setup()
   const lap = await startLap({ env: lapEnv('lap', codex.bin), workRoot: join(root, 'lap') })

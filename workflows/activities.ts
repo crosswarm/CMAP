@@ -81,7 +81,8 @@ const judge = (envelope: TaskEnvelopeV1, result: TaskResultV1): CollectedResult 
   }
 }
 
-const TERMINAL_TASK_COLLECT_ERROR_CODES = new Set(['TASK_FAILED', 'TASK_CANCELED'])
+// QUOTA_EXHAUSTED（ADR-0009 §3）：Agent 已自行停止，按终态失败落账，与执行不确定区分
+const TERMINAL_TASK_COLLECT_ERROR_CODES = new Set(['TASK_FAILED', 'TASK_CANCELED', 'QUOTA_EXHAUSTED'])
 
 const isTerminalCollectError = (e: unknown): e is AdapterError =>
   e instanceof AdapterError &&
