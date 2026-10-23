@@ -294,6 +294,10 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 
 出站模式下 `RUNNER_ID` / `RUNNER_*` 准入变量被登记记录覆盖；禁止出现在 runner 上的变量与监听模式相同。守护进程重启后不恢复已持有的租约（只在内存），在途任务会在租约过期后判执行不确定。
 
+- **runner_id 由控制面分配**：登记成功时控制面生成 `rnr_` 加 16 位随机字符的 ID，写入登记记录；`RUNNER_HOST`（缺省为本机 hostname）只是登记时附带的 host 标签，不决定 runner_id，也不参与路由。ROUTING_DECIDED 的 `runner_id` 是 Worker 自己的 ID，网关实际选中的 runner 记在 `target_runner_id`。
+- **同一 owner 多台 runner**：路由在满足上述条件的 runner 里取 `last_seen_at` 最新的一台（即最近一次领取的），任务不能指定某一台。要固定到某台机器，只让那一台在线。
+- **Node 版本**：已验证 Node v25.2.1 / v25.6.0（undici 7）与 v26.4.0（undici 8）。网关客户端用 `node:http`/`node:https`（HTTP/1.1）而不是 `fetch`：Node 26 的 `fetch` 对 https 默认协商 HTTP/2，长轮询领取在途时，同一连接上的回报会排到领取返回之后才发出，签名超出 ±2 秒窗口被 401（2026-10-23 生产实测，受理迟到导致 `DISPATCH_UNCERTAIN`）。回归测试见 `tests/adapter/runner-outbound-transport.test.ts`。
+
 ## 已知边界
 
 - 所有端点已有应用层请求认证与应答签名；按 ADR-0006 修订 1 **不配置 Tailscale ACL**。残余风险已接受：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求读完头就 401，但仍占连接）。控制面 5433/7233 只监听 127.0.0.1。
