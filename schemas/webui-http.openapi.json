@@ -3,7 +3,7 @@
   "info": {
     "title": "CMAP WebUI HTTP Contract",
     "version": "0.1.0",
-    "description": "Two modes (docs/identity.md). Local mode (no CMAP_OIDC_*): no token, local Host and same-origin writes only, tenant/owner from server config. OIDC mode: every /v1 path except /v1/health requires a Bearer JWT (RS256, iss, aud, exp, JWKS); missing or invalid token is 401 with WWW-Authenticate: Bearer, a valid token without tenant claim or without any CMAP role is 403; tenant and owner come from the tenant and sub claims; Host and Origin restrictions are off; the index CSP adds connect-src for the issuer origin. / and /assets stay public in both modes."
+    "description": "Two modes (docs/identity.md). Local mode (no CMAP_OIDC_*): no token, local Host and same-origin writes only, tenant/owner from server config. OIDC mode: every /v1 path, /v1/health included, requires a Bearer JWT (RS256, iss, aud, exp, JWKS); missing or invalid token is 401 with WWW-Authenticate: Bearer, a valid token without tenant claim or without any CMAP role is 403; tenant and owner come from the tenant and sub claims; Host must be a local address or the host of CMAP_PUBLIC_ORIGIN, and a write through the public host must carry exactly that Origin; the index CSP adds connect-src for the issuer origin. / and /assets stay public in both modes."
   },
   "security": [{}, { "oidcBearer": [] }],
   "paths": {

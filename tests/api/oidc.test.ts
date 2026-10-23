@@ -16,6 +16,8 @@ import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
 
 const ISSUER = 'http://idp.test/realms/cmap'
 const AUDIENCE = 'cmap-api'
+const PUBLIC_ORIGIN = 'https://cmap.example.com'
+const PUBLIC_HOST = 'cmap.example.com'
 const ACTOR: EventActor = { type: 'system', id: 'test' }
 const T0 = '2026-10-23T00:00:00.000Z'
 
@@ -76,6 +78,7 @@ before(async () => {
   server = await createControlPlane({
     store, tenant: 'config-tenant', owner: 'config-owner',
     oidc: { issuer: ISSUER, audience: AUDIENCE, jwksUrl: `http://127.0.0.1:${(jwks.address() as AddressInfo).port}/certs` },
+    publicOrigin: PUBLIC_ORIGIN,
     startMission: async (missionId) => { started.push(missionId) },
     cancelMission: async () => {},
   })
@@ -156,16 +159,38 @@ describe('OIDC 认证：claims 决定身份', () => {
     assert.equal(saved?.owner, 'sub-carol')
   })
 
-  test('配置 OIDC 后本机 Host 限制关闭：反向代理转发的公网 Host 可用', async () => {
-    const status = await new Promise<number>((resolve, reject) => {
-      httpRequest({ host: '127.0.0.1', port, path: '/v1/context', headers: { host: 'cmap.example.com', authorization: `Bearer ${jwt(claims())}` } },
-        (res) => { res.resume(); resolve(res.statusCode ?? 0) }).on('error', reject).end()
-    })
-    assert.equal(status, 200)
+  // 反向代理（qcl）经隧道转发：Host 是公网域名，Origin 是公网 Origin（ADR-0008 部署修订）
+  const raw = (path: string, headers: Record<string, string>, body?: unknown) => new Promise<number>((resolve, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body)
+    const req = httpRequest({ host: '127.0.0.1', port, path, method: payload ? 'POST' : 'GET',
+      headers: { ...headers, ...(payload ? { 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(payload)) } : {}) } },
+    (res) => { res.resume(); resolve(res.statusCode ?? 0) })
+    req.on('error', reject)
+    req.end(payload)
+  })
+  const createBody = (requestId: string) => ({ request_id: requestId, goal: 'Count files', risk_level: 'read-meta',
+    acceptance: [{ criterion_id: 'files', metric: 'count', operator: 'eq', expected: 3 }] })
+
+  test('Host 只放行配置的公网 Host 与本机地址，其他 Host 403', async () => {
+    const auth = `Bearer ${jwt(claims())}`
+    assert.equal(await raw('/v1/context', { host: PUBLIC_HOST, authorization: auth }), 200)
+    assert.equal(await raw('/v1/context', { host: `localhost:${port}`, authorization: auth }), 200)
+    assert.equal(await raw('/v1/context', { host: 'evil.example.com', authorization: auth }), 403)
   })
 
-  test('/v1/health 不要求 token', async () => {
-    assert.equal((await call('/v1/health')).status, 200)
+  test('跨来源写入以公网 Origin 为准', async () => {
+    const auth = `Bearer ${jwt(claims({ roles: ['operator'] }))}`
+    assert.equal(await raw('/v1/missions', { host: PUBLIC_HOST, origin: PUBLIC_ORIGIN, authorization: auth }, createBody('oidc-origin-001')), 202)
+    for (const headers of [
+      { host: PUBLIC_HOST, origin: 'https://evil.example.com' },
+      { host: PUBLIC_HOST, origin: `http://${PUBLIC_HOST}` },
+      { host: PUBLIC_HOST, origin: PUBLIC_ORIGIN, 'sec-fetch-site': 'cross-site' },
+    ]) assert.equal(await raw('/v1/missions', { ...headers, authorization: auth }, createBody('oidc-origin-002')), 403, JSON.stringify(headers))
+  })
+
+  test('/v1/health 也要求 token', async () => {
+    assert.equal((await call('/v1/health')).status, 401)
+    assert.equal((await call('/v1/health', { token: jwt(claims()) })).status, 200)
   })
 
   test('JWKS 被缓存：多次请求不重复拉取', async () => {

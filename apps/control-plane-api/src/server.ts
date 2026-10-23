@@ -46,6 +46,8 @@ export interface ControlPlaneOptions {
   readonly notifyApprovalDecided?: (missionId: string, workflowId: string) => Promise<void>
   /** 配置后进入 OIDC 模式：tenant/owner/角色取自 Bearer JWT，本机 Host 限制与 tenant/owner 配置不再生效。 */
   readonly oidc?: OidcConfig
+  /** 反向代理对外的 Origin（如 https://cmap.spux.cn）。仅 OIDC 模式生效：放行其 Host，写入的 Origin 须与之相同。 */
+  readonly publicOrigin?: string
 }
 
 interface Ctx {
@@ -769,18 +771,21 @@ const routes: readonly Route[] = [
 export const createControlPlane = async (opts: ControlPlaneOptions) => {
   const shutdown = new AbortController()
   const verifyToken = opts.oidc ? createOidcVerifier(opts.oidc) : null
+  // 公网 Host 只在 OIDC 模式下放行：本机模式没有认证，不能经反向代理暴露。
+  const publicOrigin = opts.oidc && opts.publicOrigin ? new URL(opts.publicOrigin) : null
   const server = createServer((req, res) => {
     void (async () => {
       try {
         const port = (server.address() as AddressInfo).port
         const host = req.headers.host
-        // OIDC 模式在反向代理之后：Host 是公网域名；Bearer 不会被浏览器自动附带，不需要同源防 CSRF。
-        if (!verifyToken && host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
-          return fail(res, 403, '仅接受本机 Host')
-        }
+        // 本机地址的来源是 http://<host>；OIDC 模式下另放行反向代理转发的公网 Host，其来源是配置的公网 Origin。
+        const local = host === `127.0.0.1:${port}` || host === `localhost:${port}`
+        const viaPublic = Boolean(publicOrigin && host === publicOrigin.host)
+        if (!local && !viaPublic) return fail(res, 403, '仅接受本机或配置的公网 Host')
         if (req.method === 'POST') {
           const origin = req.headers.origin
-          if (!verifyToken && ((origin && origin !== `http://${host}`) || req.headers['sec-fetch-site'] === 'cross-site')) {
+          const expected = viaPublic ? publicOrigin!.origin : `http://${host}`
+          if ((origin && origin !== expected) || req.headers['sec-fetch-site'] === 'cross-site') {
             return fail(res, 403, '跨来源写入被拒绝')
           }
           if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
@@ -794,7 +799,7 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
         let identity: Pick<Ctx, 'tenant' | 'owner' | 'roles'> = { tenant: opts.tenant, owner: opts.owner, roles: null }
         const staticCtx = { req, res, store: opts.store, ...identity, shutdown: shutdown.signal, config: opts }
         if (await serveStatic(staticCtx, url.pathname)) return
-        if (verifyToken && url.pathname !== '/v1/health') {
+        if (verifyToken) {
           const auth = req.headers.authorization ?? ''
           try {
             if (!auth.startsWith('Bearer ')) throw new OidcError(401, '未认证')

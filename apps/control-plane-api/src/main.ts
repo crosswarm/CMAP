@@ -40,6 +40,9 @@ if (oidcEnv.some(Boolean) && !oidcEnv.every(Boolean)) {
 }
 const [issuer, audience, jwksUrl] = oidcEnv
 const oidc = issuer && audience && jwksUrl ? { issuer, audience, jwksUrl } : undefined
+const publicOrigin = process.env['CMAP_PUBLIC_ORIGIN']?.trim() || undefined
+if (publicOrigin && !oidc) throw new Error('CMAP_PUBLIC_ORIGIN 只能与 OIDC 一起配置：本机模式没有认证，不能经反向代理对外')
+if (publicOrigin && new URL(publicOrigin).origin !== publicOrigin) throw new Error('CMAP_PUBLIC_ORIGIN 必须是不带路径的 Origin，例如 https://cmap.spux.cn')
 
 const store = new PgStore({ connectionString, schema })
 // 幂等建表：与 Worker 用同一套 schema，谁先起都能把表建好。
@@ -51,7 +54,7 @@ const getTemporal = () => temporal ??= Connection.connect({
 }).catch((error: unknown) => { temporal = undefined; throw error })
 
 const server = await createControlPlane({
-  store, tenant, owner, workRoot, frontendDir, ...(oidc ? { oidc } : {}),
+  store, tenant, owner, workRoot, frontendDir, ...(oidc ? { oidc } : {}), ...(publicOrigin ? { publicOrigin } : {}),
   getApprovalAdvice: (id) => getApprovalAdviceFromJev(id, { repoRoot, port }),
   startMission: async (missionId, workflowId) => {
     const connection = await getTemporal()
