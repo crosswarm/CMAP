@@ -103,6 +103,7 @@ test('只读级：A 触顶后派生同轮续接任务，排除 A 派给 B 完成
   assert.equal(to.envelope.identity.supersedes_task_id,from.id)
   const previous=to.envelope.inputs?.previous_attempt
   assert.equal(previous?.supersedes_task_id,from.id)
+  assert.equal(previous?.kind,'quota_handoff')
   assert.equal(previous?.failed_criteria[0]?.criterion_id,'TASK-STATUS')
   assert.match(previous!.failed_criteria[0]!.reason,/QUOTA_EXHAUSTED/)
   assert.equal(to.binding?.adapter,'backup-adapter')

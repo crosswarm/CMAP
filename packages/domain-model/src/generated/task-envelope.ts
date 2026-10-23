@@ -141,6 +141,10 @@ export interface TaskEnvelopeV1 {
         }[]
       ]
       focus?: string[]
+      /**
+       * 缺省为 rework（评审返工，计入返工轮次）；quota_handoff 为额度续接（ADR-0009 §3）：原任务的 Agent 额度耗尽已停止，本任务在同一轮次接着完成，不计入返工轮次。
+       */
+      kind?: 'rework' | 'quota_handoff'
     }
   }
   environment: {

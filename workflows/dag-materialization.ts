@@ -581,6 +581,7 @@ export const materializeQuotaHandoff = async (
     const prior = from.envelope.inputs?.previous_attempt
     await createDagTask(deps.store, mission, node, taskId, from.attempt, from.deps, refs, from.id, {
       supersedes_task_id: from.id,
+      kind: 'quota_handoff',
       ...(prior?.review_round ? { review_round: prior.review_round } : {}),
       failed_criteria: [{ criterion_id: 'TASK-STATUS', expected: 'status = completed', actual: 'status = failed', reason: input.reason }, ...(prior?.failed_criteria ?? [])],
       ...(prior?.focus?.length ? { focus: [...prior.focus] } : {}),

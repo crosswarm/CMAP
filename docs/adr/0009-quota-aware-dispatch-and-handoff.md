@@ -90,4 +90,6 @@
 
 真实调度器各调用一次（2026-10-23，候选 codex/kimi）：Jev `jev-1.14.0` 976ms 选 codex、置信度 0.9（需 `NODE_USE_ENV_PROXY=1`）；Claude `claude-opus-5-5` 9.5s 选 codex。同时探到 Claude 账号七日窗口已用 97%，路由中 claude 调度者会因自身额度低被跳过。
 
-已知限制：续接快照只覆盖控制面本机工作区（远程 runner 的工作区在 lap 上，未接入）；`previous_attempt` 的 Agent 提示文案仍按「返工」措辞，失败原因里写明了是额度续接。
+续接任务的 `previous_attempt.kind` 为 `quota_handoff`，提示词显示「额度续接」数据区块，与返工的「上一轮未通过」分开。
+
+已知限制：续接快照只覆盖控制面本机工作区（远程 runner 的工作区在 lap 上，未接入）；lap 若仍是旧版本，续接任务在 lap 上的提示词会按「上一轮未通过」渲染（远程协议不按契约校验信封，不会拒收）。
