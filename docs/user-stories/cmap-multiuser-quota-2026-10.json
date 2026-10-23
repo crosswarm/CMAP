@@ -184,7 +184,7 @@
       "先写失败测试",
       "npm run check 全过；build:web 通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L02",
@@ -232,7 +232,7 @@
       "先写失败测试",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L07",
@@ -242,7 +242,7 @@
       "先写失败测试",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L08",
@@ -252,6 +252,6 @@
       "先写失败测试",
       "npm test 全过"
     ],
-    "passes": false
+    "passes": true
   }
 ]

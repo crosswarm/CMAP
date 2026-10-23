@@ -129,3 +129,11 @@
 - 实测：证书有效；未登录 401；cross 真实 PKCE 登录（含首次改密）后 `/v1/context` 返回 tenant=team-ycc；伪造、自签、`alg=none`、过期 token 均 401；无注册入口；kill 隧道约 2 秒恢复。
 - realm 只有 cross 一个账号（临时口令在 CrossMini `~/.cmap/edge/cross-initial-password`，首次登录须改）。M10 要等 runner 注册吊销（M05）与越权测试（M07）在公网实测后才通过，期间不建第二个账号。
 - 风险：腾讯云主机安全会封 SSH 认证反复失败的来源 IP；LaunchAgent 需保持 Cross 图形会话登录；日志未轮转；Keycloak 备份拉回尚未定时。
+
+## L01、L06、L07、L08（通过）
+
+- `ea1363f` L01 Mission 列表附带需要人处理摘要（一次聚合查询），侧栏未选中的 Mission 也能看到。
+- `0d1657c` L06 Kimi 普通模式不输出用量，只记耗时、不估算 tokens；报表按 Agent 汇总；Mission 累计 tokens 超阈值写 MISSION_COST_ALERT（只告警不阻断）。
+- `e85a382` L07 外部内容包进以内容哈希为定界符的数据区块，补注入回归；未做真实模型注入评测。
+- `53e598e` L08 standalone 结果目录移到 `~/.cmap/codex-results`（0700），测试改用隔离 HOME；过期文档已更新。
+- 主会话验收：`3970b45` 上 `npm run check` 全过（test 493、api 91、pg 90、workflow 339）。
