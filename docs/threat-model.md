@@ -301,8 +301,8 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 以下检查**必须零命中**（`scripts/p4-zero-hit.ts`，零命中退出 0；合成链路上的验证见上述测试文件 Z1/Z2。尚未对生产账本运行，故不勾选）：
 
-- [ ] 审计流中 grep 凭据模式
-- [ ] Artifact 中 grep 提示词正文与 token
+- [x] 审计流中 grep 凭据模式（`scripts/p4-zero-hit.ts`；2026-10-23 对生产账本 public schema 运行：127 条事件零命中）
+- [x] Artifact 中 grep 提示词正文与 token（同上：9 个登记产物分别在生产工作目录与早期开发工作目录中全部读到、零命中；已知模式检测，不是完整 DLP）
 
 ## 相关文档
 
