@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Temporal Worker（与 API 同 schema、同队列）。由 infra/launchd/deploy.sh 替换 __占位符__ 后装到 ~/Library/LaunchAgents。
+     配置（含 runner 准入白名单）在 ~/.cmap/edge/worker.env（0600，不入库），见 docs/deploy-edge.md。
+     代理变量在这里而不在 env 文件：NODE_USE_ENV_PROXY 须在进程启动时就存在。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cmap.worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>--env-file=__HOME__/.cmap/edge/worker.env</string>
+    <string>apps/worker/src/main.ts</string>
+  </array>
+  <key>WorkingDirectory</key><string>__ROOT__/current</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__PATH__</string>
+    <key>HOME</key><string>__HOME__</string>
+    <key>TMPDIR</key><string>/private/tmp</string>
+    <key>NODE_USE_ENV_PROXY</key><string>1</string>
+    <key>HTTP_PROXY</key><string>http://127.0.0.1:6152</string>
+    <key>HTTPS_PROXY</key><string>http://127.0.0.1:6152</string>
+    <key>NO_PROXY</key><string>localhost,127.0.0.1,::1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__ROOT__/logs/worker.log</string>
+  <key>StandardErrorPath</key><string>__ROOT__/logs/worker.err.log</string>
+</dict>
+</plist>

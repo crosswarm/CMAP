@@ -1,0 +1,72 @@
+# CMAP 公网边缘（ADR-0008 部署修订）：只在 qcl 上运行。
+#
+#   caddy        —— 宿主网络，对外只开 80/443；/auth/* → Keycloak，其余 → 隧道 127.0.0.1:9443
+#   keycloak     —— 只发布到宿主回环 127.0.0.1:8180
+#   keycloak-db  —— 只在 compose 内网，不发布端口
+#
+# 秘密在同目录 .env（0600，不入库）：KC_DB_PASSWORD、KC_BOOTSTRAP_ADMIN_USERNAME、KC_BOOTSTRAP_ADMIN_PASSWORD。
+# 部署与运维见 docs/deploy-edge.md。
+
+name: cmap-edge
+
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    container_name: cmap-edge-caddy
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.5
+    container_name: cmap-edge-keycloak
+    # realm 不存在时才导入；已存在则跳过，不会覆盖线上改动。
+    command: ["start", "--import-realm"]
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?缺少 KC_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?缺少 KC_BOOTSTRAP_ADMIN_USERNAME}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?缺少 KC_BOOTSTRAP_ADMIN_PASSWORD}
+      KC_HTTP_RELATIVE_PATH: /auth
+      # 固定对外地址：iss 恒为 https://cmap.spux.cn/auth/realms/cmap，不随访问方式变化
+      KC_HOSTNAME: https://cmap.spux.cn/auth
+      # 管理控制台不经公网（Caddy 对 /auth/admin 与 master realm 返回 404），只经 SSH 转发本机端口访问
+      KC_HOSTNAME_ADMIN: http://127.0.0.1:8180/auth
+      # edge 模式（Keycloak 25+ 的写法）：TLS 在 Caddy 终止，Keycloak 走 HTTP 并信任 X-Forwarded-*。
+      # 只有宿主回环能连到 8180，转发头只可能来自 Caddy。
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    restart: unless-stopped
+
+  keycloak-db:
+    image: postgres:16-alpine
+    container_name: cmap-edge-keycloak-db
+    environment:
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?缺少 KC_DB_PASSWORD}
+      POSTGRES_DB: keycloak
+    volumes:
+      - keycloak-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:
+  keycloak-db:

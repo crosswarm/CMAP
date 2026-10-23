@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 控制面 API（OIDC 模式，127.0.0.1:8785）。由 infra/launchd/deploy.sh 替换 __占位符__ 后装到 ~/Library/LaunchAgents。
+     配置在 ~/.cmap/edge/api.env（0600，不入库），见 docs/deploy-edge.md。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cmap.api</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>--env-file=__HOME__/.cmap/edge/api.env</string>
+    <string>apps/control-plane-api/src/main.ts</string>
+  </array>
+  <key>WorkingDirectory</key><string>__ROOT__/current</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__PATH__</string>
+    <key>HOME</key><string>__HOME__</string>
+    <key>TMPDIR</key><string>/private/tmp</string>
+    <key>NO_PROXY</key><string>localhost,127.0.0.1,::1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__ROOT__/logs/api.log</string>
+  <key>StandardErrorPath</key><string>__ROOT__/logs/api.err.log</string>
+</dict>
+</plist>

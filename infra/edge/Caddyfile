@@ -1,0 +1,26 @@
+# CMAP 公网边缘（ADR-0008 部署修订）。Caddy 自动向 Let's Encrypt 签发证书，80 只用于签发与跳转 HTTPS。
+cmap.spux.cn {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		# 上游已设置时保留上游值（Keycloak 自带 frame-ancestors 与 Referrer-Policy）
+		?X-Frame-Options DENY
+		?Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Caddy 默认原样转发 Host，API 依此识别配置的公网 Origin
+	handle /auth/* {
+		# 管理控制台、管理 API 与 master realm 不经公网，只经 SSH 转发 127.0.0.1:8180 访问
+		@kcadmin path /auth/admin /auth/admin/* /auth/realms/master /auth/realms/master/*
+		respond @kcadmin 404
+		# Keycloak 根路径会跳到只在本机可用的管理控制台地址
+		redir /auth/ / 302
+		reverse_proxy 127.0.0.1:8180
+	}
+
+	# 其余经 CrossMini 建立的反向 SSH 隧道到控制面 API；隧道断开时返回 502
+	handle {
+		reverse_proxy 127.0.0.1:9443
+	}
+}

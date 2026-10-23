@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 反向 SSH 隧道：qcl 127.0.0.1:9443 → CrossMini 127.0.0.1:8785（API）。
+     专用密钥与固定的 qcl 主机公钥在 ~/.cmap/edge/（0600）；-F /dev/null 不读 ~/.ssh/config 与 agent。
+     qcl 侧账号 cmap-tunnel 只允许 permitlisten="127.0.0.1:9443"，见 docs/deploy-edge.md。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cmap.tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-F</string><string>/dev/null</string>
+    <string>-N</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=15</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-o</string><string>ConnectTimeout=15</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>IdentityAgent=none</string>
+    <string>-o</string><string>IdentitiesOnly=yes</string>
+    <string>-o</string><string>StrictHostKeyChecking=yes</string>
+    <string>-o</string><string>UserKnownHostsFile=__HOME__/.cmap/edge/known_hosts</string>
+    <string>-i</string><string>__HOME__/.cmap/edge/tunnel_ed25519</string>
+    <string>-R</string><string>127.0.0.1:9443:127.0.0.1:8785</string>
+    <string>cmap-tunnel@cmap.spux.cn</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>__ROOT__/logs/tunnel.log</string>
+  <key>StandardErrorPath</key><string>__ROOT__/logs/tunnel.log</string>
+</dict>
+</plist>

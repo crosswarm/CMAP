@@ -1,0 +1,2 @@
+# 安装到 qcl 的 /etc/cron.d/cmap-edge-backup（root:root 0644），见 docs/deploy-edge.md
+17 3 * * * root /opt/cmap-edge/backup-keycloak.sh >> /var/log/cmap-edge-backup.log 2>&1
