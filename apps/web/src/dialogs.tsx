@@ -19,6 +19,7 @@ import {
   approvalURL,
   artifactURL,
 } from './api.ts'
+import { authHeaders, oidcEnabled } from './auth.ts'
 import {
   approvalPayload,
   expectedValue,
@@ -521,7 +522,7 @@ export function ApprovalDialog({
                   ? approval.evidence_artifact_ids.join('、')
                   : '未附证据'}
               </dd>
-              <dt>本机操作者</dt>
+              <dt>{oidcEnabled ? '登录操作者' : '本机操作者'}</dt>
               <dd>{actor ?? '未配置'}</dd>
             </dl>
             <p className="hint">
@@ -608,7 +609,9 @@ export function ApprovalDialog({
               )}
             </section>
             <p className="muted small">
-              当前为本机模式，按本机配置记录操作者，尚未接入身份认证。
+              {oidcEnabled
+                ? '操作者取自登录令牌，服务端按令牌记录审批人。'
+                : '当前为本机模式，按本机配置记录操作者，尚未接入身份认证。'}
             </p>
           </>
         )}
@@ -670,6 +673,7 @@ export function ArtifactDialog({
       try {
         const response = await fetch(artifactURL(artifact), {
           signal: abort.signal,
+          headers: authHeaders(),
         })
         if (!response.ok) {
           const body = await response.json()

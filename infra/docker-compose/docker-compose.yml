@@ -102,6 +102,27 @@ services:
       - "127.0.0.1:8088:8080"
     restart: unless-stopped
 
+  # OIDC 开发 IdP（ADR-0008 §2）。profile 使它不随默认 up 启动：
+  #   docker compose -f infra/docker-compose/docker-compose.yml --profile auth up -d keycloak
+  # start-dev 使用容器内 H2，重建容器即从 keycloak/cmap-realm.json 重新导入。
+  # 管理员与测试用户口令只用于本地开发，见 README「Keycloak」。
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.5
+    container_name: cmap-keycloak
+    profiles: ["auth"]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      <<: *no-proxy
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # 固定对外地址，iss 不随访问方式（localhost / 127.0.0.1）变化
+      KC_HOSTNAME: http://localhost:8180
+    ports:
+      - "127.0.0.1:8180:8080"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    restart: unless-stopped
+
 volumes:
   postgres-data:
     name: cmap-postgres-data

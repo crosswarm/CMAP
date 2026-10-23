@@ -105,7 +105,8 @@ P2 进行中：控制面已能**无人值守跑完一次 Mission**——派发�
 WebUI 已接入目标创建、验收账本、证据预览、返工追踪、独立 scope 审批和 Jev 建议。
 启动后打开 http://127.0.0.1:8787；开发前端可用 `npm run start:web`（仍需 API）。
 本机支持 inspect/v1 与显式 dag/v1；Codex＋Kimi 分叉汇合的真实执行、产物传递和历史重放已验证（[DAG 验证](docs/verification-dag-2026-09-21.md)）。
-本机 Kimi Adapter 见[运行说明](docs/kimi-adapter.md)；自然语言 Planner、YonWork Adapter、OIDC 与远程 runner 尚未完成。
+本机 Kimi Adapter 见[运行说明](docs/kimi-adapter.md)；自然语言 Planner、YonWork Adapter 与 runner 出站网关尚未完成。
+OIDC 模式（API 校验 Bearer JWT、WebUI PKCE 登录）已可用本地 Keycloak 实测，映射见 [docs/identity.md](docs/identity.md)，开发 IdP 与仅限本地的测试口令见 [本地开发栈](infra/docker-compose/README.md#keycloakoidc-开发-idp可选)；公网部署与上线闸口仍未完成。
 外部 [Planner CLI](docs/planner.md) 已实现本地契约闭环，真实 Claude 访问返回 403，尚未通过端到端验证。
 Mission 多后继已支持有界 FIFO、逐分支审批、停止后的待执行任务清理及历史兼容，见 [验证记录](docs/verification-mission-followups-2026-09-22.md)。Reviewer 的 task_type、parameters 和同权限范围内的产物输入已支持本机交付与重试恢复，见 [输入协议](docs/review-inputs.md) 和 [真实验证](docs/verification-review-inputs-2026-09-22.md)。
 验证见 [WebUI 交付记录](docs/verification-webui-2026-09-21.md)。

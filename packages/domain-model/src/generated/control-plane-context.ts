@@ -5,10 +5,10 @@
  */
 
 /**
- * GET /v1/context 返回给同源 WebUI 的本机控制面上下文。authentication 固定为 local，明确不是 OIDC 身份；tenant 与 owner 只来自服务端配置。
+ * GET /v1/context 返回给同源 WebUI 的控制面上下文。authentication 为 local 时是本机模式：tenant 与 owner 只来自服务端配置，不是 OIDC 身份。为 oidc 时 tenant 取自 token 的 tenant claim、owner 取自 sub（映射见 docs/identity.md），请求必须带有效 Bearer JWT。
  */
 export interface ControlPlaneContextV1 {
   tenant: string
   owner: string | null
-  authentication: 'local'
+  authentication: 'local' | 'oidc'
 }

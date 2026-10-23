@@ -5,7 +5,7 @@
  * 接上 PgStore 与端口。监听固定在 127.0.0.1：鉴权要到 P4 才有，在那之前
  * 这个端口等于无认证的账本读写口，不能对外暴露。
  *
- * tenant 目前来自环境变量，P4 接入 OIDC 后改为从令牌解析。
+ * 未配置 OIDC 时 tenant/owner 来自环境变量（本机模式）；配置 CMAP_OIDC_* 后从令牌解析，见 docs/identity.md。
  */
 
 // Surge 会拦截 localhost 并返回 HTTP 200 + HTML，导致连接看似成功却
@@ -33,6 +33,14 @@ const connectionString =
   process.env['CMAP_DATABASE_URL'] ?? 'postgres://temporal:temporal@localhost:5433/cmap'
 const schema = process.env['CMAP_DB_SCHEMA'] ?? 'public'
 
+// OIDC 三项要么全配要么全不配：只配一半时静默退回本机模式，等于以为开了认证其实没开。
+const oidcEnv = ['CMAP_OIDC_ISSUER', 'CMAP_OIDC_AUDIENCE', 'CMAP_OIDC_JWKS_URL'].map((name) => process.env[name]?.trim() || undefined)
+if (oidcEnv.some(Boolean) && !oidcEnv.every(Boolean)) {
+  throw new Error('CMAP_OIDC_ISSUER、CMAP_OIDC_AUDIENCE、CMAP_OIDC_JWKS_URL 必须同时配置')
+}
+const [issuer, audience, jwksUrl] = oidcEnv
+const oidc = issuer && audience && jwksUrl ? { issuer, audience, jwksUrl } : undefined
+
 const store = new PgStore({ connectionString, schema })
 // 幂等建表：与 Worker 用同一套 schema，谁先起都能把表建好。
 await store.migrate()
@@ -43,7 +51,7 @@ const getTemporal = () => temporal ??= Connection.connect({
 }).catch((error: unknown) => { temporal = undefined; throw error })
 
 const server = await createControlPlane({
-  store, tenant, owner, workRoot, frontendDir,
+  store, tenant, owner, workRoot, frontendDir, ...(oidc ? { oidc } : {}),
   getApprovalAdvice: (id) => getApprovalAdviceFromJev(id, { repoRoot, port }),
   startMission: async (missionId, workflowId) => {
     const connection = await getTemporal()
@@ -76,7 +84,9 @@ await server.listen(port)
 
 // 租户打进日志：跨租户请求一律 404，配错时症状是「什么都查不到」，
 // 不打出来会被当成数据没写进去。
-console.log(`控制面 API 就绪：http://127.0.0.1:${port}/v1/health tenant=${tenant} db.schema=${schema}`)
+console.log(oidc
+  ? `控制面 API 就绪：http://127.0.0.1:${port}/v1/health auth=oidc issuer=${oidc.issuer} db.schema=${schema}`
+  : `控制面 API 就绪：http://127.0.0.1:${port}/v1/health tenant=${tenant} db.schema=${schema}`)
 
 let stopping = false
 const stop = (): void => {

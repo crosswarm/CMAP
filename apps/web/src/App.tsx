@@ -9,7 +9,7 @@ import type {
   Review,
   TaskRecord,
 } from '#domain-model'
-import { request, post } from './api.ts'
+import { request, post, subscribe } from './api.ts'
 import {
   acceptanceRows,
   dagNodeRows,
@@ -161,14 +161,14 @@ export default function App() {
     return () => activeRequest.current?.abort()
   }, [refresh])
   useEffect(() => {
-    const stream = new EventSource('/v1/events')
     const seen = new Set<string>()
     let timer: ReturnType<typeof setTimeout> | undefined
-    stream.onopen = () => setConnection('connected')
-    stream.onerror = () => setConnection('reconnecting')
-    stream.addEventListener('mission-event', (event) => {
+    const close = subscribe('/v1/events', {
+      open: () => setConnection('connected'),
+      error: () => setConnection('reconnecting'),
+      event: (raw) => {
       try {
-        const data: unknown = JSON.parse((event as MessageEvent<string>).data)
+        const data: unknown = JSON.parse(raw)
         if (
           !data ||
           typeof data !== 'object' ||
@@ -186,9 +186,10 @@ export default function App() {
       } catch {
         setConnection('reconnecting')
       }
+      },
     })
     return () => {
-      stream.close()
+      close()
       clearTimeout(timer)
     }
   }, [])
@@ -298,11 +299,14 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="local-mode" title="本机模式，尚未接入身份认证">
+        <div
+          className="local-mode"
+          title={context?.authentication === 'oidc' ? `已登录：${context.owner}` : '本机模式，尚未接入身份认证'}
+        >
           <span className="operator-avatar">
             {context?.owner?.slice(0, 1).toUpperCase() ?? '·'}
           </span>
-          <span>本机</span>
+          <span>{context?.authentication === 'oidc' ? '已登录' : '本机'}</span>
         </div>
       </aside>
 
@@ -918,7 +922,7 @@ export default function App() {
           <span>
             {updated ? `最近核对 ${showTime(updated)}` : '等待首批数据'}
           </span>
-          <span>本机模式</span>
+          <span>{context?.authentication === 'oidc' ? 'OIDC 登录' : '本机模式'}</span>
         </footer>
       </main>
       {modal?.type === 'create' && (

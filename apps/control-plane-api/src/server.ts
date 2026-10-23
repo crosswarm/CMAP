@@ -24,6 +24,7 @@ import type { Mission } from '#domain-model'
 import { legacyInspectForm, missionFromRequest, validateMissionCancel } from './mission-submission.ts'
 import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/generated/mission-submission.ts'
 import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/generated/control-plane-context.ts'
+import { createOidcVerifier, OidcError, type OidcConfig, type OidcRole } from './oidc.ts'
 
 export interface ControlPlaneOptions {
   readonly store: Store
@@ -43,6 +44,8 @@ export interface ControlPlaneOptions {
   readonly cancelMission?: (missionId: string, workflowId: string, reason: string) => Promise<void>
   /** 审批决定落账后向 Mission Workflow 发 approvalDecided 门铃；不带业务数据，Workflow 醒来回读账本。 */
   readonly notifyApprovalDecided?: (missionId: string, workflowId: string) => Promise<void>
+  /** 配置后进入 OIDC 模式：tenant/owner/角色取自 Bearer JWT，本机 Host 限制与 tenant/owner 配置不再生效。 */
+  readonly oidc?: OidcConfig
 }
 
 interface Ctx {
@@ -51,6 +54,10 @@ interface Ctx {
   readonly params: Record<string, string>
   readonly store: Store
   readonly tenant: string
+  /** 本机模式为配置的 owner；OIDC 模式为 token 的 sub。 */
+  readonly owner: string | undefined
+  /** OIDC 模式下 token 的 CMAP 角色；本机模式为 null。 */
+  readonly roles: ReadonlySet<OidcRole> | null
   readonly shutdown: AbortSignal
   readonly config: ControlPlaneOptions
 }
@@ -443,7 +450,8 @@ const serveStatic = async (ctx: Omit<Ctx, 'params'>, path: string): Promise<bool
     'content-type': CONTENT_TYPES[extname(realFile).toLowerCase()] ?? 'application/octet-stream',
     'content-length': bytes.length,
     'cache-control': path === '/' ? 'no-cache' : 'public, max-age=31536000, immutable',
-    'content-security-policy': CSP,
+    // OIDC 模式下 WebUI 要向 IdP 发现与换取令牌
+    'content-security-policy': ctx.config.oidc ? `${CSP}; connect-src 'self' ${new URL(ctx.config.oidc.issuer).origin}` : CSP,
     'x-content-type-options': 'nosniff',
   })
   ctx.res.end(bytes)
@@ -454,8 +462,8 @@ const routes: readonly Route[] = [
   {
     method: 'GET',
     pattern: '/v1/context',
-    handler: async ({ res, tenant, config }) => {
-      const body: ControlPlaneContextV1 = { tenant, owner: config.owner ?? null, authentication: 'local' }
+    handler: async ({ res, tenant, owner, config }) => {
+      const body: ControlPlaneContextV1 = { tenant, owner: owner ?? null, authentication: config.oidc ? 'oidc' : 'local' }
       json(res, 200, body)
     },
   },
@@ -463,7 +471,7 @@ const routes: readonly Route[] = [
   {
     method: 'POST', pattern: '/v1/missions',
     handler: async (ctx) => {
-      const { owner, startMission } = ctx.config
+      const { owner, config: { startMission } } = ctx
       if (!owner?.trim() || !startMission) return fail(ctx.res, 503, 'Mission 创建入口未配置')
       let body, mission
       try {
@@ -506,8 +514,8 @@ const routes: readonly Route[] = [
       const id = ctx.params['id']!
       const mission = await ctx.store.getMission(id)
       if (!mission || mission.tenant !== ctx.tenant) return fail(ctx.res, 404, `Mission 不存在：${id}`)
-      if (!ctx.config.owner?.trim()) return fail(ctx.res, 503, '本机 owner 未配置')
-      if (mission.owner !== ctx.config.owner) return fail(ctx.res, 403, '只能启动本机 owner 创建的 Mission')
+      if (!ctx.owner?.trim()) return fail(ctx.res, 503, '本机 owner 未配置')
+      if (mission.owner !== ctx.owner) return fail(ctx.res, 403, '只能启动本机 owner 创建的 Mission')
       await respondMissionStart(ctx, mission)
     },
   },
@@ -519,7 +527,7 @@ const routes: readonly Route[] = [
       const id = ctx.params['id']!
       const mission = await missionInTenant(ctx, id)
       if (!mission) return fail(ctx.res, 404, `Mission 不存在：${id}`)
-      const owner = ctx.config.owner?.trim()
+      const owner = ctx.owner?.trim()
       if (!owner || !ctx.config.cancelMission) return fail(ctx.res, 503, 'Mission 取消入口未配置')
       if (mission.owner !== owner) return fail(ctx.res, 403, '只能取消本机 owner 创建的 Mission')
       if (['COMPLETED', 'FAILED', 'ESCALATED', 'CANCELED'].includes(mission.state)) {
@@ -672,7 +680,7 @@ const routes: readonly Route[] = [
     pattern: '/v1/approvals/:id/decision',
     handler: async (ctx) => {
       const id = ctx.params['id']!
-      if (!ctx.config.owner?.trim()) return fail(ctx.res, 503, '本机 owner 未配置，不能决策审批')
+      if (!ctx.owner?.trim()) return fail(ctx.res, 503, '本机 owner 未配置，不能决策审批')
       const body = await readBody(ctx.req)
       if (body === null || typeof body !== 'object') {
         return fail(ctx.res, 400, '请求体不是合法 JSON')
@@ -696,7 +704,7 @@ const routes: readonly Route[] = [
         return fail(ctx.res, 400, 'decided_by 必填，审批必须可追溯到具体的人')
       }
       // 身份由控制面配置决定，请求体只能复述它，不能自报别人
-      if (decidedBy !== ctx.config.owner) {
+      if (decidedBy !== ctx.owner) {
         return fail(ctx.res, 403, 'decided_by 必须等于本机 owner')
       }
 
@@ -749,17 +757,19 @@ const routes: readonly Route[] = [
 
 export const createControlPlane = async (opts: ControlPlaneOptions) => {
   const shutdown = new AbortController()
+  const verifyToken = opts.oidc ? createOidcVerifier(opts.oidc) : null
   const server = createServer((req, res) => {
     void (async () => {
       try {
         const port = (server.address() as AddressInfo).port
         const host = req.headers.host
-        if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+        // OIDC 模式在反向代理之后：Host 是公网域名；Bearer 不会被浏览器自动附带，不需要同源防 CSRF。
+        if (!verifyToken && host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
           return fail(res, 403, '仅接受本机 Host')
         }
         if (req.method === 'POST') {
           const origin = req.headers.origin
-          if ((origin && origin !== `http://${host}`) || req.headers['sec-fetch-site'] === 'cross-site') {
+          if (!verifyToken && ((origin && origin !== `http://${host}`) || req.headers['sec-fetch-site'] === 'cross-site')) {
             return fail(res, 403, '跨来源写入被拒绝')
           }
           if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
@@ -770,18 +780,28 @@ export const createControlPlane = async (opts: ControlPlaneOptions) => {
         try { decodeURIComponent(url.pathname) } catch {
           return fail(res, 400, '路径编码无效')
         }
-        const staticCtx = {
-          req, res, store: opts.store, tenant: opts.tenant,
-          shutdown: shutdown.signal, config: opts,
-        }
+        let identity: Pick<Ctx, 'tenant' | 'owner' | 'roles'> = { tenant: opts.tenant, owner: opts.owner, roles: null }
+        const staticCtx = { req, res, store: opts.store, ...identity, shutdown: shutdown.signal, config: opts }
         if (await serveStatic(staticCtx, url.pathname)) return
+        if (verifyToken && url.pathname !== '/v1/health') {
+          const auth = req.headers.authorization ?? ''
+          try {
+            if (!auth.startsWith('Bearer ')) throw new OidcError(401, '未认证')
+            identity = await verifyToken(auth.slice('Bearer '.length).trim())
+          } catch (e) {
+            if (!(e instanceof OidcError)) throw e
+            if (e.status === 401) res.setHeader('www-authenticate', 'Bearer')
+            return fail(res, e.status, e.message)
+          }
+          if (identity.roles?.size === 0) return fail(res, 403, '没有 CMAP 角色')
+        }
         const hit = matchRoute(routes, req.method ?? 'GET', url.pathname)
 
         if (!hit) return fail(res, 404, `未知路径：${req.method} ${url.pathname}`)
 
         await hit.route.handler({
           req, res, params: hit.params,
-          store: opts.store, tenant: opts.tenant,
+          store: opts.store, ...identity,
           shutdown: shutdown.signal,
           config: opts,
         })

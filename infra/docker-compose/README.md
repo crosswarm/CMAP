@@ -22,6 +22,20 @@ docker compose -f infra/docker-compose/docker-compose.yml down -v
 
 所有端口都绑定在 `127.0.0.1`，不对外暴露。
 
+## Keycloak（OIDC 开发 IdP，可选）
+
+`auth` profile，默认 `up` 不启动，也不影响上面三个服务：
+
+```bash
+docker compose -f infra/docker-compose/docker-compose.yml --profile auth up -d keycloak
+curl --noproxy '*' -s http://localhost:8180/realms/cmap/.well-known/openid-configuration   # issuer 应为 http://localhost:8180/realms/cmap
+```
+
+- 镜像钉在 `quay.io/keycloak/keycloak:26.7.5`；`start-dev` 用容器内 H2，删掉容器重建即从 `keycloak/cmap-realm.json` 重新导入。
+- realm `cmap`；public client `cmap-web`（Authorization Code + PKCE S256，回跳 `http://127.0.0.1:8787/*`、`http://localhost:5173/*` 等）；token 带 `aud=cmap-api`、硬编码 `tenant=team-ycc`、平铺的 `roles`。映射规则见 [docs/identity.md](../../docs/identity.md)。
+- **以下口令只用于本地开发，不得用于任何共享或公网环境**：管理控制台 http://localhost:8180/admin 为 `admin` / `admin`；测试用户 `dev-operator` / `cmap-dev-operator`（operator、approver-controlled），`dev-approver` / `cmap-dev-approver`（viewer、approver-mutating）。
+- API 以 OIDC 模式运行需 `CMAP_OIDC_ISSUER`、`CMAP_OIDC_AUDIENCE`、`CMAP_OIDC_JWKS_URL`（值见 `.env.example`）；WebUI 构建时加 `VITE_CMAP_OIDC_ISSUER=http://localhost:8180/realms/cmap VITE_CMAP_OIDC_CLIENT_ID=cmap-web npm run build:web`。
+
 ---
 
 ## 三个代理陷阱

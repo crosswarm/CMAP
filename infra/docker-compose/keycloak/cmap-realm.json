@@ -1,0 +1,92 @@
+{
+  "realm": "cmap",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 1800,
+  "roles": {
+    "realm": [
+      { "name": "operator", "description": "创建、取消自己的 Mission" },
+      { "name": "approver-controlled", "description": "决定 controlled 审批" },
+      { "name": "approver-mutating", "description": "决定 mutating 审批" },
+      { "name": "viewer", "description": "只读" },
+      { "name": "admin", "description": "管理 runner 与委托策略" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "cmap-web",
+      "name": "CMAP WebUI",
+      "enabled": true,
+      "publicClient": true,
+      "protocol": "openid-connect",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": [
+        "http://127.0.0.1:8787/*",
+        "http://localhost:8787/*",
+        "http://127.0.0.1:5173/*",
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": [
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "+"
+      },
+      "protocolMappers": [
+        {
+          "name": "aud cmap-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": { "included.custom.audience": "cmap-api", "access.token.claim": "true", "id.token.claim": "false" }
+        },
+        {
+          "name": "tenant",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "config": { "claim.name": "tenant", "claim.value": "team-ycc", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "true", "userinfo.token.claim": "true" }
+        },
+        {
+          "name": "roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": { "claim.name": "roles", "multivalued": "true", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false", "userinfo.token.claim": "false" }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "8a1f0c2e-0001-4000-8000-00000000c3a1",
+      "username": "dev-operator",
+      "enabled": true,
+      "email": "dev-operator@cmap.invalid",
+      "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "Operator",
+      "requiredActions": [],
+      "realmRoles": ["operator", "approver-controlled"],
+      "credentials": [{ "type": "password", "value": "cmap-dev-operator", "temporary": false }]
+    },
+    {
+      "id": "8a1f0c2e-0002-4000-8000-00000000c3a2",
+      "username": "dev-approver",
+      "enabled": true,
+      "email": "dev-approver@cmap.invalid",
+      "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "Approver",
+      "requiredActions": [],
+      "realmRoles": ["viewer", "approver-mutating"],
+      "credentials": [{ "type": "password", "value": "cmap-dev-approver", "temporary": false }]
+    }
+  ]
+}
