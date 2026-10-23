@@ -122,3 +122,10 @@
 - L05 `b2e6522` Planner 403 已不复现，原因在服务端或账号侧，脚本无问题；真实 plan-mission 成功一次；提交计划到执行的整链路未验证。
 - 主会话验收：`c16e643` 上 `npm run check` 全过（test 480、api 90、pg 89、workflow 337）。
 - qcl 清理（ADR-0008 部署修订）：配置与清单备份到 CrossMini `~/.cmap/qcl-backup-20261023/`；停用并禁用旧 aiticket 后端、nginx、llmsandbox、qdrant、playwright-mcp、RustDesk；frps 保留；数据目录未删除。
+
+## M10 第一阶段（已上线，故事未通过）
+
+- `https://cmap.spux.cn`：qcl 上 Caddy（Let's Encrypt）+ Keycloak；其余请求经 CrossMini 发起的受限反向 SSH 隧道到 CrossMini API（8785）。CrossMini 以 launchd 常驻 API、Worker（cmap-main，schema public）与隧道，发布目录 `~/.local/share/cmap-control/b71c32d`。
+- 实测：证书有效；未登录 401；cross 真实 PKCE 登录（含首次改密）后 `/v1/context` 返回 tenant=team-ycc；伪造、自签、`alg=none`、过期 token 均 401；无注册入口；kill 隧道约 2 秒恢复。
+- realm 只有 cross 一个账号（临时口令在 CrossMini `~/.cmap/edge/cross-initial-password`，首次登录须改）。M10 要等 runner 注册吊销（M05）与越权测试（M07）在公网实测后才通过，期间不建第二个账号。
+- 风险：腾讯云主机安全会封 SSH 认证反复失败的来源 IP；LaunchAgent 需保持 Cross 图形会话登录；日志未轮转；Keycloak 备份拉回尚未定时。
