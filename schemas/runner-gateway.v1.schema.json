@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/runner-gateway.v1.schema.json",
+  "title": "RunnerGatewayMessageV1",
+  "description": "ADR-0008 §3 outbound runner gateway. The runner initiates every HTTPS request; the control plane never connects to a runner, so runners behind NAT work. Message bodies reuse remote-runner.v1 semantics unchanged (dispatch with a cmap1 permit bound to runner_id, adapter audience and envelope SHA256; dispatch_accepted / status / result / error; cancel); only the transport direction changes. POST /v1/gateway/claim long-polls for work (wait_seconds at most 50) and renews every lease listed in held_leases; the reply carries at most one assignment plus pending cancels, which the control plane can no longer push. POST /v1/gateway/reports carries one remote-runner.v1 reply for a lease and also renews it. A lease the control plane reports as expired enters the existing execution-uncertain path (task INPUT_REQUIRED, binding kept): it is never reassigned or rerun. Results are written to the ledger before the workflow is signalled. Artifacts are still recomputed by the control plane; runner-reported hashes are never trusted. Authentication: every request carries requestAuthHeaders signed by the runner's enrolled Ed25519 key (runner-enrollment.v1); any failure, a revoked runner included, is one identical unsigned 401 error with code UNAUTHORIZED and nothing is executed or recorded. Every other reply carries responseAuthHeaders signed by the control-plane key the runner pinned at enrollment. Bodies never carry credentials, database addresses, provider stderr or tenant/owner identity: identity comes from the enrolled runner record, not from the request.",
+  "oneOf": [
+    { "$ref": "#/$defs/claim" },
+    { "$ref": "#/$defs/claimResult" },
+    { "$ref": "#/$defs/report" },
+    { "$ref": "#/$defs/reportAck" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "schemaTag": { "type": "string", "const": "cmap/runner-gateway/v1" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s*]+$" },
+    "leaseId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" },
+    "requestAuthHeaders": {
+      "title": "RunnerGatewayRequestAuthHeadersV1",
+      "description": "HTTP headers on every runner request. Signature (base64url Ed25519 by the enrolled runner key) covers the UTF-8 string 'cmap-gateway-req1' LF METHOD LF path+query LF x-cmap-content-sha256 LF x-cmap-timestamp LF x-cmap-nonce LF x-cmap-runner-id. Timestamp skew at most 2 seconds; nonce single use inside the window. The domain prefix differs from remote-runner.v1 'cmap-runner-req1' so the two cannot be replayed into each other.",
+      "type": "object",
+      "required": ["x-cmap-timestamp", "x-cmap-nonce", "x-cmap-runner-id", "x-cmap-content-sha256", "x-cmap-signature"],
+      "properties": {
+        "x-cmap-timestamp": { "type": "string", "pattern": "^[0-9]{10,16}$" },
+        "x-cmap-nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,64}$" },
+        "x-cmap-runner-id": { "$ref": "#/$defs/identifier" },
+        "x-cmap-content-sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "x-cmap-signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "responseAuthHeaders": {
+      "title": "RunnerGatewayResponseAuthHeadersV1",
+      "description": "HTTP header on every authenticated reply (errors included; only the 401 is unsigned). Signature (base64url Ed25519 by the control-plane key) covers 'cmap-gateway-res1' LF runner_id LF request x-cmap-nonce LF status code LF sha256 of the exact body bytes.",
+      "type": "object",
+      "required": ["x-cmap-signature"],
+      "properties": {
+        "x-cmap-signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "lease": {
+      "title": "RunnerGatewayLeaseV1",
+      "description": "Issued with an assignment and renewed by every claim or report that names it. Past expires_at the control plane stops waiting and records execution uncertain; it does not reassign.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_id", "expires_at"],
+      "properties": {
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "claim": {
+      "title": "RunnerGatewayClaimV1",
+      "description": "POST /v1/gateway/claim. runner_id must equal x-cmap-runner-id. held_leases lists every lease the runner still executes (empty when idle); each is renewed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "wait_seconds", "held_leases"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "claim" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "wait_seconds": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "held_leases": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/leaseId" } }
+      }
+    },
+    "claimResult": {
+      "title": "RunnerGatewayClaimResultV1",
+      "description": "Reply to claim, sent when work or a cancel is available or wait_seconds elapsed. renewed: held leases still honored with their new expiry. expired: held leases the control plane already judged uncertain; the runner should stop them and must not report results for them. assignment: null, or one remote-runner.v1 dispatch with its new lease. cancels: remote-runner.v1 cancel messages for held leases.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "renewed", "expired", "assignment", "cancels"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "claim_result" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "renewed": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/lease" } },
+        "expired": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/leaseId" } },
+        "assignment": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["lease", "dispatch"],
+              "properties": {
+                "lease": { "$ref": "#/$defs/lease" },
+                "dispatch": { "$ref": "remote-runner.v1.schema.json#/$defs/dispatch" }
+              }
+            }
+          ]
+        },
+        "cancels": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["lease_id", "cancel"],
+            "properties": {
+              "lease_id": { "$ref": "#/$defs/leaseId" },
+              "cancel": { "$ref": "remote-runner.v1.schema.json#/$defs/cancel" }
+            }
+          }
+        }
+      }
+    },
+    "report": {
+      "title": "RunnerGatewayReportV1",
+      "description": "POST /v1/gateway/reports. body is exactly one remote-runner.v1 reply for the leased dispatch: dispatch_accepted (or a permit/admission error) right after verification, status on change, result once terminal. A result is persisted (artifacts recomputed) before the workflow is signalled.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "lease_id", "body"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "report" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "body": {
+          "oneOf": [
+            { "$ref": "remote-runner.v1.schema.json#/$defs/dispatchAccepted" },
+            { "$ref": "remote-runner.v1.schema.json#/$defs/status" },
+            { "$ref": "remote-runner.v1.schema.json#/$defs/result" },
+            { "$ref": "remote-runner.v1.schema.json#/$defs/error" }
+          ]
+        }
+      }
+    },
+    "reportAck": {
+      "title": "RunnerGatewayReportAckV1",
+      "description": "Reply to report. lease is the renewed lease, or null once the lease is closed (terminal report recorded).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "lease_id", "lease"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "report_ack" },
+        "lease_id": { "$ref": "#/$defs/leaseId" },
+        "lease": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/lease" }] }
+      }
+    },
+    "error": {
+      "title": "RunnerGatewayErrorV1",
+      "description": "Gateway-level error. UNAUTHORIZED (HTTP 401, unsigned, identical for every authentication failure); LEASE_EXPIRED / LEASE_UNKNOWN for reports on a lease that is closed, expired or not held by this runner (no ledger write); INVALID_REQUEST for malformed or oversized bodies. No detail crosses the wire.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "code", "retryable"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "error" },
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -28,6 +28,8 @@ const TARGETS = [
   { schema: 'dispatch-permit.v1.schema.json', out: 'dispatch-permit.ts' },
   { schema: 'remote-runner.v1.schema.json', out: 'remote-runner.ts' },
   { schema: 'runner-admission.v1.schema.json', out: 'runner-admission.ts' },
+  { schema: 'runner-gateway.v1.schema.json', out: 'runner-gateway.ts' },
+  { schema: 'runner-enrollment.v1.schema.json', out: 'runner-enrollment.ts' },
   { schema: 'codex-output.v1.schema.json', out: 'codex-output.ts' },
   { schema: 'yonwork-output.v1.schema.json', out: 'yonwork-output.ts' },
   { schema: 'mission-plan.v1.schema.json', out: 'mission-plan.ts' },

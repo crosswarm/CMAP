@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/runner-enrollment.v1.schema.json",
+  "title": "RunnerEnrollmentMessageV1",
+  "description": "ADR-0008 §4 runner enrollment. An admin (OIDC role admin) issues a one-time token: tenant comes from the admin's token claims, never from the request; it is bound to owner, a capability ceiling and a risk ceiling, expires within ttl_seconds (at most 3600) and is consumed by the first successful enroll. The token value is returned once and the control plane keeps only its sha256. On first start the runner generates an Ed25519 key pair, keeps the private key on its own host and enrolls with the token, its raw public key and a proof signature; it receives a runner_id plus the control-plane public key to pin for runner-gateway.v1 replies. The enrolled runner's tenant, owner and ceilings come from the token record; nothing in the enroll request can widen them. Revocation is a control-plane record change and takes effect on the next request. Every enroll failure (unknown, expired or used token, bad proof, key already enrolled) is the same ENROLLMENT_DENIED with no detail.",
+  "oneOf": [
+    { "$ref": "#/$defs/issue" },
+    { "$ref": "#/$defs/issued" },
+    { "$ref": "#/$defs/enroll" },
+    { "$ref": "#/$defs/enrolled" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "schemaTag": { "type": "string", "const": "cmap/runner-enrollment/v1" },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s*]+$" },
+    "allowlist": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
+    "risk": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] },
+    "token": {
+      "description": "Opaque one-time secret: cmapenr1. followed by 32 random bytes in base64url.",
+      "type": "string",
+      "pattern": "^cmapenr1\\.[A-Za-z0-9_-]{43}$"
+    },
+    "ed25519PublicKey": {
+      "description": "Raw 32-byte Ed25519 public key, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "issue": {
+      "title": "RunnerEnrollmentIssueV1",
+      "description": "POST /v1/runner-enrollments by an admin.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "owner", "allowed_capabilities", "max_risk", "ttl_seconds"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "issue" },
+        "owner": { "$ref": "#/$defs/identifier" },
+        "allowed_capabilities": { "$ref": "#/$defs/allowlist" },
+        "max_risk": { "$ref": "#/$defs/risk" },
+        "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      }
+    },
+    "issued": {
+      "title": "RunnerEnrollmentIssuedV1",
+      "description": "Reply to issue. token is shown only here; issued_by is the admin token subject.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "token", "token_id", "tenant", "owner", "allowed_capabilities", "max_risk", "issued_by", "expires_at", "single_use"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "issued" },
+        "token": { "$ref": "#/$defs/token" },
+        "token_id": { "$ref": "#/$defs/identifier" },
+        "tenant": { "$ref": "#/$defs/identifier" },
+        "owner": { "$ref": "#/$defs/identifier" },
+        "allowed_capabilities": { "$ref": "#/$defs/allowlist" },
+        "max_risk": { "$ref": "#/$defs/risk" },
+        "issued_by": { "$ref": "#/$defs/identifier" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "single_use": { "type": "boolean", "const": true }
+      }
+    },
+    "enroll": {
+      "title": "RunnerEnrollmentRequestV1",
+      "description": "POST /v1/runners/enroll by the runner (no OIDC token; the enrollment token is the credential). proof is the base64url Ed25519 signature by the new private key over 'cmap-enroll1' LF token LF public_key LF host, proving possession of the key being registered.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "token", "public_key", "host", "proof"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "enroll" },
+        "token": { "$ref": "#/$defs/token" },
+        "public_key": { "$ref": "#/$defs/ed25519PublicKey" },
+        "host": { "$ref": "#/$defs/identifier" },
+        "proof": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+      }
+    },
+    "enrolled": {
+      "title": "RunnerEnrollmentAcceptedV1",
+      "description": "Reply to enroll. Identity and ceilings are copied from the token record. control_plane_public_key is pinned by the runner to verify runner-gateway.v1 replies.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "runner_id", "tenant", "owner", "allowed_capabilities", "max_risk", "control_plane_public_key", "enrolled_at"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "enrolled" },
+        "runner_id": { "$ref": "#/$defs/identifier" },
+        "tenant": { "$ref": "#/$defs/identifier" },
+        "owner": { "$ref": "#/$defs/identifier" },
+        "allowed_capabilities": { "$ref": "#/$defs/allowlist" },
+        "max_risk": { "$ref": "#/$defs/risk" },
+        "control_plane_public_key": { "$ref": "#/$defs/ed25519PublicKey" },
+        "enrolled_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "error": {
+      "title": "RunnerEnrollmentErrorV1",
+      "description": "ENROLLMENT_DENIED for every enroll failure; INVALID_REQUEST for malformed bodies; FORBIDDEN when the issuer lacks the admin role.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "kind", "code", "retryable"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/schemaTag" },
+        "kind": { "type": "string", "const": "error" },
+        "code": { "enum": ["ENROLLMENT_DENIED", "INVALID_REQUEST", "FORBIDDEN"] },
+        "retryable": { "type": "boolean" }
+      }
+    }
+  }
+}
