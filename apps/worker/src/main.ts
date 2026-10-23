@@ -35,6 +35,7 @@ import { parseAdapterNames } from './adapter-config.ts'
 import { buildRunnerDescriptor } from './runner-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
 import { createDagActivities } from '../../../workflows/dag-activities.ts'
+import { dispatchersFromEnv } from '../../../workflows/dispatchers.ts'
 
 const address = process.env['TEMPORAL_ADDRESS'] ?? 'localhost:7233'
 const namespace = process.env['TEMPORAL_NAMESPACE'] ?? 'default'
@@ -133,6 +134,9 @@ for (const [index, descriptor] of descriptors.entries()) {
 }
 const runner = buildRunnerDescriptor(process.env,descriptors)
 
+// ADR-0009 §4 可切换调度者：CMAP_DISPATCHERS=jev,claude；未配置即纯确定性路由
+const dispatchers = dispatchersFromEnv(process.env['CMAP_DISPATCHERS'])
+
 const store = new PgStore({ connectionString, schema })
 // 幂等建表：空库首次启动即可用，不需要额外的迁移步骤。
 await store.migrate()
@@ -165,6 +169,7 @@ const worker = await Worker.create({
       workRoot,
       ...(memory ? { memory } : {}),
       ...(missionCostAlertTokens ? { missionCostAlertTokens: Number(missionCostAlertTokens) } : {}),
+      dispatchers,
     }),
     ...createDagActivities({
       store,
@@ -173,6 +178,7 @@ const worker = await Worker.create({
       signDispatchPermit,
       workRoot,
       ...(memory ? { memory } : {}),
+      dispatchers,
       // ADR-0007 影子模式：未配置策略文件 = 不启用，完全不调用 Jev。
       ...(process.env['CMAP_DELEGATION_POLICY_FILE'] ? { jevShadow: { policyFile: process.env['CMAP_DELEGATION_POLICY_FILE'] } } : {}),
     }),
@@ -192,7 +198,7 @@ process.on('SIGTERM', stop)
 
 console.log(
   `Worker 就绪：temporal=${address} ns=${namespace} queue=${taskQueue} ` +
-    `db.schema=${schema} runner=${runnerId} adapters=${adapters.map(a => a.agentId).join(',')} 工作区=${workRoot} memross=${memory ? memoryUrl : '未配置'}`,
+    `db.schema=${schema} runner=${runnerId} adapters=${adapters.map(a => a.agentId).join(',')} dispatchers=${dispatchers.map(d => d.id).join(',') || '确定性'} 工作区=${workRoot} memross=${memory ? memoryUrl : '未配置'}`,
 )
 
 await worker.run()

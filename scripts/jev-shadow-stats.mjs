@@ -9,7 +9,8 @@ import { pathToFileURL } from 'node:url'
 export async function shadowAgreement(store, tenant) {
   const stats = { total: 0, compared: 0, agree: 0, jev_approve_human_reject: 0 }
   for (const event of await store.listTenantEvents(tenant)) {
-    if (event.event_type !== 'JEV_DECIDED') continue
+    // 只统计审批决定；调度者的分配决定（ADR-0009 §4）与审批无从比较
+    if (event.event_type !== 'JEV_DECIDED' || event.payload?.decision_type === 'routing') continue
     stats.total++
     const approval = await store.getApproval(event.payload?.subject?.approval_id)
     if (approval?.decision !== 'approved' && approval?.decision !== 'rejected') continue

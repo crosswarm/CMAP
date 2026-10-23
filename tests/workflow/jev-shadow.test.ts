@@ -194,15 +194,15 @@ test('确定性兜底落到审批闸口：允许推送一律 route=human、deter
 
 test('当日自动执行预算：按租户与 UTC 日计数 route=auto，达到上限记 budget_exhausted 转人工；确定性兜底优先',async t=>{
   const now=new Date('2026-10-23T12:00:00.000Z')
-  const seed=async(store:MemoryStore,day:string,n:number,tenant='team-ycc')=>{
+  const seed=async(store:MemoryStore,day:string,n:number,tenant='team-ycc',decider?:string)=>{
     const id=`mis-seed-${day}-${n}-${tenant}`
     await store.createMission({mission:{...mission(id),tenant},actor})
     await store.appendEvent({event:{event_type:'JEV_DECIDED',event_version:1,occurred_at:`${day}T00:00:00.500Z`,mission_id:id,task_id:null,attempt:null,
-      actor:{type:'system',id:'jev:seed'},causation_id:null,correlation_id:id,trace_id:null,idempotency_key:`seed-${id}`,payload:{route:'auto',decided_at:`${day}T00:00:00.500Z`}}})
+      actor:{type:'system',id:'jev:seed'},causation_id:null,correlation_id:id,trace_id:null,idempotency_key:`seed-${id}`,payload:{route:'auto',decided_at:`${day}T00:00:00.500Z`,...(decider?{decider}:{})}}})
   }
-  const reasonFor=async(id:string,budget:number,seeds:[string,number,string?][],mode='enforce')=>{
+  const reasonFor=async(id:string,budget:number,seeds:[string,number,string?,string?][],mode='enforce')=>{
     const {store,acts,taskId}=await setup(t,id,{policy:policy({mode,daily_auto_budget:budget}),now})
-    for(const [day,n,tenant] of seeds)for(let i=0;i<n;i++)await seed(store,day,i,tenant)
+    for(const [day,n,tenant,decider] of seeds)for(let i=0;i<n;i++)await seed(store,day,i,tenant,decider)
     await acts.checkDagApproval(taskId)
     const [event]=await jevEvents(store,id)
     assert.equal(event?.payload['route'],'human',id)
@@ -214,6 +214,7 @@ test('当日自动执行预算：按租户与 UTC 日计数 route=auto，达到�
   assert.equal(await reasonFor('mis-bud-yesterday',1,[['2026-10-22',5]]),'shadow_mode','前一 UTC 日不计入')
   assert.equal(await reasonFor('mis-bud-other-tenant',1,[['2026-10-23',5,'other-tenant']]),'shadow_mode','其他租户不计入')
   assert.equal(await reasonFor('mis-bud-shadow-policy',0,[],'shadow'),'shadow_mode','影子策略不涉及预算')
+  assert.equal(await reasonFor('mis-bud-dispatcher',1,[['2026-10-23',3,'team-ycc','claude:m']]),'shadow_mode','调度者分配（ADR-0009 §4）不占委托预算')
   const {store,acts,taskId}=await setup(t,'mis-bud-push',{policy:policy({mode:'enforce',daily_auto_budget:0}),now})
   const getTask=store.getTask.bind(store)
   store.getTask=async id=>{const task=await getTask(id);return task&&{...task,envelope:{...task.envelope,permissions:{...task.envelope.permissions,yonwork:{gateway_control:true}}}}}

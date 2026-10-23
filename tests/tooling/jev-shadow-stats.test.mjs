@@ -30,5 +30,9 @@ test('影子一致率：只比较真人终态（approved/rejected），统计一
       attempt: null, actor: { type: 'system', id: 'jev:test' }, causation_id: null, correlation_id: missionId, trace_id: null,
       idempotency_key: `jev-decided:${id}`, payload: { outcome, subject: { approval_id: id } } } })
   }
+  // 调度者的分配决定（ADR-0009 §4）不计入审批一致率
+  await store.appendEvent({ event: { event_type: 'JEV_DECIDED', event_version: 1, occurred_at: T0, mission_id: 'm1', task_id: 't-route',
+    attempt: null, actor: { type: 'system', id: 'claude:m' }, causation_id: null, correlation_id: 'm1', trace_id: null,
+    idempotency_key: 'jev-routing:t-route', payload: { decision_type: 'routing', outcome: 'assign', decider: 'claude:m', subject: {} } } })
   assert.deepEqual(await shadowAgreement(store, 'local'), { total: 6, compared: 4, agree: 2, jev_approve_human_reject: 1 })
 })

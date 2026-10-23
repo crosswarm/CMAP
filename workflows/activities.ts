@@ -46,6 +46,7 @@ import { cancelMissionTasks, type CancelMissionTasksInput } from './mission-canc
 import { continuationSource, freezeContinuationInputs, registerContinuationInputs } from './mission-continuation.ts'
 import { cancelPendingMissionTasks, type CancelPendingMissionTasksInput } from './mission-pending-cancel.ts'
 import { frozenInputArtifactIds, prepareReviewInputs, verifyReviewInputs } from './review-inputs.ts'
+import { chooseWithDispatchers, type Dispatcher } from './dispatchers.ts'
 export type {CreateTaskInput, CreateTaskOutput} from './task-creation.ts'
 /**
  * Activity 心跳。在真实 Temporal 上下文外（单测直接调用）会抛错，忽略即可——
@@ -153,6 +154,8 @@ export interface ActivityDeps {
   readonly memory?: MemoryDeps
   /** Mission 累计 tokens 超过该值时写一条 MISSION_COST_ALERT。只告警，不阻断执行；不配置则不检查。 */
   readonly missionCostAlertTokens?: number
+  /** ADR-0009 §4 调度者列表（CMAP_DISPATCHERS 顺序）；不配置即纯确定性路由。 */
+  readonly dispatchers?: readonly Dispatcher[]
 }
 
 export interface ApprovalGateOutput {
@@ -310,6 +313,8 @@ export const createActivities = (deps: ActivityDeps) => {
     readonly candidates: readonly RoutingCandidate[]
     readonly decision_ms: number
     readonly runner_id: string
+    /** ADR-0009 §4 在候选内做出选择的调度者（<调度者>:<模型>）；确定性顺序为 null。 */
+    readonly decider: string | null
   }
 
   const selectAdapter = async (task: TaskRecord, excluded: readonly string[] = []): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
@@ -326,7 +331,7 @@ export const createActivities = (deps: ActivityDeps) => {
     const skip = (agent_id: string, adapter_id: string | null, reason: string): void => {
       candidates.push({agent_id, adapter_id, verdict: 'skipped', reason, quota: null, quota_observed_at: null})
     }
-    const decision = (chosen: AgentAdapter | null): RoutingDecision => ({
+    const decision = (chosen: AgentAdapter | null, decider: string | null = null): RoutingDecision => ({
       preferred_agent: policy.preferred_agent ?? null,
       chosen_agent: chosen?.agentId ?? null,
       chosen_adapter: chosen?.adapterId ?? null,
@@ -334,6 +339,7 @@ export const createActivities = (deps: ActivityDeps) => {
       candidates,
       decision_ms: Date.now() - started,
       runner_id: runnerId,
+      decider,
     })
     const risks = ['read-meta', 'read-sensitive', 'controlled', 'mutating']
     // health 带回的账号级额度快照落账（ADR-0009），供路由与审计；没有账号摘要的无从归属，不落账
@@ -383,7 +389,10 @@ export const createActivities = (deps: ActivityDeps) => {
       }
     }
     // 只跳过已知额度不足的候选；额度未知（如 Kimi 无零额度探针）不改变首选顺序，否则替补会抢走首选的任务。
-    for (const {id, matched} of order) {
+    // 配置了调度者（ADR-0009 §4）时探测全部候选，由调度者在合法候选内挑选；否则取第一个合法候选。
+    const dispatchers = deps.dispatchers ?? []
+    const eligible: {adapter: AgentAdapter; supportsWorktreeIsolation: boolean; entry: RoutingCandidate; quota: QuotaSnapshotV1 | undefined}[] = []
+    scan: for (const {id, matched} of order) {
       if (!matched.length) {
         skip(id, null, 'not_registered')
         continue
@@ -411,12 +420,26 @@ export const createActivities = (deps: ActivityDeps) => {
           entry.reason = 'quota_low'
           continue
         }
-        entry.verdict = 'selected'
-        await persistQuota()
-        return {adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, routing: decision(candidate)}
+        eligible.push({adapter: candidate, supportsWorktreeIsolation: verdict.supportsWorktreeIsolation, entry, quota: verdict.quota})
+        if (!dispatchers.length) break scan
       }
     }
     await persistQuota()
+    if (eligible.length) {
+      let pick = eligible[0]!
+      let decider: string | null = null
+      if (eligible.length > 1) {
+        const chosen = await chooseWithDispatchers(store, dispatchers, task, eligible.map(({adapter, entry, quota}) => ({
+          agent_id: adapter.agentId, quota: entry.quota === 'sufficient' ? 'sufficient' : 'unknown',
+          max_used_percent: quota?.status === 'ok' && quota.windows.length ? Math.max(...quota.windows.map((w) => w.used_percent)) : null,
+        })), (q) => quotaVerdict(q) === 'low')
+        pick = eligible.find((e) => e.adapter.agentId === chosen.agentId) ?? pick
+        decider = chosen.agentId ? chosen.decider : null
+        for (const e of eligible) if (e !== pick) e.entry.reason = 'not_chosen'
+      }
+      pick.entry.verdict = 'selected'
+      return {adapter: pick.adapter, supportsWorktreeIsolation: pick.supportsWorktreeIsolation, routing: decision(pick.adapter, decider)}
+    }
     throw Object.assign(new Error(`没有可用 Adapter：${envelope.classification.requested_capability}`), {routing: decision(null)})
   }
 

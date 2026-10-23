@@ -144,7 +144,8 @@ export async function recordJevShadowDecision(store: Store, deps: JevShadowDeps,
       else if (loaded.policy.mode === 'enforce') {
         const day = now.toISOString().slice(0, 10)
         const used = (await store.listTenantEvents(mission.tenant)).filter((e) =>
-          e.event_type === 'JEV_DECIDED' && e.payload['route'] === 'auto' && e.occurred_at.slice(0, 10) === day).length
+          // 调度者的分配决定（ADR-0009 §4，带 decider）不在委托策略之下，不占预算
+          e.event_type === 'JEV_DECIDED' && e.payload['route'] === 'auto' && !e.payload['decider'] && e.occurred_at.slice(0, 10) === day).length
         if (used >= loaded.policy.daily_auto_budget) reason = 'budget_exhausted'
       }
     }

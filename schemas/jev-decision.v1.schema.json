@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cmap.local/schemas/jev-decision/v1",
   "title": "Jev Decision v1",
-  "description": "Jev 在委托策略内做出的一次决定的账本记录（ADR-0007）。有效风险 = max(信封声明风险的下限, 确定性规则, Jev 评估)，只升不降。route=auto 表示控制面已按策略自动执行；高风险、影子模式、Jev 判升级或模型不可用一律 route=human。只存哈希与枚举，不存动作正文、理由原文或原始模型响应。",
+  "description": "Jev 在委托策略内做出的一次决定的账本记录（ADR-0007）。有效风险 = max(信封声明风险的下限, 确定性规则, Jev 评估)，只升不降。route=auto 表示控制面已按策略自动执行；高风险、影子模式、Jev 判升级或模型不可用一律 route=human。只存哈希与枚举，不存动作正文、理由原文或原始模型响应。ADR-0009 §4 可切换调度者的分配决定也用本记录（decision_type=routing，幂等键 jev-routing:<task_id>）：decider 记录由谁决定；授权来源是 Worker 上真人配置的调度者列表（CMAP_DISPATCHERS），policy_id 固定为 pol_cmap_dispatchers、policy_sha256 为该列表的 sha256；调度者只在确定性候选集内挑选，不评估风险，assessed_risk 与 confidence 可为 null；全部调度者不可用时不写 decider、route=human、按确定性顺序派发。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "decision_id", "decision_type", "subject", "policy_id", "policy_sha256", "mode", "input_sha256", "model", "confidence", "declared_risk", "assessed_risk", "effective_risk", "outcome", "route", "reason_code", "decided_at", "elapsed_ms"],
@@ -32,6 +32,7 @@
     "effective_risk": { "enum": ["low", "medium", "high"] },
     "outcome": { "enum": ["approve", "reject", "assign", "retry", "escalate"] },
     "assigned_agent": { "$ref": "#/$defs/identifier" },
+    "decider": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}:[^\\s*]{1,128}$", "description": "ADR-0009 §4 做出本次分配的调度者：<调度者>:<模型版本>，如 jev:jev-1.14.0、claude:claude-sonnet-4-5。" },
     "route": { "enum": ["auto", "human"] },
     "reason_code": { "enum": ["within_policy", "shadow_mode", "assessed_high_risk", "deterministic_high_risk", "below_confidence", "budget_exhausted", "policy_missing", "policy_expired", "policy_scope_mismatch", "jev_unavailable", "jev_invalid_output"] },
     "decided_at": { "type": "string", "format": "date-time" },
@@ -51,7 +52,7 @@
       "then": { "properties": { "effective_risk": { "const": "high" } } }
     },
     {
-      "if": { "properties": { "route": { "const": "auto" } }, "required": ["route"] },
+      "if": { "properties": { "route": { "const": "auto" }, "decider": false }, "required": ["route"] },
       "then": { "properties": {
         "effective_risk": { "enum": ["low", "medium"] },
         "mode": { "const": "enforce" },
@@ -59,6 +60,19 @@
         "model": { "type": "string" },
         "confidence": { "type": "number" },
         "assessed_risk": { "enum": ["low", "medium"] },
+        "reason_code": { "const": "within_policy" }
+      } }
+    },
+    {
+      "if": { "properties": { "decider": { "type": "string" } }, "required": ["decider"] },
+      "then": { "properties": { "decision_type": { "const": "routing" }, "model": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "route": { "const": "auto" }, "decider": { "type": "string" } }, "required": ["route", "decider"] },
+      "then": { "properties": {
+        "mode": { "const": "enforce" },
+        "outcome": { "const": "assign" },
+        "effective_risk": { "enum": ["low", "medium"] },
         "reason_code": { "const": "within_policy" }
       } }
     },

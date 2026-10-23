@@ -65,3 +65,27 @@ test('Jev 决定记录：风险只升不降，高风险与影子模式不得自�
   }
   for (const [name, sample] of Object.entries(bad)) assert.equal(validate(JSON.parse(JSON.stringify(sample))), false, name)
 })
+
+test('ADR-0009 §4 调度者分配：decider 可选，调度者不评估风险；只用于 routing，自动执行仍须在候选内分配且非高风险', () => {
+  const dispatched = {
+    ...routing, policy_id: 'pol_cmap_dispatchers', decider: 'claude:claude-sonnet-4-5', model: 'claude-sonnet-4-5',
+    assessed_risk: null, confidence: null,
+  }
+  for (const ok of [
+    dispatched,
+    { ...dispatched, decider: 'jev:jev-1.14.0', model: 'jev-1.14.0', confidence: 0.7 },
+    { ...dispatched, outcome: 'escalate', assigned_agent: undefined, route: 'human', reason_code: 'jev_invalid_output' },
+    { ...routing, decider: undefined, policy_id: 'pol_cmap_dispatchers', model: null, confidence: null, assessed_risk: null, outcome: 'escalate', assigned_agent: undefined, route: 'human', reason_code: 'jev_unavailable' },
+  ]) assert.equal(validate(JSON.parse(JSON.stringify(ok))), true, JSON.stringify(validate.errors))
+
+  const bad = {
+    '审批不能由调度者决定': { ...approval, decider: 'claude:m' },
+    '调度者没有模型版本': { ...dispatched, model: null },
+    '调度者自动执行却升级': { ...dispatched, outcome: 'escalate' },
+    '调度者自动执行高风险': { ...dispatched, effective_risk: 'high' },
+    '调度者自动执行却在影子模式': { ...dispatched, mode: 'shadow' },
+    'decider 格式不对': { ...dispatched, decider: 'Claude sonnet' },
+    '没有 decider 时仍要求自评风险': { ...dispatched, decider: undefined },
+  }
+  for (const [name, sample] of Object.entries(bad)) assert.equal(validate(JSON.parse(JSON.stringify(sample))), false, name)
+})
