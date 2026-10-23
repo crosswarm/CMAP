@@ -154,7 +154,7 @@
       "先写失败测试：UPDATE/DELETE events 被拒",
       "npm run test:pg 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M09",

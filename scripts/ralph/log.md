@@ -154,3 +154,11 @@
 - `2206fc3` M06 owner 亲和：路由、派发前与 runner 准入三道闸。
 - 主会话验收：`2206fc3` 上 `npm run check` 全过（test 520、api 104、pg 102、workflow 353）；本机两进程模拟（登记、完成、SIGKILL、吊销）通过。
 - 已知：runner 重启不恢复已持有租约（租约过期后判执行不确定）；长轮询每 500 毫秒读库；Worker 本机准入白名单先于路由生效，多用户需列入各 owner。
+
+## M08（通过）；M07、M09 已合入待收尾；M05 两机实测发现缺陷
+
+- `f5157a6` M08 events 只追加：数据库触发器拒绝 UPDATE/DELETE，迁移幂等，TRUNCATE 与 DROP SCHEMA 不受影响；运行账号权限分离列为生产部署项。
+- `d29725b` M07 T12 越权套件逐条覆盖 22 条路由，P4 清单 12 项中 10 项由测试证明（含主会话 2026-10-23 实测 Codex 沙箱挡住回环端口后勾选的 P4-03）；补上取消原因可写入凭据的缺口。P4-05b（运行时读取范围）与 P4-06（推送 main/release/*）为 todo，另有零命中检查未在生产账本运行，故事未通过。
+- `2eefff3` M09 产物流式传输与 sha256 内容寻址存储，>16MiB 产物经监听与网关两种模式本机模拟通过；需先升级控制面再升级 lap，两机复测待 lap 升级。遗留：下发给 runner 的冻结输入仍内联、约 16MiB 上限；进程内 Adapter 的产物不进存储。
+- 生产发布 `8b605ae`（API 网关密钥、Worker 网关 Adapter），`cmap-ops` 服务账号（tenant e2e）。M05 两机出站实测：CrossMini 侧通过（`mis_5075ce32…` COMPLETED，哈希三处一致）；lap 侧在 Node 26（undici 8）下长轮询在途时同源 POST 被排队、签名过期 401，导致 DISPATCH_UNCERTAIN（不改派不重跑），修复进行中。临时白名单与临时 runner 均已恢复和吊销。
+- 主会话验收：`2eefff3` 上 `npm run check` 全过（test 534、api 142 + 2 todo、pg 104、workflow 353）。
