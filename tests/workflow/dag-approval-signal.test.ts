@@ -28,6 +28,7 @@ const activities:DagActivities={
   async runDagAttempt({taskId}){return {outcome:'collected',taskId}},
   async reviewDagAttempt({taskId}){const out:DagNodeOutcome={nodeId:'n1',taskId,attempt:1,status:'accepted'};outcomes.set('n1',out);return out},
   async finishDagNode(input){const out:DagNodeOutcome={...input};outcomes.set(input.nodeId,out);return out},
+  async handoffQuotaExhausted(){throw new Error('unused')},
   async finalizeDagMission(missionId){
     return {missionId,state:'COMPLETED',taskIds:[...outcomes.values()].map(o=>o.taskId!),blockedNodeIds:[],nodeOutcomes:[...outcomes.values()]}
   },

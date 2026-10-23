@@ -64,6 +64,8 @@ export interface DagWorkflowInput {
 
 /** S5 续接：长时间等待时换新历史。旧历史重放时 patched() 为 false，照旧原地 sleep。 */
 const CONTINUE_PATCH='dag-continue-as-new-v1'
+/** Q04 额度续接（ADR-0009 §3）：旧历史里 QUOTA_EXHAUSTED 照旧走评审返工。 */
+const QUOTA_HANDOFF_PATCH='dag-quota-handoff-v1'
 const DEFAULT_MAX_HISTORY=8000
 
 export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWorkflowResult> {
@@ -141,16 +143,25 @@ export async function dagMissionWorkflow(input: DagWorkflowInput): Promise<DagWo
           }
           phase='attempt'
         }
+        let quotaExhausted=false
         for(;;) {
           if(stopping) return stopped()
           const result=await (patched(ATTEMPT_RESUME_PATCH)?resumableAttempt:attempt).runDagAttempt({taskId:current})
-          if(result.outcome==='collected')break
+          if(result.outcome==='collected'){quotaExhausted=result.reason==='QUOTA_EXHAUSTED';break}
           if(result.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'escalated',reason:result.reason??'ATTEMPT_FAILED'})
           if(shouldPark())return park('attempt')
           await sleep('1 second')
         }
         // 取消时不再评审；其余停止原因下，已启动的分支必须完成结果/评审落账。
         if(cancelReason!==undefined)return stopped()
+        // 额度耗尽：派生同轮续接任务重新路由，不评审、不耗返工预算。只在出现 QUOTA_EXHAUSTED 时才查补丁，旧历史不受影响。
+        if(quotaExhausted&&patched(QUOTA_HANDOFF_PATCH)) {
+          const handoff=await acts.handoffQuotaExhausted({taskId:current})
+          if(handoff.outcome==='escalated')return acts.finishDagNode({missionId,nodeId:node.node_id,taskId:current,status:'escalated',reason:handoff.reason})
+          taskId=handoff.taskId
+          phase='approval'
+          continue
+        }
         const reviewed=await acts.reviewDagAttempt({taskId:current,...(previousProgress?{previousProgress}:{})})
         if(reviewed.status==='accepted'){
           await sideEffect(async()=>{if(patched(KNOWLEDGE_PATCH))await writeback.proposeTaskKnowledge({missionId,taskId:current})})

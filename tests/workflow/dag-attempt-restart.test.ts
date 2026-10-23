@@ -176,6 +176,8 @@ describe('dagMissionWorkflow 重启恢复（Temporal）', () => {
         of(taskId).outcomes.push(out)
         return out
       },
+      // 本文件不产生 QUOTA_EXHAUSTED，Workflow 不会调用续接
+      async handoffQuotaExhausted() { throw new Error('unused') },
       async finishDagNode(input) {
         const out: DagNodeOutcome = { ...input }
         runs.get(input.missionId)!.outcomes.push(out)

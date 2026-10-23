@@ -60,6 +60,7 @@ function harness(id:string, mode:'normal'|'rework'|'failure') {
       return result
     },
     async finishDagNode(input){const result:DagNodeOutcome={...input};outcomes.set(input.nodeId,result);return result},
+    async handoffQuotaExhausted(){throw new Error('unused')},
     async finalizeDagMission(){
       assert.equal(active,0,'finalize must await already-started branches')
       return {missionId:id,state:[...outcomes.values()].some(o=>o.status==='escalated')?'ESCALATED':'COMPLETED',taskIds:[...tasks.keys()],blockedNodeIds:nodes.filter(n=>!outcomes.has(n.node_id)).map(n=>n.node_id),nodeOutcomes:[...outcomes.values()]}

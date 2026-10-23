@@ -38,6 +38,7 @@ function harness(id:string,waits:number){
       outcomes.set(nodeId,out);return out
     },
     async finishDagNode(input){const out:DagNodeOutcome={...input};outcomes.set(input.nodeId,out);return out},
+    async handoffQuotaExhausted(){throw new Error('unused')},
     async finalizeDagMission(){
       return {missionId:id,state:'COMPLETED',taskIds:[...outcomes.values()].map(o=>o.taskId!).sort(),blockedNodeIds:[],nodeOutcomes:[...outcomes.values()]}
     },

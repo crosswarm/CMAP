@@ -143,6 +143,8 @@ export const EVENT_TYPES = [
   'APPROVAL_DENIED',
   /** ADR-0007 Jev 决定（payload 为 jev-decision.v1）。影子模式只记录，不改审批或任务状态。 */
   'JEV_DECIDED',
+  /** ADR-0009 §3 额度续接（payload 为 quota-handoff.v1）：原任务 QUOTA_EXHAUSTED 后派生的同轮续接任务。 */
+  'QUOTA_HANDOFF',
   'HARD_GATE_EVALUATED',
   'REVIEW_STARTED',
   'REVIEW_APPLICATION_INTENT',

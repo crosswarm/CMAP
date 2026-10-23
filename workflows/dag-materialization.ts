@@ -19,7 +19,8 @@ import {
 import { preflightTaskAdmission, type AdmissionDenial } from './runner-admission.ts'
 import type { TaskEnvelopeV1 } from '#domain-model'
 import type { MissionPlanV1 } from '../packages/domain-model/src/generated/mission-plan.ts'
-import { INPUT_PAYLOAD, safeChildDir, safeMkdir, publishInput, verifiedArtifactBytes } from './artifact-files.ts'
+import { INPUT_PAYLOAD, existingChildDir, safeChildDir, safeMkdir, publishInput, verifiedArtifactBytes } from './artifact-files.ts'
+import { WORKSPACE_SNAPSHOT_ROLE, packWorkspace, unpackWorkspace } from './workspace-snapshot.ts'
 import { MEMORY_ROLE, freezeMemoryInput, registerMemoryArtifact, type FrozenInputRef, type MemoryDeps } from './memory-context.ts'
 import { artifactShareable, resolveReviewInputRef } from './review-inputs.ts'
 import { continuationSource, freezeContinuationInputs, registerContinuationInputs } from './mission-continuation.ts'
@@ -76,8 +77,21 @@ export const getDagMission = async (
   return { mission, plan: planFromMission(mission) }
 }
 
-export const dagTaskId = (missionId: string, nodeId: string, attempt: number): string => {
-  return `dag_${hash(JSON.stringify([missionId, nodeId, attempt])).slice(0, 40)}`
+/** handoff>0 为额度续接任务（ADR-0009 §3）：与原任务同轮，按节点内续接序号另取 ID；0 保持原有 ID 不变。 */
+export const dagTaskId = (missionId: string, nodeId: string, attempt: number, handoff = 0): string => {
+  return `dag_${hash(JSON.stringify(handoff ? [missionId, nodeId, attempt, 'quota-handoff', handoff] : [missionId, nodeId, attempt])).slice(0, 40)}`
+}
+
+const idempotencyKey = (missionId: string, nodeId: string, attempt: number, handoff = 0): string =>
+  `${missionId}:${nodeId}:${attempt}${handoff ? `:quota-handoff:${handoff}` : ''}`
+
+/** 信封幂等键里的续接序号：0 为普通轮次任务，null 为不认识的键。 */
+const handoffIndexOf = (mission: Mission, node: DagNode, task: TaskRecord): number | null => {
+  const base = idempotencyKey(mission.id, node.node_id, task.attempt)
+  const key = task.envelope.identity.idempotency_key
+  if (key === base) return 0
+  const index = key.startsWith(`${base}:quota-handoff:`) ? Number(key.slice(base.length + ':quota-handoff:'.length)) : NaN
+  return Number.isSafeInteger(index) && index >= 1 && key === idempotencyKey(mission.id, node.node_id, task.attempt, index) ? index : null
 }
 
 const nodeById = (plan: MissionPlanV1, nodeId: string): DagNode => {
@@ -87,7 +101,8 @@ const nodeById = (plan: MissionPlanV1, nodeId: string): DagNode => {
 }
 
 const assertEnvelopeMatchesNode = (mission: Mission, node: DagNode, task: TaskRecord): boolean => {
-  if (task.id !== dagTaskId(mission.id, node.node_id, task.attempt)) return false
+  const handoff = handoffIndexOf(mission, node, task)
+  if (handoff === null || task.id !== dagTaskId(mission.id, node.node_id, task.attempt, handoff)) return false
   if (task.envelope.identity.plan_node_id !== node.node_id) return false
   if (task.envelope.identity.task_id !== task.id) return false
   if (task.envelope.identity.revision !== task.attempt) return false
@@ -218,11 +233,14 @@ const assertAttempt = async (
     return
   }
   const expectedPrior = dagTaskId(mission.id, node.node_id, attempt - 1)
-  if (supersedesTaskId !== expectedPrior) {
+  // 上一轮也可能由额度续接任务收尾：它与原任务同轮，ID 另取（返工证明仍由 reworkedDagAttempt 判定）
+  const prior = supersedesTaskId && supersedesTaskId !== expectedPrior ? await store.getTask(supersedesTaskId) : null
+  const handoffPrior = prior?.attempt === attempt - 1 && (handoffIndexOf(mission, node, prior) ?? 0) > 0
+  if (supersedesTaskId !== expectedPrior && !handoffPrior) {
     throw new Error(`DAG supersedes must reference prior same-node attempt: ${expectedPrior}`)
   }
-  if (!(await reworkedDagAttempt(store, mission, node, expectedPrior))) {
-    throw new Error(`DAG prior attempt must be a completed rework: ${expectedPrior}`)
+  if (!(await reworkedDagAttempt(store, mission, node, supersedesTaskId!))) {
+    throw new Error(`DAG prior attempt must be a completed rework: ${supersedesTaskId}`)
   }
 }
 
@@ -296,6 +314,7 @@ const buildEnvelope = (
   artifactRefs: NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs'],
   supersedesTaskId?: string,
   previousAttempt?: PreviousAttempt,
+  handoff = 0,
 ): TaskEnvelopeV1 => ({
   schema: 'cmap/task-envelope/v1',
   identity: {
@@ -303,7 +322,7 @@ const buildEnvelope = (
     task_id: taskId,
     plan_node_id: node.node_id,
     ...(supersedesTaskId ? { supersedes_task_id: supersedesTaskId } : {}),
-    idempotency_key: `${mission.id}:${node.node_id}:${attempt}`,
+    idempotency_key: idempotencyKey(mission.id, node.node_id, attempt, handoff),
     revision: attempt,
     tenant: mission.tenant,
     owner: mission.owner,
@@ -346,6 +365,7 @@ const createDagTask = async (
   artifactRefs: NonNullable<TaskEnvelopeV1['inputs']>['artifact_refs'],
   supersedesTaskId?: string,
   previousAttempt?: PreviousAttempt,
+  handoff = 0,
 ): Promise<void> => {
   const now = new Date().toISOString()
   await store.createTask({
@@ -360,7 +380,7 @@ const createDagTask = async (
       attempt,
       max_attempts: 1,
       lamport: 0,
-      envelope: buildEnvelope(mission, node, taskId, attempt, deps, artifactRefs, supersedesTaskId, previousAttempt),
+      envelope: buildEnvelope(mission, node, taskId, attempt, deps, artifactRefs, supersedesTaskId, previousAttempt, handoff),
       result: null,
       binding: null,
       deps,
@@ -493,4 +513,92 @@ export const materializeDagNode = async (
   if (memory) await registerMemoryArtifact(deps.store, { missionId: mission.id, taskId, ref: memory.ref, projectId: memory.projectId, sizeBytes: memory.sizeBytes })
   if (source) await registerContinuationInputs(deps.store, deps.workRoot, mission, source, taskId, continuation)
   return { taskId }
+}
+
+const QUOTA_HANDOFF_PRODUCER = 'cmap-quota-handoff'
+const RETENTION_MS = 365 * 24 * 3600 * 1000
+
+export interface WorkspaceSnapshotRecord {
+  readonly artifact_id: string
+  readonly sha256: string
+  readonly size_bytes: number
+  readonly file_count: number
+}
+
+/** 原工作区打包为冻结输入并在新工作区解包；重试时同一工作区打包出同一份字节。 */
+const freezeWorkspaceSnapshot = async (workRoot: string, fromTaskId: string, taskId: string): Promise<ArtifactRefs[number]> => {
+  const { child: source } = await existingChildDir(workRoot, fromTaskId)
+  const { child } = await safeChildDir(workRoot, taskId)
+  const { bytes } = await packWorkspace(source)
+  const artifactId = `art_qh_${hash(JSON.stringify([taskId, WORKSPACE_SNAPSHOT_ROLE])).slice(0, 32)}`
+  await publishInput(await safeMkdir(child, ['inputs', 'quota-handoff', hash(artifactId)]), bytes)
+  await unpackWorkspace(child, bytes)
+  return { artifact_id: artifactId, uri: join('inputs', 'quota-handoff', hash(artifactId), INPUT_PAYLOAD), role: WORKSPACE_SNAPSHOT_ROLE, sha256: hash(bytes) }
+}
+
+/**
+ * 额度续接任务（ADR-0009 §3）：与原任务同轮、supersedes 指向原任务，不消耗返工预算。
+ * 依赖产物重新复制；原任务已复核的结果产物与收到的其他冻结输入经 review input 交付（不可共享的跳过）；
+ * previous_attempt 记录 QUOTA_EXHAUSTED 失败原因并保留原任务自身的返工事实。
+ * snapshot 为真（写副作用级）时以原工作区快照为冻结输入，不共享可写工作区。重试沿用已入账信封里的引用。
+ */
+export const materializeQuotaHandoff = async (
+  deps: { store: Store; workRoot: string },
+  input: { from: TaskRecord; handoff: number; reason: string; snapshot: boolean },
+): Promise<{ taskId: string; snapshot: WorkspaceSnapshotRecord | null }> => {
+  const { from } = input
+  const { mission, plan } = await getDagMission(deps.store, from.mission_id)
+  const node = nodeById(plan, from.envelope.identity.plan_node_id ?? '')
+  if (!assertEnvelopeMatchesNode(mission, node, from) || !Number.isSafeInteger(input.handoff) || input.handoff < 1) {
+    throw new Error('DAG quota handoff source does not match node')
+  }
+  const taskId = dagTaskId(mission.id, node.node_id, from.attempt, input.handoff)
+  const existing = await deps.store.getTask(taskId)
+  if (existing && (existing.supersedes_task_id !== from.id || !assertEnvelopeMatchesNode(mission, node, existing))) {
+    throw new Error('DAG quota handoff task mismatch')
+  }
+  let refs: ArtifactRefs = [...(existing?.envelope.inputs?.artifact_refs ?? [])]
+  if (!existing) {
+    const acceptedDeps = Object.fromEntries(node.deps.map((dep, i) => [dep, from.deps[i]!]))
+    const copied = (await copyParentArtifacts(deps.store, mission.id, deps.workRoot, taskId, acceptedDeps, node.deps)) ?? []
+    refs = [...copied]
+    if (usesWorkspace(node)) {
+      const ids = new Set([...(from.result?.artifacts ?? []).map((a) => a.artifact_id), ...(from.envelope.inputs?.artifact_refs ?? []).map((r) => r.artifact_id)])
+      for (const id of ids) {
+        if (copied.some((c) => c.artifact_id === id)) continue
+        try { refs.push(await resolveReviewInputRef(deps.store, mission.id, id)) }
+        catch (error) { if (!(error instanceof RunnerAdmissionError)) throw error }
+      }
+      if (input.snapshot) refs.push(await freezeWorkspaceSnapshot(deps.workRoot, from.id, taskId))
+    }
+  }
+  const snapshotRef = refs.find((r) => r.role === WORKSPACE_SNAPSHOT_ROLE && !Object.hasOwn(r, 'source_task_id'))
+  if (input.snapshot && !snapshotRef) throw new Error('DAG quota handoff snapshot missing')
+  const { child } = await safeChildDir(deps.workRoot, taskId)
+  // 与 Agent 侧同一道复核：路径不越界、散列一致、不含已知凭据模式。先于入账，坏快照不产生任务。
+  const verified = snapshotRef ? await readVerifiedArtifact(child, { uri: snapshotRef.uri!, role: snapshotRef.role, sha256: snapshotRef.sha256! }) : undefined
+  if (!existing) {
+    const prior = from.envelope.inputs?.previous_attempt
+    await createDagTask(deps.store, mission, node, taskId, from.attempt, from.deps, refs, from.id, {
+      supersedes_task_id: from.id,
+      ...(prior?.review_round ? { review_round: prior.review_round } : {}),
+      failed_criteria: [{ criterion_id: 'TASK-STATUS', expected: 'status = completed', actual: 'status = failed', reason: input.reason }, ...(prior?.failed_criteria ?? [])],
+      ...(prior?.focus?.length ? { focus: [...prior.focus] } : {}),
+    }, input.handoff)
+  }
+  if (!snapshotRef || !verified) return { taskId, snapshot: null }
+  if (!(await deps.store.listArtifacts(taskId)).some((a) => a.artifact_id === snapshotRef.artifact_id)) {
+    const now = new Date()
+    await deps.store.putArtifact({
+      artifact_id: snapshotRef.artifact_id, mission_id: mission.id, task_id: taskId, role: WORKSPACE_SNAPSHOT_ROLE, uri: snapshotRef.uri!,
+      media_type: 'application/json', size_bytes: verified.bytes.length, sha256: verified.sha256, version: 1, state: 'AVAILABLE',
+      producer: { agent_id: QUOTA_HANDOFF_PRODUCER, adapter_version: 'quota-handoff/v1', execution_session_id: from.id },
+      provenance: { source: 'quota_handoff', source_task_id: from.id },
+      retention: { retain_until: new Date(now.getTime() + RETENTION_MS).toISOString(), immutable: true },
+      security: { classification: 'internal', contains_secrets: false, contains_pii: false, allowed_roles: [] },
+      created_at: now.toISOString(),
+    })
+  }
+  const fileCount = (JSON.parse(verified.bytes.toString('utf8')) as { files: unknown[] }).files.length
+  return { taskId, snapshot: { artifact_id: snapshotRef.artifact_id, sha256: verified.sha256, size_bytes: verified.bytes.length, file_count: fileCount } }
 }

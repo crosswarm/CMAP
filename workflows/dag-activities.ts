@@ -17,8 +17,17 @@ import {
   dagAttemptSatisfiesNode,
   getDagMission,
   materializeDagNode as materializeDagTask,
+  materializeQuotaHandoff,
 } from './dag-materialization.ts'
 import type { MissionPlanV1 } from '../packages/domain-model/src/generated/mission-plan.ts'
+import type { QuotaHandoffV1 } from '../packages/domain-model/src/generated/quota-handoff.ts'
+import { readFileSync } from 'node:fs'
+import { Ajv2020 } from 'ajv/dist/2020.js'
+import addFormats from 'ajv-formats'
+
+const ajv = new Ajv2020({ strict: true })
+addFormats.default(ajv)
+const validateHandoff = ajv.compile<QuotaHandoffV1>(JSON.parse(readFileSync(new URL('../schemas/quota-handoff.v1.schema.json', import.meta.url), 'utf8')))
 
 type DagNode = MissionPlanV1['nodes'][number]
 
@@ -288,6 +297,9 @@ export const createDagActivities = (deps: ActivityDeps & {
   const base = createActivities(deps)
   const runAttempt = createDagAttemptRunner(deps)
   const adapters = deps.adapters ?? (deps.adapter ? [deps.adapter] : [])
+  // ADR-0009 §3：每个节点的额度续接次数上限，默认 2，超限升级给人
+  const quotaHandoffLimit = Number(process.env['CMAP_QUOTA_HANDOFF_LIMIT'] ?? 2)
+  if (!Number.isSafeInteger(quotaHandoffLimit) || quotaHandoffLimit < 0) throw new Error('CMAP_QUOTA_HANDOFF_LIMIT 须为非负整数')
 
   return {
     async loadDagSchedule(missionId: string): Promise<{
@@ -331,10 +343,61 @@ export const createDagActivities = (deps: ActivityDeps & {
         }
       }
       try {
-        return await runAttempt(input)
+        const out = await runAttempt(input)
+        // Adapter 明确分类的额度耗尽交给 Workflow 决定是否续接（ADR-0009 §3）；其余收到的结果照常评审
+        if (out.outcome === 'collected' && (await store.getTask(input.taskId))?.result?.error?.code === 'QUOTA_EXHAUSTED') {
+          return { ...out, reason: 'QUOTA_EXHAUSTED' }
+        }
+        return out
       } catch (error) {
         throw ApplicationFailure.fromError(error, { nonRetryable: true })
       }
+    },
+
+    /**
+     * 额度续接（ADR-0009 §3）：原任务落 FAILED_TERMINAL，派生同轮续接任务并记 QUOTA_HANDOFF；可重复执行。
+     * 每个节点续接次数达上限即升级。有写副作用的先复核原 Agent 已退出（结果已落账 + Adapter 观测到终态），
+     * 否则不续接。续接任务派发时排除原 Agent 及本链路此前触顶的 Agent（见 dispatchTask）。
+     */
+    async handoffQuotaExhausted(input: { taskId: string }): Promise<{ outcome: 'handoff'; taskId: string } | { outcome: 'escalated'; reason: string }> {
+      const from = await store.getTask(input.taskId)
+      if (!from?.binding || from.result?.error?.code !== 'QUOTA_EXHAUSTED') throw new Error(`任务 ${input.taskId} 不是以 QUOTA_EXHAUSTED 结束的已派发任务`)
+      const nodeId = nodeIdOf(from)
+      const key = `quota-handoff:${from.id}`
+      const handoffs = (await store.listEvents(from.mission_id)).filter((e) => e.event_type === 'QUOTA_HANDOFF' && e.payload['node_id'] === nodeId)
+      const done = handoffs.find((e) => e.idempotency_key === key)
+      if (done) return { outcome: 'handoff', taskId: done.payload['to_task_id'] as string }
+      await toFailedTerminal(store, from.id, 'QUOTA_EXHAUSTED')
+      if (handoffs.length >= quotaHandoffLimit) return { outcome: 'escalated', reason: 'QUOTA_HANDOFF_LIMIT' }
+      const adapter = adapterForBinding(adapters, from.binding)
+      if (!adapter) return { outcome: 'escalated', reason: 'ADAPTER_UNAVAILABLE' }
+      const write = from.risk === 'controlled' || from.risk === 'mutating'
+      let exitProof: QuotaHandoffV1['exit_proof'] = null
+      if (write) {
+        const status = await adapter.getStatus(from.binding).catch(() => null)
+        if (!status?.terminal_observed || !['completed', 'failed', 'canceled'].includes(status.status)) {
+          return { outcome: 'escalated', reason: 'QUOTA_HANDOFF_EXIT_UNCONFIRMED' }
+        }
+        exitProof = { result_recorded: true, terminal_observed: true, status: status.status as 'completed' | 'failed' | 'canceled', observed_at: status.at }
+      }
+      const inbound = handoffs.find((e) => e.payload['to_task_id'] === from.id)?.payload['excluded_agents'] as string[] | undefined
+      const created = await materializeQuotaHandoff({ store, workRoot: deps.workRoot }, {
+        from, handoff: handoffs.length + 1, snapshot: write,
+        reason: `QUOTA_EXHAUSTED：原 Agent ${adapter.agentId} 额度耗尽已停止，本任务在同一轮次续接，不计入返工轮次`,
+      })
+      const payload: QuotaHandoffV1 = {
+        schema: 'cmap/quota-handoff/v1', node_id: nodeId, from_task_id: from.id, to_task_id: created.taskId,
+        handoff_index: handoffs.length + 1, from_agent: adapter.agentId,
+        excluded_agents: [...new Set([...(inbound ?? []), adapter.agentId])] as QuotaHandoffV1['excluded_agents'],
+        risk_level: from.risk, workspace: write ? 'snapshot' : 'fresh', snapshot: created.snapshot, exit_proof: exitProof,
+      }
+      if (!validateHandoff(payload)) throw new Error('QUOTA_HANDOFF 记录不符合 quota-handoff v1')
+      await store.appendEvent({ event: {
+        event_type: 'QUOTA_HANDOFF', event_version: 1, occurred_at: now(), mission_id: from.mission_id, task_id: created.taskId,
+        attempt: from.attempt, actor: ACTOR, causation_id: null, correlation_id: from.mission_id, trace_id: from.id,
+        idempotency_key: key, payload: payload as unknown as Record<string, unknown>,
+      } })
+      return { outcome: 'handoff', taskId: created.taskId }
     },
 
     async checkDagApproval(taskId: string): Promise<{ decision: 'approved' | 'pending' | 'rejected' }> {

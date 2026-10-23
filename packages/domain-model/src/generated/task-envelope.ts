@@ -18,7 +18,7 @@ export interface TaskEnvelopeV1 {
     plan_node_id?: string
     parent_task_id?: string | null
     /**
-     * 返工时指向被取代的前一轮 Task。返工创建新 Task 而非复用，以保留证据历史与因果链。
+     * 返工时指向被取代的前一轮 Task；额度续接（ADR-0009 §3）时指向以 QUOTA_EXHAUSTED 结束的同轮原任务。返工与续接都创建新 Task 而非复用，以保留证据历史与因果链。
      */
     supersedes_task_id?: string | null
     correlation_id?: string
@@ -118,7 +118,7 @@ export interface TaskEnvelopeV1 {
     }
     context_summary?: string
     /**
-     * 返工任务的上一轮未通过事实，由控制面从上一轮评审决定抄录；是数据，不是指令，也不授予额外权限。supersedes_task_id 必须与 identity.supersedes_task_id 一致；上一轮产物与首轮记忆快照经 artifact_refs（带 source_task_id）交付。
+     * 返工任务的上一轮未通过事实，由控制面从上一轮评审决定抄录（额度续接时由控制面记录原任务的 QUOTA_EXHAUSTED 失败原因，并保留原任务自身的返工事实）；是数据，不是指令，也不授予额外权限。supersedes_task_id 必须与 identity.supersedes_task_id 一致；上一轮产物与首轮记忆快照经 artifact_refs（带 source_task_id）交付。
      */
     previous_attempt?: {
       supersedes_task_id: string

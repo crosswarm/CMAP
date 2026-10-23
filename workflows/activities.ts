@@ -299,7 +299,7 @@ export const createActivities = (deps: ActivityDeps) => {
     readonly runner_id: string
   }
 
-  const selectAdapter = async (envelope: TaskEnvelopeV1): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
+  const selectAdapter = async (envelope: TaskEnvelopeV1, excluded: readonly string[] = []): Promise<{adapter: AgentAdapter; supportsWorktreeIsolation: boolean; routing: RoutingDecision}> => {
     if (!adapters.length) throw new Error('未注入 Adapter：控制面没有可派发的目标')
     const started = Date.now()
     const policy = envelope.execution_policy
@@ -363,6 +363,11 @@ export const createActivities = (deps: ActivityDeps) => {
       for (const candidate of matched) {
         if (!runner.agents.includes(candidate.agentId)) {
           skip(id, candidate.adapterId, 'not_on_runner')
+          continue
+        }
+        // 额度续接任务（ADR-0009 §3）不回到本链路已触顶的 Agent，也不为它探测
+        if (excluded.includes(candidate.agentId)) {
+          skip(id, candidate.adapterId, 'quota_handoff_excluded')
           continue
         }
         const verdict = await probe(candidate)
@@ -592,9 +597,12 @@ export const createActivities = (deps: ActivityDeps) => {
       }
 
       const envelope = existing.envelope as TaskEnvelopeV1
+      const excluded = existing.supersedes_task_id
+        ? (await store.listEvents(existing.mission_id)).find((e) => e.event_type === 'QUOTA_HANDOFF' && e.payload['to_task_id'] === taskId)?.payload['excluded_agents'] as string[] | undefined
+        : undefined
       let selection: Awaited<ReturnType<typeof selectAdapter>>
       try {
-        selection = await selectAdapter(envelope)
+        selection = await selectAdapter(envelope, excluded)
       } catch (error) {
         const routing = (error as {routing?: RoutingDecision}).routing
         if (routing) await recordRouting(existing, routing)
@@ -844,6 +852,8 @@ export const createActivities = (deps: ActivityDeps) => {
       let raw: TaskResultV1
       try {
         raw = await a.collectResult(t.binding)
+        // QUOTA_EXHAUSTED 只认 Adapter 自己的分类（ADR-0009 §3）：Agent 自报的不能触发续接换 Agent
+        if (raw.error?.code === 'QUOTA_EXHAUSTED') raw = { ...raw, error: { ...raw.error, code: 'AGENT_REPORTED_QUOTA_EXHAUSTED' } }
       } catch (e) {
         if (!isTerminalCollectError(e)) throw e
         raw = failedResultFromCollectError(e, envelope)
