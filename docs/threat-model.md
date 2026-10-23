@@ -146,7 +146,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 | `.gitignore` 排除 `.env`、`*.pem`、`*.key` | ✅ 已实现 |
 | 提供方子进程与健康探测过滤控制面环境 | 🟡 本机白名单及真实包装器核验通过；保留明确的提供方自身凭据，不等于完整主机文件/网络隔离 |
 | Artifact 静态加密 + 保留期 | ⬜ P4 |
-| 审计流与 Artifact 的凭据扫描（应零命中） | 🟡 新结果与证据接收/复制已知模式门禁已覆盖；历史审计流、编码/二进制内容和完整 DLP 仍待 P4 验收 |
+| 审计流与 Artifact 的凭据扫描（应零命中） | 🟡 新结果与证据接收/复制已知模式门禁已覆盖；取消原因（用户填写、原样进事件）命中已知模式即 400 拒收。`scripts/p4-zero-hit.ts` 可对账本 events 与已登记产物字节重复扫描（凭据、派发许可、注册令牌、提示词数据区块），只报来源/id/标签；`tests/api/p4-acceptance.test.ts` 在合成派发链路上验证零命中并有正向对照。**尚未对生产账本运行**；编码/二进制内容和完整 DLP 仍未覆盖 |
 
 ### T7 — 路径逃逸与越权读取
 
@@ -214,9 +214,9 @@ A 租户读到 B 租户的任务、证据或审计记录。
 | 缓解 | 状态 |
 |---|---|
 | `tenant` / `owner` 字段贯穿信封与账本 | ✅ 已写入 |
-| 查询层强制租户过滤 | ⬜ P4 |
+| 查询层强制租户过滤 | 🟡 API 层统一过滤：按 id 的读写先经 Mission 归属核对，跨租户一律 404；列表与事件流按 token 租户查询。Store 接口层**未**强制带 tenant（按 Mission/任务/审批/产物/事件的方法有数百个 Workflow 内部调用点，本轮未改签名），所以新入口仍须自己过滤，由下一行的越权套件兜底 |
 | Artifact 访问按 `allowed_roles` 授权 | 🟡 类型已定义 |
-| 越权用例测试套件 | ⬜ P4 验收项 |
+| 越权用例测试套件 | ✅ `tests/api/p4-acceptance.test.ts`「T12 越权套件」：OIDC 模式真实 HTTP，对 API 路由表逐条用他租户的 Mission/任务/审批/产物/runner 断言 404 或不出现在列表里（owner 相同也不放行）；用例键须与路由表一致，新增路由不补用例即失败。runner 网关路由按 runner 登记身份隔离（他人租约 `LEASE_UNKNOWN`，store-contract）；`/v1/quota-snapshots` 是账号级、不分租户（ADR-0009 §5），只断言不含 Mission/任务数据 |
 
 ### T13 — 哑资源的独占失效（脑裂）
 
@@ -284,20 +284,22 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 以下用例**必须全部拒绝**，任一放行即阻塞上线：
 
-- [ ] 非授权 tenant 提交任务
-- [ ] runner 收到白名单外 owner 的任务
-- [ ] Agent 尝试自批授权
-- [ ] `controlled` 的批准放行了同批次 `mutating` 任务
-- [ ] 任务读取 `context.paths` 声明外的路径
-- [ ] Agent 推送 `main` 或 `release/*`
-- [ ] 结果中的 `task_id` 与派发信封不符
-- [ ] Agent 自报哈希与文件实际内容不符
-- [ ] 声明的证据文件不存在却判定成功
-- [ ] 令牌用于非签发受众
-- [ ] 过期令牌仍被接受
-- [ ] 重复回调产生重复 Artifact 或重复 Task
+自动化见 `tests/api/p4-acceptance.test.ts`（`npm run test:api`），每项在真实执行点触发一次拒绝并注明更深入的既有测试；未覆盖项是 `test.todo`，不计通过。勾选只表示拒绝已自动化验证，不表示上线闸口已过。
 
-以下检查**必须零命中**：
+- [x] 非授权 tenant 提交任务（P4-01：tenant 只取 token，缺 claim 403、请求体自报 400；runner 准入 `TENANT_DENIED`）
+- [x] runner 收到白名单外 owner 的任务（P4-02：`OWNER_DENIED`；网关路由另有 owner 亲和）
+- [ ] Agent 尝试自批授权（P4-03 🟡：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 已验证、Codex 回环端口未核实，见 T4）
+- [x] `controlled` 的批准放行了同批次 `mutating` 任务（P4-04：mutating 无自身审批或审批 scope 不符即 `APPROVAL_INVALID`）
+- [ ] 任务读取 `context.paths` 声明外的路径（P4-05a：契约拒绝绝对路径与 `..`；P4-05b **未覆盖**：运行时没有读取范围校验，codex 沙箱不限制读取，见 T7）
+- [ ] Agent 推送 `main` 或 `release/*`（P4-06 **未覆盖**：`deny_push` 只是信封字段，CMAP 无强制执行点，见 T1）
+- [x] 结果中的 `task_id` 与派发信封不符（P4-07：Agent 输出带身份字段 `RESULT_INVALID`，身份取自信封；网关回报他任务 `INVALID_REQUEST`、他 runner `LEASE_UNKNOWN`）
+- [x] Agent 自报哈希与文件实际内容不符（P4-08：`EVIDENCE_HASH_MISMATCH`）
+- [x] 声明的证据文件不存在却判定成功（P4-09：`EVIDENCE_FILE_MISSING`；缺必需角色改判 failed）
+- [x] 令牌用于非签发受众（P4-10：派发许可换 runner/Adapter/任务 `CLAIM_MISMATCH`；OIDC 错 aud 401；runner 请求签名受众不符拒绝）
+- [x] 过期令牌仍被接受（P4-11：派发许可 `EXPIRED`、OIDC 过期 401、注册令牌过期不登记、网关请求超出 ±2 秒窗口拒绝）
+- [x] 重复回调产生重复 Artifact 或重复 Task（P4-12：重复派发/收取只调用一次、证据一条；网关终态重复回报 `LEASE_UNKNOWN` 且不改已落账结果）
+
+以下检查**必须零命中**（`scripts/p4-zero-hit.ts`，零命中退出 0；合成链路上的验证见上述测试文件 Z1/Z2。尚未对生产账本运行，故不勾选）：
 
 - [ ] 审计流中 grep 凭据模式
 - [ ] Artifact 中 grep 提示词正文与 token

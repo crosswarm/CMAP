@@ -26,6 +26,7 @@ import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/gen
 import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/generated/control-plane-context.ts'
 import { createOidcVerifier, OidcError, type OidcConfig, type OidcRole } from './oidc.ts'
 import { createRunnerGateway, type RunnerGatewayOptions } from './gateway.ts'
+import { hasKnownSecret } from '../../../packages/adapter-sdk/src/secret-patterns.ts'
 
 export interface ControlPlaneOptions {
   readonly store: Store
@@ -469,7 +470,8 @@ const serveStatic = async (ctx: Omit<Ctx, 'params'>, path: string): Promise<bool
   return true
 }
 
-const routes: readonly Route[] = [
+/** 导出只为越权测试逐路由核对租户隔离（tests/api/p4-acceptance.test.ts）。 */
+export const routes: readonly Route[] = [
   {
     method: 'GET',
     pattern: '/v1/context',
@@ -538,6 +540,8 @@ const routes: readonly Route[] = [
       if (lacksRole(ctx, 'operator')) return fail(ctx.res, 403, '取消 Mission 需要 operator 角色')
       const body = await readBody(ctx.req)
       if (!validateMissionCancel(body)) return fail(ctx.res, 400, '请求不符合 mission-cancel v1：reason 必填（1–500 字）')
+      // 原因进审计流：命中已知凭据模式即拒收，审计流不得出现凭据（威胁模型 P4 零命中检查）
+      if (hasKnownSecret(body.reason)) return fail(ctx.res, 400, '取消原因疑似包含凭据，请删除后重试')
       const id = ctx.params['id']!
       const mission = await missionInTenant(ctx, id)
       if (!mission) return fail(ctx.res, 404, `Mission 不存在：${id}`)
