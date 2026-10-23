@@ -47,6 +47,7 @@ import type {
   TransitionTaskInput,
   AppendEventInput,
   MissionQuery,
+  MissionAttention,
   TaskQuery,
   ClaimTaskBindingInput,
   ClaimTaskBindingResult,
@@ -66,6 +67,7 @@ import {
   assertSameTaskInput,
   assertQuotaSnapshotAccount,
   assertSameQuotaSnapshot,
+  ATTENTION_TASK_STATES,
 } from './store.ts'
 import type { QuotaSnapshotV1 } from './generated/quota-snapshot.ts'
 
@@ -376,6 +378,20 @@ export class PgStore implements Store {
         [q.tenant, [...TERMINAL_MISSION_STATES], q.terminal_limit],
       )
     return rows.map((r) => toMission(r as Record<string, unknown>))
+  }
+
+  async countMissionAttention(tenant: string): Promise<Readonly<Record<string, MissionAttention>>> {
+    const { rows } = await this.#pool.query(
+      `SELECT t.mission_id, t.state, count(*)::int AS n FROM tasks t JOIN missions m ON m.id = t.mission_id
+       WHERE m.tenant = $1 AND NOT m.state = ANY($2) AND t.state = ANY($3) GROUP BY t.mission_id, t.state`,
+      [tenant, [...TERMINAL_MISSION_STATES], [...ATTENTION_TASK_STATES]],
+    )
+    const out: Record<string, MissionAttention> = {}
+    for (const r of rows as Array<{ mission_id: string; state: keyof MissionAttention; n: number }>) {
+      const c = (out[r.mission_id] ??= { INPUT_REQUIRED: 0, AUTH_REQUIRED: 0, APPROVAL_REQUIRED: 0, FAILED_TERMINAL: 0 })
+      c[r.state] = r.n
+    }
+    return out
   }
 
   async setMissionState(

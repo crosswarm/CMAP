@@ -34,6 +34,7 @@ import type {
   TransitionTaskInput,
   AppendEventInput,
   MissionQuery,
+  MissionAttention,
   TaskQuery,
   ClaimTaskBindingInput,
   ClaimTaskBindingResult,
@@ -53,6 +54,7 @@ import {
   assertSameTaskInput,
   assertQuotaSnapshotAccount,
   assertSameQuotaSnapshot,
+  ATTENTION_TASK_STATES,
 } from './store.ts'
 import type { QuotaSnapshotV1 } from './generated/quota-snapshot.ts'
 
@@ -166,6 +168,19 @@ export class MemoryStore implements Store {
     const terminal = sorted.filter((m) => TERMINAL_MISSION_STATES.has(m.state))
     const keep = new Set(terminal.slice(Math.max(0, terminal.length - q.terminal_limit)))
     return sorted.filter((m) => !TERMINAL_MISSION_STATES.has(m.state) || keep.has(m))
+  }
+
+  async countMissionAttention(tenant: string): Promise<Readonly<Record<string, MissionAttention>>> {
+    const live = new Set(
+      [...this.#missions.values()].filter((m) => m.tenant === tenant && !TERMINAL_MISSION_STATES.has(m.state)).map((m) => m.id),
+    )
+    const out: Record<string, MissionAttention> = {}
+    for (const t of this.#tasks.values()) {
+      if (!live.has(t.mission_id) || !(ATTENTION_TASK_STATES as readonly string[]).includes(t.state)) continue
+      const c = (out[t.mission_id] ??= { INPUT_REQUIRED: 0, AUTH_REQUIRED: 0, APPROVAL_REQUIRED: 0, FAILED_TERMINAL: 0 })
+      c[t.state as keyof MissionAttention]++
+    }
+    return out
   }
 
   async setMissionState(

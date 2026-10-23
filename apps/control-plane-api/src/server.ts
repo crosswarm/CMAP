@@ -20,7 +20,7 @@ import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import { buildEvidencePack, NotFoundError, ApprovalDecisionConflictError, MissionConflictError, EventConflictError } from '#domain-model'
 import type { Store, Approval, ApprovalAdviceV1, ApprovalScope, Artifact, MissionEventV1, TaskEvent } from '#domain-model'
-import type { Mission } from '#domain-model'
+import type { Mission, MissionAttention } from '#domain-model'
 import { legacyInspectForm, missionFromRequest, validateMissionCancel } from './mission-submission.ts'
 import type { MissionSubmissionV1 } from '../../../packages/domain-model/src/generated/mission-submission.ts'
 import type { ControlPlaneContextV1 } from '../../../packages/domain-model/src/generated/control-plane-context.ts'
@@ -94,6 +94,7 @@ class HashMismatchError extends Error {}
 
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 const DEFAULT_TERMINAL_LIMIT = 50
+const NO_ATTENTION: MissionAttention = { INPUT_REQUIRED: 0, AUTH_REQUIRED: 0, APPROVAL_REQUIRED: 0, FAILED_TERMINAL: 0 }
 
 const readBody = (req: IncomingMessage): Promise<unknown> => new Promise((resolve, reject) => {
   let chunks: Buffer[] | null = []
@@ -584,7 +585,11 @@ const routes: readonly Route[] = [
       if (raw === '' || !Number.isInteger(terminalLimit) || terminalLimit < 0 || terminalLimit > 500) {
         return fail(res, 400, 'terminal_limit 必须是 0 到 500 的整数')
       }
-      json(res, 200, { items: await store.queryMissions({ tenant, terminal_limit: terminalLimit }) })
+      const [missions, attention] = await Promise.all([
+        store.queryMissions({ tenant, terminal_limit: terminalLimit }),
+        store.countMissionAttention(tenant),
+      ])
+      json(res, 200, { items: missions.map((m) => ({ ...m, attention: attention[m.id] ?? NO_ATTENTION })) })
     },
   },
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { acceptanceRows, approvalPayload, dagNodeRows, expectedValue, stateTone, missionDisplayState } from '../../apps/web/src/presentation.ts'
+import { acceptanceRows, approvalPayload, dagNodeRows, expectedValue, stateTone, missionDisplayState, attentionState } from '../../apps/web/src/presentation.ts'
 
 test('正常资源等待与等待审批不能使用相同的行动提示', () => {
   assert.equal(stateTone('WAITING_RESOURCE'), 'neutral')
@@ -220,4 +220,13 @@ test('数字和布尔验收不会把空输入、NaN 或任意文本当有效值'
   assert.equal(expectedValue('boolean', 'false'), false)
   for (const value of ['', 'NaN', 'Infinity']) assert.throws(() => expectedValue('number', value))
   assert.throws(() => expectedValue('boolean', 'yes'))
+})
+
+test('未选中的 Mission 用列表自带的摘要显示需要人处理的状态，按优先级取最紧的一项', () => {
+  const none = { INPUT_REQUIRED: 0, AUTH_REQUIRED: 0, APPROVAL_REQUIRED: 0, FAILED_TERMINAL: 0 }
+  assert.equal(attentionState(none), undefined)
+  assert.equal(attentionState(undefined), undefined)
+  assert.equal(attentionState({ ...none, FAILED_TERMINAL: 2 }), 'FAILED_TERMINAL')
+  assert.equal(attentionState({ ...none, FAILED_TERMINAL: 1, INPUT_REQUIRED: 1 }), 'INPUT_REQUIRED')
+  assert.equal(attentionState({ ...none, AUTH_REQUIRED: 1, APPROVAL_REQUIRED: 1, INPUT_REQUIRED: 1 }), 'APPROVAL_REQUIRED')
 })

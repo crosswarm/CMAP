@@ -44,6 +44,7 @@ const TARGETS = [
   { schema: 'jev-decision.v1.schema.json', out: 'jev-decision.ts' },
   { schema: 'control-plane-context.v1.schema.json', out: 'control-plane-context.ts' },
   { schema: 'mission-query.v1.schema.json', out: 'mission-query.ts' },
+  { schema: 'mission-attention.v1.schema.json', out: 'mission-attention.ts' },
   { schema: 'mission-event.v1.schema.json', out: 'mission-event.ts' },
   { schema: 'task-envelope.v1.schema.json', out: 'task-envelope.ts' },
   { schema: 'task-result.v1.schema.json', out: 'task-result.ts' },

@@ -427,6 +427,29 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.equal((await ids()).length, 6, '省略 terminal_limit 表示不限')
       })
 
+      test('countMissionAttention 一次按 Mission 汇总需要人处理的任务数，只含本租户非终态 Mission', async () => {
+        const s = await createStore()
+        await s.createMission({ mission: { ...mission('mis-a'), state: 'RUNNING' }, actor: ACTOR })
+        await s.createMission({ mission: { ...mission('mis-b'), state: 'RUNNING' }, actor: ACTOR })
+        await s.createMission({ mission: { ...mission('mis-quiet'), state: 'RUNNING' }, actor: ACTOR })
+        await s.createMission({ mission: { ...mission('mis-done'), state: 'COMPLETED' }, actor: ACTOR })
+        await s.createMission({ mission: { ...mission('mis-x'), tenant: 'team-other', state: 'RUNNING' }, actor: ACTOR })
+        const seed: Array<[string, string, TaskState]> = [
+          ['a1', 'mis-a', 'INPUT_REQUIRED'], ['a2', 'mis-a', 'INPUT_REQUIRED'], ['a3', 'mis-a', 'FAILED_TERMINAL'],
+          ['a4', 'mis-a', 'RUNNING'], ['b1', 'mis-b', 'APPROVAL_REQUIRED'], ['b2', 'mis-b', 'AUTH_REQUIRED'],
+          ['q1', 'mis-quiet', 'WAITING_RESOURCE'], ['d1', 'mis-done', 'FAILED_TERMINAL'], ['x1', 'mis-x', 'INPUT_REQUIRED'],
+        ]
+        for (const [id, missionId, state] of seed) {
+          await s.createTask({ task: task(id, missionId, { state }), actor: ACTOR })
+        }
+
+        assert.deepEqual(await s.countMissionAttention('team-ycc'), {
+          'mis-a': { INPUT_REQUIRED: 2, AUTH_REQUIRED: 0, APPROVAL_REQUIRED: 0, FAILED_TERMINAL: 1 },
+          'mis-b': { INPUT_REQUIRED: 0, AUTH_REQUIRED: 1, APPROVAL_REQUIRED: 1, FAILED_TERMINAL: 0 },
+        })
+        assert.deepEqual(await s.countMissionAttention('team-empty'), {})
+      })
+
       test('listTenantEvents 一次返回本租户全部 Mission 的事件，按 lamport 升序且不含其他租户', async () => {
         const s = await createStore()
         await s.createMission({ mission: mission('mis-t1'), actor: ACTOR })

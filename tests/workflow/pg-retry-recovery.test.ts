@@ -75,6 +75,7 @@ class ThrowAfterCommitStore implements Store {
   async createMission(input: CreateMissionInput) { return this.inner.createMission(input) }
   async getMission(id: string) { return this.inner.getMission(id) }
   async queryMissions(q: MissionQuery) { return this.inner.queryMissions(q) }
+  async countMissionAttention(tenant: string) { return this.inner.countMissionAttention(tenant) }
   async setMissionState(id: string, state: MissionState, actor: EventActor, idempotencyKey?: string) {
     return this.inner.setMissionState(id, state, actor, idempotencyKey)
   }

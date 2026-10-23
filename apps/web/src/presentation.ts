@@ -5,6 +5,7 @@ import type {
   Review,
   AcceptanceCriterion,
   MissionPlanV1,
+  MissionAttention,
 } from '#domain-model'
 import { recomputeCriterionPassed } from '#domain-model/criterion-check'
 
@@ -89,6 +90,11 @@ export const missionDisplayState = (
     mission.state
   )
 }
+/** 列表自带的摘要里最紧的“需要人处理”状态（与 missionDisplayState 同优先级）；没有则 undefined。 */
+/** GET /v1/missions 的列表项：Mission 加需要人处理的摘要。 */
+export type MissionListItem = Mission & { attention?: MissionAttention }
+export const attentionState = (a: MissionAttention | undefined) =>
+  (['APPROVAL_REQUIRED', 'INPUT_REQUIRED', 'AUTH_REQUIRED', 'FAILED_TERMINAL'] as const).find((k) => (a?.[k] ?? 0) > 0)
 export const showValue = (value: unknown) =>
   value === undefined
     ? '—'

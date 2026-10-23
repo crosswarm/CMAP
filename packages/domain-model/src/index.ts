@@ -64,6 +64,7 @@ export type {
   AppendEventInput,
   TaskQuery,
   MissionQuery,
+  MissionAttention,
 } from './store.ts'
 
 export { buildEvidencePack } from './evidence-pack.ts'

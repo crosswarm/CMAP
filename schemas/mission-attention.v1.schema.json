@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cmap.local/schemas/mission-attention/v1",
+  "title": "MissionAttentionV1",
+  "description": "GET /v1/missions 每个 Mission 附带的“需要人处理”摘要：该 Mission 下处于对应 Task 状态的任务数。终态 Mission 一律全 0（终态本身已说明结局）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["INPUT_REQUIRED", "AUTH_REQUIRED", "APPROVAL_REQUIRED", "FAILED_TERMINAL"],
+  "properties": {
+    "INPUT_REQUIRED": { "type": "integer", "minimum": 0 },
+    "AUTH_REQUIRED": { "type": "integer", "minimum": 0 },
+    "APPROVAL_REQUIRED": { "type": "integer", "minimum": 0 },
+    "FAILED_TERMINAL": { "type": "integer", "minimum": 0 }
+  }
+}

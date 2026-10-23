@@ -12,6 +12,8 @@ import type {
 import { request, post, subscribe } from './api.ts'
 import {
   acceptanceRows,
+  attentionState,
+  type MissionListItem,
   dagNodeRows,
   needsAction,
   missionDisplayState,
@@ -72,7 +74,7 @@ const Badge = ({ state }: { state: string }) => (
 export default function App() {
   const [navigation, setNavigation] = useState(locationState)
   const [context, setContext] = useState<ControlPlaneContextV1 | null>(null)
-  const [missions, setMissions] = useState<Mission[]>([])
+  const [missions, setMissions] = useState<MissionListItem[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
   const [locks, setLocks] = useState<ResourceLock[]>([])
   const [detail, setDetail] = useState<Detail | null>(null)
@@ -126,12 +128,12 @@ export default function App() {
       }
       const [ctx, list, pending, activeLocks, selected] = await Promise.all([
         request<ControlPlaneContextV1>('/v1/context', options),
-        request<{ items: Mission[] }>('/v1/missions', options),
+        request<{ items: MissionListItem[] }>('/v1/missions', options),
         request<{ items: Approval[] }>('/v1/approvals', options),
         request<{ items: ResourceLock[] }>('/v1/locks', options),
         loadDetail(),
       ])
-      // 只有选中的 Mission 拉任务；其余 RUNNING Mission 的侧栏状态由待批审批推断。
+      // 只有选中的 Mission 拉任务；其余 RUNNING Mission 的侧栏状态取列表自带的 attention 摘要。
       const summaries: Record<string, TaskRecord[]> = {}
       if (selected) summaries[selected.mission.id] = selected.tasks
       if (current !== generation.current) return
@@ -200,11 +202,9 @@ export default function App() {
       .toLowerCase()
       .includes(query.toLowerCase()),
   )
-  const displayState = (mission: Mission) =>
-    mission.state === 'RUNNING' &&
-    !taskSummaries[mission.id] &&
-    approvals.some((a) => a.mission_id === mission.id)
-      ? 'APPROVAL_REQUIRED'
+  const displayState = (mission: MissionListItem) =>
+    mission.state === 'RUNNING' && !taskSummaries[mission.id]
+      ? (attentionState(mission.attention) ?? mission.state)
       : missionDisplayState(mission, taskSummaries[mission.id] ?? [])
   const groups = [
     {

@@ -92,6 +92,13 @@ export interface TaskQuery {
 
 export type { MissionQueryV1 as MissionQuery } from './generated/mission-query.ts'
 import type { MissionQueryV1 as MissionQuery } from './generated/mission-query.ts'
+export type { MissionAttentionV1 as MissionAttention } from './generated/mission-attention.ts'
+import type { MissionAttentionV1 as MissionAttention } from './generated/mission-attention.ts'
+
+/** “需要人处理”的 Task 状态；与 mission-attention.v1 的字段一一对应。 */
+export const ATTENTION_TASK_STATES = [
+  'INPUT_REQUIRED', 'AUTH_REQUIRED', 'APPROVAL_REQUIRED', 'FAILED_TERMINAL',
+] as const satisfies readonly TaskState[]
 
 // -------------------------------------------------------------- 错误
 
@@ -251,6 +258,11 @@ export interface Store {
   createMission(input: CreateMissionInput): Promise<Mission>
   getMission(id: string): Promise<Mission | null>
   queryMissions(q: MissionQuery): Promise<readonly Mission[]>
+  /**
+   * 本租户非终态 Mission 下“需要人处理”的任务数，一次查询得到（不得逐 Mission 查询）。
+   * 稀疏：没有任何需处理任务的 Mission 不出现在结果里。
+   */
+  countMissionAttention(tenant: string): Promise<Readonly<Record<string, MissionAttention>>>
   setMissionState(
     id: string,
     state: MissionState,
