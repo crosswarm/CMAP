@@ -104,3 +104,7 @@
 - 遗留：S06 侧栏看不到未选中 Mission 的 INPUT_REQUIRED 等状态；S13 standalone 结果目录仍在 TMPDIR；本机 runner 未常驻；Jev 影子模式待积累一致率数据后再评估 enforce；P4 网关与 OIDC 未在本轮范围。
 
 <promise>FINISHED</promise>
+
+# 多用户与额度交接轮（2026-10-23 起）
+
+范围见 `docs/user-stories/cmap-multiuser-quota-2026-10.json`（Q01–Q07 额度交接、M01–M10 多用户、L01–L08 遗留），设计见 ADR-0008、ADR-0009。M10 公网部署等待 Cross 提供主机与域名。

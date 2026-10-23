@@ -1,0 +1,257 @@
+[
+  {
+    "id": "Q01",
+    "category": "functional",
+    "description": "额度快照：契约先行；runner 侧零额度探针（Codex app-server account/rateLimits/read、Claude get_usage；Kimi 记为未知）；快照随 health 上报并落账（ADR-0009 §1）",
+    "steps": [
+      "新增 quota-snapshot 契约并 codegen",
+      "探针单测用假 app-server/假 claude；真实零额度探测 Codex 与 Claude 各一次，字段与 ADR 一致",
+      "快照过期重探、读失败记为未知",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "Q02",
+    "category": "functional",
+    "description": "路由增加额度维度：已用比例 ≥ 阈值或不允许普通用量的候选 skipped(quota_low)，ROUTING_DECIDED 记录额度判定（ADR-0009 §2）",
+    "steps": [
+      "先写失败测试：A 额度低时新任务派 B；未知额度排在已知充足之后但不排除",
+      "已绑定任务不迁移",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "Q03",
+    "category": "functional",
+    "description": "Adapter 把明确的额度耗尽归一为 QUOTA_EXHAUSTED（Codex 文本含弯撇号变体、Kimi 429 额度码），与普通失败、执行不确定区分（ADR-0009 §3）",
+    "steps": [
+      "每家各有回归样例（含未识别文本按普通失败处理）",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "Q04",
+    "category": "functional",
+    "description": "QUOTA_EXHAUSTED 后派生续接任务：supersedes、previous_attempt 携带已复核产物；只读级新工作区；有写副作用的先证明原 Agent 已退出，再以原工作区快照为冻结输入；续接次数上限 2；controlled/mutating 重新审批（ADR-0009 §3）",
+    "steps": [
+      "先写失败测试覆盖只读与写副作用两类",
+      "续接超限升级给人",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "Q05",
+    "category": "functional",
+    "description": "交回：resetsAt 已过且重新探测确认允许用量后，新任务按 preferred_agent 派回；记 QUOTA_HANDOFF/QUOTA_RESTORED 事件；WebUI 显示账号额度与交接链路（ADR-0009 §5）",
+    "steps": [
+      "先写失败测试",
+      "npm run check 全过；build:web 通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "Q06",
+    "category": "functional",
+    "description": "可切换调度者：确定性候选集 → 配置的调度者列表中第一个可用且额度充足者在候选内挑选，调度者额度低自动换下一个；决定落账为 jev-decision.v1 routing 类型并新增 decider 字段（ADR-0009 §4）",
+    "steps": [
+      "契约先行加 decider",
+      "先写失败测试：调度者只能选候选内、调度者额度低切换、全部不可用回落确定性顺序、单候选不调用",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "Q07",
+    "category": "integration",
+    "description": "额度交接全链路真实验证：A 额度低新任务派 B；A 任务中途触顶由 B 续接完成；A 恢复后新任务派回 A（触顶用假 CLI 模拟，其余真实 Codex/Temporal）",
+    "steps": [
+      "新增 e2e 脚本，独立 schema/队列",
+      "三段场景全部通过，事件链与产物可追溯"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M01",
+    "category": "functional",
+    "description": "多用户契约：runner-gateway.v1（长轮询领取、状态/结果回报、租约）、runner-enrollment.v1（一次性注册令牌与公钥登记）、身份 claims 映射说明（ADR-0008）",
+    "steps": [
+      "契约正反样例测试",
+      "npm run codegen 与 npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M02",
+    "category": "functional",
+    "description": "开发栈加入 Keycloak；API 校验 JWT（iss/aud/exp/JWKS 缓存），tenant/owner 取自 claims；角色 operator/approver-controlled/approver-mutating/viewer/admin；WebUI 以 Authorization Code + PKCE 登录（ADR-0008 §2）",
+    "steps": [
+      "先写失败测试：无 token 401、错 aud/过期拒绝、claims 决定租户",
+      "本地 Keycloak 实测登录与 API 调用",
+      "npm run check 全过；build:web 通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M03",
+    "category": "functional",
+    "description": "审批绑定 token 主体：decided_by 取 token 主体；controlled 与 mutating 分别要求对应 approver 角色，互不蕴含",
+    "steps": [
+      "先写失败测试：无对应角色 403、请求体身份与 token 不符拒绝",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M04",
+    "category": "functional",
+    "description": "runner 出站网关：PostgreSQL 队列（SKIP LOCKED）与租约；runner 长轮询领取、回报状态与结果；结果落账后信号唤醒 Workflow；租约过期走执行不确定路径；签名与产物复算保留（ADR-0008 §3）",
+    "steps": [
+      "先写失败测试",
+      "本机模拟 runner 以出站模式完成任务",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M05",
+    "category": "functional",
+    "description": "runner 注册与吊销：admin 生成一次性注册令牌（1 小时、单次、绑定 tenant/owner/能力/风险上限）；runner 生成密钥并登记；吊销后立即拒绝；runner 守护进程支持出站模式（ADR-0008 §4）",
+    "steps": [
+      "先写失败测试：过期/重复使用令牌拒绝、吊销后拒绝",
+      "CrossMini 与 lap 以出站模式注册并跑通 remote 场景"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M06",
+    "category": "functional",
+    "description": "owner 亲和路由：任务只派给 owner 本人的 runner，跨人共享默认禁止",
+    "steps": [
+      "先写失败测试",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M07",
+    "category": "integration",
+    "description": "租户隔离与 P4 安全验收清单自动化：Store 接口强制 tenant；威胁模型 P4 清单全部拒绝用例写成测试并通过；审计流与产物凭据扫描零命中",
+    "steps": [
+      "清单 12 项拒绝用例与 2 项零命中检查全部自动化通过",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M08",
+    "category": "edge-case",
+    "description": "events 只追加：运行账号无 UPDATE/DELETE 权限并加触发器兜底，迁移幂等",
+    "steps": [
+      "先写失败测试：UPDATE/DELETE events 被拒",
+      "npm run test:pg 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M09",
+    "category": "integration",
+    "description": "产物流式上传到按 sha256 寻址的存储，取代 base64 内联与 16MiB 上限；控制面仍独立复算",
+    "steps": [
+      "先写失败测试：大于 16MiB 的产物可传输且哈希复核",
+      "两机 remote 场景复测通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "M10",
+    "category": "integration",
+    "description": "公网部署（等待 Cross 提供主机与域名）：temporalio/server 加 admin-tools、反向代理 TLS、Keycloak、只开 443、主机外备份；上线闸口全部实测",
+    "steps": [
+      "主机、域名、DNS 就绪后执行",
+      "TLS、登录、runner 注册吊销、越权测试在公网实测通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L01",
+    "category": "ui",
+    "description": "Mission 列表带\"需要人处理\"摘要（INPUT_REQUIRED、AUTH_REQUIRED、FAILED_TERMINAL 等），侧栏未选中的 Mission 也能看到（S06 遗留）",
+    "steps": [
+      "先写失败测试",
+      "npm run check 全过；build:web 通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L02",
+    "category": "edge-case",
+    "description": "e2e-mission.mjs --restart-worker 支持本机 runner 模式（运行记录在守护进程工作区）（S16 遗留）",
+    "steps": [
+      "本机 runner 模式下真实运行通过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L03",
+    "category": "functional",
+    "description": "ADR-0007 剩余：确定性兜底规则由代码强制转人工、当日自动执行预算、CMAP_JEV_AUTODECIDE 一键关闭；enforce 仍默认关闭",
+    "steps": [
+      "先写失败测试",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L04",
+    "category": "edge-case",
+    "description": "清理 cmap 库里堆积的测试 schema（保留 public），备份覆盖 temporal_visibility 或写明不覆盖的理由",
+    "steps": [
+      "先备份再清理",
+      "清理前后 public 行数不变"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L05",
+    "category": "integration",
+    "description": "Planner 真实调用 403 排查：查明原因，能修则让 plan-mission.mjs 真实端到端产出计划",
+    "steps": [
+      "如实记录原因；修好则真实跑通一次"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L06",
+    "category": "edge-case",
+    "description": "成本计量补 Kimi（及可得的 Claude 调度者调用）与超预算告警",
+    "steps": [
+      "先写失败测试",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L07",
+    "category": "edge-case",
+    "description": "提示词加固：外部内容一律包在明确的数据区块内，并加注入回归样例（威胁模型 T2）",
+    "steps": [
+      "先写失败测试",
+      "npm run check 全过"
+    ],
+    "passes": false
+  },
+  {
+    "id": "L08",
+    "category": "edge-case",
+    "description": "standalone 模式的 codex 结果目录移出 TMPDIR（S13 遗留）；文档过期措辞（architecture 中 remote-runner.v1 行、cmap-dag-plan）更新",
+    "steps": [
+      "先写失败测试",
+      "npm test 全过"
+    ],
+    "passes": false
+  }
+]
