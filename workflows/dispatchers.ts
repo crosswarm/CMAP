@@ -92,7 +92,7 @@ export const jevDispatcher = (deps: { apiKey?: () => string | undefined; fetch?:
  * Claude：`claude -p --output-format json --json-schema` 的 structured_output；不给任何工具、不留会话、
  * 在临时目录运行（不读仓库指令文件）。自身额度用零额度探针（get_usage）读取，带 5 分钟缓存。
  */
-export const claudeDispatcher = (opts: { bin?: string; timeoutMs?: number; quota?: () => Promise<QuotaSnapshotV1> } = {}): Dispatcher => ({
+export const claudeDispatcher = (opts: { bin?: string; timeoutMs?: number; model?: string; quota?: () => Promise<QuotaSnapshotV1> } = {}): Dispatcher => ({
   id: 'claude',
   quota: opts.quota ?? cachedQuotaProbe('claude', () => probeClaudeQuota()),
   choose: (input) => new Promise((resolve, reject) => {
@@ -105,7 +105,9 @@ export const claudeDispatcher = (opts: { bin?: string; timeoutMs?: number; quota
       JSON.stringify(input),
     ].join('\n')
     const child = spawn(opts.bin ?? 'claude', [
-      '-p', '--output-format', 'json', '--json-schema', JSON.stringify(schema),
+      // 在几个候选里挑一个是简单判断：默认用最便宜的模型，少占 Claude 额度（Cross 2026-10-23 决定）
+      '-p', '--model', opts.model ?? process.env['CMAP_CLAUDE_DISPATCHER_MODEL'] ?? 'haiku',
+      '--output-format', 'json', '--json-schema', JSON.stringify(schema),
       '--tools', '', '--restricted', '--strict-mcp-config', '--no-session-persistence', prompt,
     ], { cwd: tmpdir(), env: providerBaseEnv(process.env, { CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'], USER: process.env['USER'] }), detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let out = ''
