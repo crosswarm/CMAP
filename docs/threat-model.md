@@ -114,7 +114,7 @@ Agent 判定"这个操作风险不高"，自行跳过审批闸口；或把自己
 
 | 缓解 | 状态 |
 |---|---|
-| 审批状态只有控制面能改，Agent 无写权 | 🟡 设计已确立；审批 API 与本机 PostgreSQL/Temporal 均未认证，靠 Agent 沙箱挡住直连。Kimi 沙箱已禁止访问控制面端口（`tests/adapter/kimi-runtime.test.ts`，2026-10-21）；Codex 沙箱对本机回环端口未核实 |
+| 审批状态只有控制面能改，Agent 无写权 | 🟡 设计已确立；审批 API 与本机 PostgreSQL/Temporal 均未认证，靠 Agent 沙箱挡住直连。Kimi 沙箱已禁止访问控制面端口（`tests/adapter/kimi-runtime.test.ts`，2026-10-21）；Codex 0.159.2 实测（2026-10-23）：`codex exec -s workspace-write` 内 `nc` 连 127.0.0.1 的生产 API 8785 与账本库 5433 均失败（沙箱外可达），同沙箱内写工作区文件成功；`:read-only` 档同样挡住 8785/5433/7233。该结论依赖 Codex 默认禁用沙箱网络（CMAP 以 `--ignore-user-config` 启动），提供方升级后需复测 |
 | Jev 代为决定须受真人签发的委托策略约束，以 `jev:` 身份记录，不算人工授权 | ⬜ [ADR-0007](adr/0007-jev-delegated-decisions.md) 提议，契约已定义，未实现 |
 | `Approval.decided_by` 必须是有权限的真人 | 🟡 OIDC 模式下取 token 主体（请求体不符即 403），controlled / mutating 分别要求 `approver-controlled` / `approver-mutating`，互不蕴含（`tests/api/oidc.test.ts`，[映射](identity.md)）；本机模式仍为配置的 owner；公网上线闸口未过 |
 | `controlled` 与 `mutating` **互不蕴含**，不得合并为单一批准 | ✅ Schema 与状态机已实现 |
@@ -288,7 +288,7 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 
 - [x] 非授权 tenant 提交任务（P4-01：tenant 只取 token，缺 claim 403、请求体自报 400；runner 准入 `TENANT_DENIED`）
 - [x] runner 收到白名单外 owner 的任务（P4-02：`OWNER_DENIED`；网关路由另有 owner 亲和）
-- [ ] Agent 尝试自批授权（P4-03 🟡：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 已验证、Codex 回环端口未核实，见 T4）
+- [ ] Agent 尝试自批授权（P4-03 🟡：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 与 Codex（workspace-write、read-only）均已实测挡住回环端口，见 T4；YonWork 不在本机执行任意命令）
 - [x] `controlled` 的批准放行了同批次 `mutating` 任务（P4-04：mutating 无自身审批或审批 scope 不符即 `APPROVAL_INVALID`）
 - [ ] 任务读取 `context.paths` 声明外的路径（P4-05a：契约拒绝绝对路径与 `..`；P4-05b **未覆盖**：运行时没有读取范围校验，codex 沙箱不限制读取，见 T7）
 - [ ] Agent 推送 `main` 或 `release/*`（P4-06 **未覆盖**：`deny_push` 只是信封字段，CMAP 无强制执行点，见 T1）
