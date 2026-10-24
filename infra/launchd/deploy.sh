@@ -32,7 +32,7 @@ fi
 ln -sfn "$REL" "$ROOT/current"
 echo "current -> $REL"
 
-for svc in tunnel api worker; do
+for svc in tunnel api worker backup; do
   label=com.cmap.$svc
   new=$AGENTS/$label.plist.new
   sed -e "s|__HOME__|$HOME|g" -e "s|__NODE__|$NODE|g" -e "s|__ROOT__|$ROOT|g" \
@@ -41,8 +41,8 @@ for svc in tunnel api worker; do
   loaded=no; launchctl print "$DOMAIN/$label" >/dev/null 2>&1 && loaded=yes
   if [ "$loaded" = yes ] && cmp -s "$new" "$AGENTS/$label.plist"; then
     rm "$new"
-    # 隧道不随发布重启；API 与 Worker 切到新的 current
-    [ "$svc" = tunnel ] || launchctl kickstart -k "$DOMAIN/$label"
+    # 隧道不随发布重启，定时备份不在发布时触发；API 与 Worker 切到新的 current
+    case $svc in tunnel|backup) ;; *) launchctl kickstart -k "$DOMAIN/$label" ;; esac
   else
     [ "$loaded" = yes ] && launchctl bootout "$DOMAIN/$label" && sleep 2
     mv "$new" "$AGENTS/$label.plist"

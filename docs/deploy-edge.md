@@ -181,7 +181,8 @@ LaunchAgent 只在 Cross 的图形会话里运行：CrossMini 须保持该用户
 ## 备份
 
 - qcl：cron 每日以 root 执行 `/opt/cmap-edge/backup-keycloak.sh`，写 `/var/backups/cmap-edge/keycloak-<UTC时间戳>.dump`（目录 0700、文件 0600），保留 14 份，日志 `/var/log/cmap-edge-backup.log`。
-- 拉回 CrossMini：`infra/edge/pull-backups.sh`（rsync，远端 `sudo -n rsync` 读 root 文件），落到 `~/.cmap/backups/keycloak`，本地同样保留 14 份。目前需手动或另配定时执行。
+- 拉回 CrossMini：`infra/edge/pull-backups.sh`（rsync，远端 `sudo -n rsync` 读 root 文件），落到 `~/.cmap/backups/keycloak`，本地同样保留 14 份。
+- CrossMini 定时任务 `com.cmap.backup`（`infra/launchd/cmap-backup.sh`，每日 03:40，由 `infra/launchd/deploy.sh` 安装，发布时不触发）：依次执行 `scripts/backup-db.mjs`（账本与 Temporal 库）、`pull-backups.sh`，再把 `~/.cmap/backups` 用 `rsync --delete` 镜像到 iCloud Drive 的 `CMAP-backups`（`CMAP_BACKUP_MIRROR_DIR` 可改）作为主机外副本。任一步失败仍做完其余步骤并以非零退出，日志 `~/.local/share/cmap-control/logs/backup*.log`。手动补跑：`launchctl kickstart gui/$(id -u)/com.cmap.backup`。
 - 还原校验：`docker exec -i cmap-edge-keycloak-db pg_restore -l < <dump>` 能列出表即文件完整；灾难恢复时先停 keycloak，再对清空的 `keycloak` 库 `pg_restore --no-owner`。
 
 ## 验收
