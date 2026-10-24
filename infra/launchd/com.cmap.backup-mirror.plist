@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 每日 04:10 把 ~/.cmap/backups 镜像到 iCloud Drive（主机外副本），排在 com.cmap.backup 之后。
+     直接以 /usr/bin/rsync 作为程序：iCloud Drive 受 TCC 保护，只需给 rsync 授予完全磁盘访问权限，不必放开 /bin/sh。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.cmap.backup-mirror</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/rsync</string>
+    <string>-a</string>
+    <string>--delete</string>
+    <string>__HOME__/.cmap/backups/</string>
+    <string>__HOME__/Library/Mobile Documents/com~apple~CloudDocs/CMAP-backups/</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>4</integer>
+    <key>Minute</key><integer>10</integer>
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>__ROOT__/logs/backup-mirror.log</string>
+  <key>StandardErrorPath</key><string>__ROOT__/logs/backup-mirror.err.log</string>
+</dict>
+</plist>
