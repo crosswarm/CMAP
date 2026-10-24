@@ -290,8 +290,8 @@ runner A 持有真机锁 → 网络分区 → 控制面判定过期 → runner B
 - [x] runner 收到白名单外 owner 的任务（P4-02：`OWNER_DENIED`；网关路由另有 owner 亲和）
 - [x] Agent 尝试自批授权（P4-03：经 API 无 token 401、冒填 `agent:` 403；直连账本写入 `agent:`/`system:`/申请人本人为批准人，派发前复核 `APPROVAL_INVALID`。**未覆盖**：能直连数据库的 Agent 伪造真人批准人——只靠沙箱挡住直连，Kimi 与 Codex（workspace-write、read-only）均已实测挡住回环端口，见 T4；YonWork 不在本机执行任意命令）
 - [x] `controlled` 的批准放行了同批次 `mutating` 任务（P4-04：mutating 无自身审批或审批 scope 不符即 `APPROVAL_INVALID`）
-- [ ] 任务读取 `context.paths` 声明外的路径（P4-05a：契约拒绝绝对路径与 `..`；P4-05b **部分覆盖**：Codex 权限档与 Kimi seatbelt 拒绝读取 HOME 下工作区以外的路径，真实 codex exec 与 sandbox-exec 已验证；仍未按 `context.paths` 逐路径校验，HOME 以外与 TMPDIR 仍可读，见 T7）
-- [ ] Agent 推送 `main` 或 `release/*`（P4-06 **部分覆盖**：CMAP pre-push hook 按 `allow_push_branches` / `deny_push` 拒绝，真实 Codex 与 Kimi 各验证一次；`--no-verify` 可绕过，硬边界靠沙箱与无推送凭据，Kimi 网络开放且 keychain 未判定，见 T1）
+- [x] 任务读取 `context.paths` 声明外的路径（P4-05a：契约拒绝绝对路径与 `..`；P4-05b **部分覆盖**：Codex 权限档与 Kimi seatbelt 拒绝读取 HOME 下工作区以外的路径，真实 codex exec 与 sandbox-exec 已验证；仍未按 `context.paths` 逐路径校验，HOME 以外与 TMPDIR 仍可读，见 T7） **残余风险已接受**（ADR-0008 上线闸口修订，Cross 2026-10-23：以 owner 亲和、禁止跨人共享 runner 为前提）。
+- [x] Agent 推送 `main` 或 `release/*`（P4-06 **部分覆盖**：CMAP pre-push hook 按 `allow_push_branches` / `deny_push` 拒绝，真实 Codex 与 Kimi 各验证一次；`--no-verify` 可绕过，硬边界靠沙箱与无推送凭据，Kimi 网络开放且 keychain 未判定，见 T1） **残余风险已接受**（ADR-0008 上线闸口修订，Cross 2026-10-23：以 owner 亲和、禁止跨人共享 runner 为前提）。
 - [x] 结果中的 `task_id` 与派发信封不符（P4-07：Agent 输出带身份字段 `RESULT_INVALID`，身份取自信封；网关回报他任务 `INVALID_REQUEST`、他 runner `LEASE_UNKNOWN`）
 - [x] Agent 自报哈希与文件实际内容不符（P4-08：`EVIDENCE_HASH_MISMATCH`）
 - [x] 声明的证据文件不存在却判定成功（P4-09：`EVIDENCE_FILE_MISSING`；缺必需角色改判 failed）
