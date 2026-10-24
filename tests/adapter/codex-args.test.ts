@@ -132,6 +132,11 @@ describe('既有参数不受影响', () => {
     assert.equal(args.at(-1), opts.prompt, '提示词必须是最后一个位置参数')
   })
 
+  test('不加载工作区外的项目 AGENTS.md：任务信封自洽，且权限档拒读时 codex 建会话会失败', () => {
+    const args = buildCodexArgs(envelope(), opts)
+    assert.ok(args.some((a, i) => args[i - 1] === '-c' && a === 'project_doc_max_bytes=0'))
+  })
+
   test('声明了证据产物就要能写工作区，绝不使用 danger-full-access', () => {
     const args = buildCodexArgs(envelope(), opts)
     assert.ok(configs(args).includes('default_permissions="cmap"'), '必须显式选定 CMAP 权限档，不继承本机默认')

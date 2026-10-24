@@ -188,6 +188,8 @@ export const buildCodexArgs = (
     '--ignore-user-config',
     '--ephemeral',
     '--json',
+    // 不加载项目 AGENTS.md：任务信封自洽、不继承仓库指令；且工作区在 git 仓库内时权限档拒读仓库根的 AGENTS.md，codex 建会话即失败（2026-10-24 实测）
+    '-c', 'project_doc_max_bytes=0',
     ...permissionArgs(chooseSandbox(envelope), opts.homeDenials ?? ['~']),
     // 沙箱内命令的环境只认 shell_environment_policy（实测 codex 不透传进程环境里的任意变量）。
     // GIT_CONFIG_GLOBAL：权限档拒读 HOME，git 读 ~/.gitconfig 得 EPERM 会直接 fatal；任务也不该继承个人 git 配置。
