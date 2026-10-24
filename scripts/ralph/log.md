@@ -175,3 +175,7 @@
 - 生产 CrossMini 与 lap 均发布 `a178ccc`。M09 两机复测：17825795 字节产物经监听模式与出站网关模式传输，四处哈希一致。M05 两机公网出站实测（tenant e2e，lap Node 26）：受理约 0.8 秒、COMPLETED；执行中吊销约 23 秒判执行不确定、不重跑、吊销后请求 401。临时 Worker 白名单与临时 runner 均已恢复和吊销（白名单逐字节一致；中途一次 `cp -i` 别名未覆盖，已改正）。
 - 复测发现：工作区在 git 仓库内时权限档拒读仓库根 AGENTS.md，codex 建会话失败；`b22882c` 以 `project_doc_max_bytes=0` 修复并用真实 codex 验证。
 - ADR-0008 开放第二个人的前提已满足。
+
+## L04（通过）
+
+- 先 `node scripts/backup-db.mjs` 备份，再在一个事务里删除 68 个测试 schema（66 个自动命名的 `cmap_dag_attempt_*` 与 2 个未被引用的 Q07 运行 schema）；保留文档引用或固定名字的 9 个。public 行数前后一致（missions 14、tasks 13、events 165、artifacts 11）。`temporal_visibility` 只是 Web UI 查询索引，不备份的理由已写在 infra/docker-compose/README.md。

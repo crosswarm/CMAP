@@ -213,7 +213,7 @@
       "先备份再清理",
       "清理前后 public 行数不变"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L05",
