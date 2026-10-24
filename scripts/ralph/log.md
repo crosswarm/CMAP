@@ -162,3 +162,10 @@
 - `2eefff3` M09 产物流式传输与 sha256 内容寻址存储，>16MiB 产物经监听与网关两种模式本机模拟通过；需先升级控制面再升级 lap，两机复测待 lap 升级。遗留：下发给 runner 的冻结输入仍内联、约 16MiB 上限；进程内 Adapter 的产物不进存储。
 - 生产发布 `8b605ae`（API 网关密钥、Worker 网关 Adapter），`cmap-ops` 服务账号（tenant e2e）。M05 两机出站实测：CrossMini 侧通过（`mis_5075ce32…` COMPLETED，哈希三处一致）；lap 侧在 Node 26（undici 8）下长轮询在途时同源 POST 被排队、签名过期 401，导致 DISPATCH_UNCERTAIN（不改派不重跑），修复进行中。临时白名单与临时 runner 均已恢复和吊销。
 - 主会话验收：`2eefff3` 上 `npm run check` 全过（test 534、api 142 + 2 todo、pg 104、workflow 353）。
+
+## M07（通过）与 Node 26 修复
+
+- P4 清单 12 项拒绝用例全部自动化（test:api 144/144，0 todo）：`11bc635` P4-05b Codex 改用权限档拒绝读取 HOME 下工作区外路径（嵌套 sandbox-exec 实测不可行）；`70aaab8` P4-06 CMAP pre-push hook 执行 deny_push。残余风险（HOME 外可读、`--no-verify` 可绕过推送限制）按 ADR-0008 上线闸口修订接受，前提为 owner 亲和与禁止跨人共享 runner。
+- 两项零命中检查在生产账本运行：127 条事件、9 个产物零命中。
+- `1c30617` 出站网关改走 HTTP/1.1：Node 26（undici 8）的 fetch 走 HTTP/2，长轮询在途时同源 POST 被排队致签名过期；回归测试在 Node 26 上修复前失败、修复后在 Node 25/26 均通过。`6a62daa` ROUTING_DECIDED 记 target_runner_id。
+- 主会话验收：`a1dcf2e` 上 `npm run check` 全过（test 548、api 144、pg 104、workflow 353）。

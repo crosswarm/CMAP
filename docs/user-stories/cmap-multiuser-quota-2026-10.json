@@ -144,7 +144,7 @@
       "清单 12 项拒绝用例与 2 项零命中检查全部自动化通过",
       "npm run check 全过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M08",
