@@ -37,7 +37,7 @@ CrossMini 是唯一控制面、账本写入者与 Artifact 存储。lap（`cross
 
 ## 产物流式传输与内容寻址存储（M09，ADR-0008 §6）
 
-状态：🟡 本机实现与两种模式的双进程模拟通过（17 MiB 产物，`--artifact-bytes`），未在两台机器上实测。
+状态：✅ 两机实测通过（2026-10-24，`a178ccc`）：17825795 字节产物经监听模式（37 秒）与出站网关模式（85 秒）传输，账本、CrossMini 任务目录、内容寻址存储、lap 原件四处哈希一致。`scripts/e2e-remote-runner.mjs --artifact-bytes` 目前只在模拟模式（`--fake-codex`）生效，两机大产物需让真实 codex 生成。
 
 - **存储**：控制面产物按 sha256 存在 `<CMAP_WORK_ROOT>/.cas/sha256/ab/cd/<hash>`（0600）。写入用 `.cas/tmp` 下的临时文件，边写边算 sha256、长度并扫已知凭据模式，结束后与声明核对，一致才原子重命名；不一致、超限、命中凭据或断流都删掉临时文件。之后再复制（APFS 上是写时复制克隆）到原来的 `<CMAP_WORK_ROOT>/<taskId>/<uri>` 并复核，既有读者（DAG 子节点输入、评审输入、Memross 回写）不变。Artifact 记录不变：按记录里的 sha256 即可在存储里定位。
 - **监听模式**：结果应答只列 `{uri, sha256, size_bytes}`（已签名）。CrossMini 随后逐个 `GET /v1/tasks/{id}/artifacts/{sha256}`；lap 的应答签名把产物 sha256 当作体哈希，先签后流。CrossMini 先按声明的 sha256 验签、核对 `content-length` 等于声明长度，再边收边写入存储；签名、长度、哈希任何一项不符都按 `EVIDENCE_HASH_MISMATCH` 处理，不落盘。
@@ -261,9 +261,21 @@ CrossMini 与 lap 均为 `a52251e`（之后 CrossMini 侧补 `2a97549` 修复收
 | `grace`（宽限 30 秒） | ✅ 41 秒；Mission ESCALATED，任务 INPUT_REQUIRED（`EXECUTION_UNCERTAIN:BINDING_NOT_FOUND`），binding 保留，不改派、不重跑。首轮在 `a52251e` 上失败：S03 让任务保持 INPUT_REQUIRED 后，`finalizeDagMission` 仍视其为活跃任务抛错，Workflow 失败、Mission 停在 RUNNING；`2a97549` 修复后通过 |
 | `lap-offline`（生产默认宽限） | ✅ 158 秒；离线 152 秒即判执行不确定（取剩余等待时间的一半，先于 300 秒任务超时），结果同 grace |
 
+## 发布复测（2026-10-24，`a178ccc`）
+
+CrossMini 生产发布与 lap 均升级到 `a178ccc`（lap：Node 26.4.0、codex-cli 0.158.0，权限档参数兼容）。
+
+| 场景 | 结果 |
+|---|---|
+| 监听模式两机基线（`e2e-remote-runner.mjs`） | ✅ 认证判据全过，产物哈希一致 |
+| 监听模式 17825795 字节产物 | ✅ 37 秒，四处哈希一致 |
+| `e2e-remote-mission.mjs remote` | ✅ binding `remote-runner-adapter@lap`，不回落，TASK_STARTED=1 |
+| `e2e-remote-mission.mjs dag` | ✅ 100 秒，四节点 COMPLETED。首轮失败：工作区在 git 仓库内时权限档拒读仓库根 AGENTS.md，codex 建会话失败；`b22882c` 以 `project_doc_max_bytes=0` 修复 |
+| 出站模式（公网）a / b 执行中吊销 / c 大产物 | ✅ 见上方「出站模式」状态 |
+
 ## 出站模式（ADR-0008 §3，runner-gateway.v1）
 
-状态：🟡 本机实现与两进程模拟通过（`scripts/e2e-runner-gateway.mjs --simulate`），未经 Temporal 全链路、未在两台机器上实测。
+状态：✅ 两机公网实测通过（2026-10-24，`a178ccc`，tenant e2e）：lap 以 Node 26.4.0 出站模式经 `https://cmap.spux.cn` 领取，受理约 0.8 秒，真实 Codex 执行 1 次、产物四处哈希一致、COMPLETED，ROUTING_DECIDED 带 `target_runner_id`；执行中吊销后约 23 秒判执行不确定（`EXECUTION_UNCERTAIN:BINDING_NOT_FOUND`），不重跑，被吊销 runner 的签名请求 401。2026-10-23 首测在 Node 26 上失败（HTTP/2 排队致签名过期），`1c30617` 改走 HTTP/1.1 后通过。
 
 runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gateway/claim`，≤ 50 秒）领取任务、`POST /v1/gateway/reports` 回报受理/状态/结果；控制面从不连 runner。消息体沿用 remote-runner.v1。
 

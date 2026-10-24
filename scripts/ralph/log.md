@@ -169,3 +169,9 @@
 - 两项零命中检查在生产账本运行：127 条事件、9 个产物零命中。
 - `1c30617` 出站网关改走 HTTP/1.1：Node 26（undici 8）的 fetch 走 HTTP/2，长轮询在途时同源 POST 被排队致签名过期；回归测试在 Node 26 上修复前失败、修复后在 Node 25/26 均通过。`6a62daa` ROUTING_DECIDED 记 target_runner_id。
 - 主会话验收：`a1dcf2e` 上 `npm run check` 全过（test 548、api 144、pg 104、workflow 353）。
+
+## M05、M09（通过）
+
+- 生产 CrossMini 与 lap 均发布 `a178ccc`。M09 两机复测：17825795 字节产物经监听模式与出站网关模式传输，四处哈希一致。M05 两机公网出站实测（tenant e2e，lap Node 26）：受理约 0.8 秒、COMPLETED；执行中吊销约 23 秒判执行不确定、不重跑、吊销后请求 401。临时 Worker 白名单与临时 runner 均已恢复和吊销（白名单逐字节一致；中途一次 `cp -i` 别名未覆盖，已改正）。
+- 复测发现：工作区在 git 仓库内时权限档拒读仓库根 AGENTS.md，codex 建会话失败；`b22882c` 以 `project_doc_max_bytes=0` 修复并用真实 codex 验证。
+- ADR-0008 开放第二个人的前提已满足。

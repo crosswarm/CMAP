@@ -124,7 +124,7 @@
       "先写失败测试：过期/重复使用令牌拒绝、吊销后拒绝",
       "CrossMini 与 lap 以出站模式注册并跑通 remote 场景"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M06",
@@ -164,7 +164,7 @@
       "先写失败测试：大于 16MiB 的产物可传输且哈希复核",
       "两机 remote 场景复测通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "M10",
