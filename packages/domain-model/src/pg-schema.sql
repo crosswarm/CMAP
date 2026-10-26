@@ -205,6 +205,9 @@ CREATE TABLE IF NOT EXISTS gateway_runners (
 
 CREATE INDEX IF NOT EXISTS gateway_runners_tenant_idx ON gateway_runners (tenant);
 
+-- runner 随领取上报的最新额度快照（ADR-0009，quota-snapshot.v1）；旧库补列，没有上报过即 NULL（额度未知）。
+ALTER TABLE gateway_runners ADD COLUMN IF NOT EXISTS quota JSONB;
+
 -- 一次性注册令牌（ADR-0008 §4）：只存 sha256；used_at 非空即已用，过期由 expires_at 判断。
 CREATE TABLE IF NOT EXISTS enrollment_tokens (
   token_id             TEXT PRIMARY KEY,

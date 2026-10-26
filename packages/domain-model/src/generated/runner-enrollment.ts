@@ -29,6 +29,7 @@ export type Token = string
  * Raw 32-byte Ed25519 public key, base64url without padding.
  */
 export type Ed25519PublicKey = string
+export type Origin = string
 
 /**
  * POST /v1/runner-enrollments by an admin.
@@ -69,7 +70,7 @@ export interface RunnerEnrollmentRequestV1 {
   proof: string
 }
 /**
- * Reply to enroll. Identity and ceilings are copied from the token record. control_plane_public_key is pinned by the runner to verify runner-gateway.v1 replies.
+ * Reply to enroll. Identity and ceilings are copied from the token record. control_plane_public_key is pinned by the runner to verify runner-gateway.v1 replies. control_plane_origin is never sent by the control plane: the runner adds it to its local enrollment record on enrolling (or on first start with an older record) and refuses to start when it differs from its CMAP_CONTROL_PLANE_URL origin, so one runner process cannot be pointed at a different control plane than the one it enrolled with.
  */
 export interface RunnerEnrollmentAcceptedV1 {
   schema: SchemaTag
@@ -81,6 +82,7 @@ export interface RunnerEnrollmentAcceptedV1 {
   max_risk: Risk
   control_plane_public_key: Ed25519PublicKey
   enrolled_at: string
+  control_plane_origin?: Origin
 }
 /**
  * Reply to POST /v1/runners/{runner_id}/revoke. Idempotent: revoking again returns the original revoked_at. A runner of another tenant is 404, not 403.

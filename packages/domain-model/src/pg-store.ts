@@ -1030,6 +1030,18 @@ export class PgStore implements Store {
     )
   }
 
+  async putGatewayRunnerQuota(runnerId: string, quota: QuotaSnapshotV1): Promise<void> {
+    await this.#pool.query(
+      `UPDATE gateway_runners SET quota = $2 WHERE runner_id = $1 AND (quota IS NULL OR (quota->>'observed_at')::timestamptz <= $3::timestamptz)`,
+      [runnerId, JSON.stringify(quota), quota.observed_at],
+    )
+  }
+
+  async listGatewayRunnerQuotas(): Promise<readonly QuotaSnapshotV1[]> {
+    const { rows } = await this.#pool.query('SELECT quota FROM gateway_runners WHERE revoked_at IS NULL AND quota IS NOT NULL ORDER BY runner_id')
+    return rows.map((r) => r.quota as QuotaSnapshotV1)
+  }
+
   async enqueueGatewayLease(input: EnqueueGatewayLeaseInput): Promise<GatewayLease> {
     const lease = newLease(input)
     const inserted = await this.#pool.query(

@@ -6,7 +6,7 @@
  * 控制面判过期的租约：停掉本机执行、不再回报。领取期间断网只会让租约过期，由控制面判执行不确定，绝不在这里重跑。
  */
 import { createPublicKey, type KeyObject } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { dirname, join } from 'node:path'
@@ -14,7 +14,7 @@ import { Readable } from 'node:stream'
 
 import {
   rawEd25519PublicKey, signEnrollmentProof, validateEnrollmentMessage, validateGatewayMessage,
-  type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1,
+  type QuotaSnapshotV1, type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1,
 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { signRunnerRequest, verifyRunnerResponse } from '../../../packages/domain-model/src/dispatch-permit.ts'
@@ -55,7 +55,25 @@ export const readOutboundRunnerConfig = (env: NodeJS.ProcessEnv) => {
     enrollmentFile: env['CMAP_RUNNER_ENROLLMENT_FILE']?.trim() || join(dirname(signingKeyFile), 'enrollment.json'),
     issuer: env['CMAP_PERMIT_ISSUER']?.trim() || 'cmap:local-control-plane',
     codexModel: required('CMAP_CODEX_MODEL'),
-    workRoot: env['CMAP_WORK_ROOT']?.trim() || undefined,
+    /** 出站模式必须显式指定：一台主机可同时加入多套服务端，默认的仓库内目录会让它们共用运行记录。 */
+    workRoot: required('CMAP_WORK_ROOT'),
+  }
+}
+
+/** 工作目录里记录所属服务端的标记文件。 */
+const WORK_ROOT_MARKER = '.cmap-server-origin'
+
+/**
+ * 认领工作目录：首次启动写下所属服务端 origin；之后启动发现 origin 不同就拒绝，防止两套服务端的 runner 共用一个目录。
+ * 任务 ID 不含服务端身份，共用目录会让 A 服务端的运行记录与结果被交给 B（数据泄漏）。
+ */
+export const claimWorkRoot = (workRoot: string, origin: string): void => {
+  mkdirSync(workRoot, { recursive: true, mode: 0o700 })
+  const marker = join(workRoot, WORK_ROOT_MARKER)
+  if (!existsSync(marker)) return writeFileSync(marker, `${origin}\n`, { mode: 0o600 })
+  const owner = readFileSync(marker, 'utf8').trim()
+  if (owner !== origin) {
+    throw new RangeError(`工作目录 ${workRoot} 属于 ${owner}，但当前 CMAP_CONTROL_PLANE_URL 是 ${origin}；每套服务端须用各自独立的 CMAP_WORK_ROOT`)
   }
 }
 
@@ -76,7 +94,19 @@ export const loadOrEnroll = async (input: {
   host: string
   token?: string | undefined
 }): Promise<RunnerEnrollment> => {
-  if (existsSync(input.enrollmentFile)) return readEnrollment(input.enrollmentFile)
+  const origin = new URL(input.controlPlaneUrl).origin
+  if (existsSync(input.enrollmentFile)) {
+    const enrolled = readEnrollment(input.enrollmentFile)
+    // 登记记录属于登记时的那套服务端：URL 配错时拒绝启动，而不是拿别家的私钥与公钥去撞这一家
+    if (enrolled.control_plane_origin && enrolled.control_plane_origin !== origin) {
+      throw new RangeError(`登记文件 ${input.enrollmentFile} 属于 ${enrolled.control_plane_origin}，但当前 CMAP_CONTROL_PLANE_URL 是 ${origin}；每套服务端须用各自的登记文件、密钥与工作目录`)
+    }
+    if (enrolled.control_plane_origin) return enrolled
+    // 旧记录没有该字段：按当前 URL 补写（0600，原地替换）
+    const bound = { ...enrolled, control_plane_origin: origin }
+    writeFileSync(input.enrollmentFile, JSON.stringify(bound), { mode: 0o600 })
+    return bound
+  }
   const token = input.token?.trim()
   if (!token) throw new RangeError('首次启动需要 CMAP_RUNNER_ENROLL_TOKEN（admin 签发的一次性注册令牌）')
   const publicKey = rawEd25519PublicKey(createPublicKey(input.privateKey))
@@ -89,8 +119,9 @@ export const loadOrEnroll = async (input: {
   })
   const reply: unknown = await res.json().catch(() => undefined)
   if (res.status !== 201 || !validateEnrollmentMessage(reply) || reply.kind !== 'enrolled') throw new GatewayRejectedError('ENROLLMENT_DENIED')
-  writeFileSync(input.enrollmentFile, JSON.stringify(reply), { flag: 'wx', mode: 0o600 })
-  return reply
+  const bound = { ...reply, control_plane_origin: origin }
+  writeFileSync(input.enrollmentFile, JSON.stringify(bound), { flag: 'wx', mode: 0o600 })
+  return bound
 }
 
 /** 出站模式的准入白名单只来自登记记录（tenant/owner/能力/风险上限），本机 RUNNER_* 环境变量不能放宽它。 */
@@ -118,6 +149,12 @@ export interface OutboundRunnerOptions {
   readonly statusIntervalMs?: number
   /** 请求失败后的重试间隔，默认 2 秒。 */
   readonly retryMs?: number
+  /** 领取失败的提示输出，默认 stderr。 */
+  readonly log?: (line: string) => void
+  /** 同类领取失败的重复提示间隔，默认 5 分钟（首次立即提示）。 */
+  readonly logIntervalMs?: number
+  /** 额度探针（ADR-0009，含缓存）：每次领取附带最新快照；读不到或抛错就不带，控制面按未知处理。 */
+  readonly quota?: () => Promise<QuotaSnapshotV1>
   readonly signal?: AbortSignal
 }
 
@@ -191,6 +228,21 @@ export const startOutboundRunner = (opts: OutboundRunnerOptions) => {
   const statusIntervalMs = opts.statusIntervalMs ?? 2_000
   const retryMs = opts.retryMs ?? 2_000
   const signal = opts.signal
+  const log = opts.log ?? ((line: string): void => console.error(line))
+  const logIntervalMs = opts.logIntervalMs ?? 300_000
+  const lastLogged = new Map<string, number>()
+  /** 领取失败不再静默：同类错误首次提示，之后每隔 logIntervalMs 才再提示，避免每次重试刷屏。 */
+  const logClaimFailure = (error: unknown): void => {
+    if (signal?.aborted) return
+    const rejected = error instanceof GatewayRejectedError ? error.message : undefined
+    const text = rejected === 'UNAUTHORIZED'
+      ? '领取任务被控制面拒绝（401 鉴权失败）：登记已吊销，或 CMAP_CONTROL_PLANE_URL / 登记文件 / 密钥不属于该服务端；请核对后重启'
+      : `领取任务失败：${error instanceof Error ? error.message : String(error)}`
+    const now = Date.now()
+    if (now - (lastLogged.get(text) ?? -Infinity) < logIntervalMs) return
+    lastLogged.set(text, now)
+    log(`[${new Date(now).toISOString()}] ${opts.controlPlaneUrl} ${text}`)
+  }
   const client = { ...opts, runnerId }
   /** 本机仍在执行、需要续租的租约 → remote_task_id（受理前为 null）。 */
   const held = new Map<string, string | null>()
@@ -300,12 +352,15 @@ export const startOutboundRunner = (opts: OutboundRunnerOptions) => {
     while (!signal?.aborted) {
       let reply: ClaimResult
       try {
+        const quota = await opts.quota?.().catch(() => undefined)
         const { message } = await gatewayCall(client, '/v1/gateway/claim', {
           schema: SCHEMA, kind: 'claim', runner_id: runnerId, wait_seconds: waitSeconds, held_leases: [...held.keys()],
+          ...(quota ? { quota } : {}),
         }, (waitSeconds + 15) * 1000, signal)
         if (message.kind !== 'claim_result' || message.runner_id !== runnerId) throw new GatewayRejectedError('PROTOCOL_INVALID')
         reply = message
-      } catch {
+      } catch (error) {
+        logClaimFailure(error)
         await sleep(retryMs, signal)
         continue
       }

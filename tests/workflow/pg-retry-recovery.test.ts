@@ -136,6 +136,8 @@ class ThrowAfterCommitStore implements Store {
   getGatewayRunner: Store['getGatewayRunner'] = (...a) => this.inner.getGatewayRunner(...a)
   listGatewayRunners: Store['listGatewayRunners'] = (...a) => this.inner.listGatewayRunners(...a)
   touchGatewayRunner: Store['touchGatewayRunner'] = (...a) => this.inner.touchGatewayRunner(...a)
+  putGatewayRunnerQuota: Store['putGatewayRunnerQuota'] = (...a) => this.inner.putGatewayRunnerQuota(...a)
+  listGatewayRunnerQuotas: Store['listGatewayRunnerQuotas'] = (...a) => this.inner.listGatewayRunnerQuotas(...a)
   enqueueGatewayLease: Store['enqueueGatewayLease'] = (...a) => this.inner.enqueueGatewayLease(...a)
   claimGatewayLease: Store['claimGatewayLease'] = (...a) => this.inner.claimGatewayLease(...a)
   renewGatewayLeases: Store['renewGatewayLeases'] = (...a) => this.inner.renewGatewayLeases(...a)

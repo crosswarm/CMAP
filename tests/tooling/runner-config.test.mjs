@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildRunnerDescriptor } from '../../apps/worker/src/runner-config.ts'
+import { buildRunnerDescriptor, readPermitIssuer } from '../../apps/worker/src/runner-config.ts'
 
 const descriptors = [
   {
@@ -143,4 +143,10 @@ test('buildRunnerDescriptor rejects capability grants outside discovered descrip
     ),
     /RUNNER_ALLOWED_CAPABILITIES/,
   )
+})
+
+test('readPermitIssuer 读 CMAP_PERMIT_ISSUER，未设置或空白时保持兼容的默认签发方', () => {
+  assert.equal(readPermitIssuer({}), 'cmap:local-control-plane')
+  assert.equal(readPermitIssuer({ CMAP_PERMIT_ISSUER: '  ' }), 'cmap:local-control-plane')
+  assert.equal(readPermitIssuer({ CMAP_PERMIT_ISSUER: ' cmap:server-b ' }), 'cmap:server-b')
 })

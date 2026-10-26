@@ -17,14 +17,15 @@ import { ed25519PublicKeyFromRaw, loadOrCreatePermitKey, loadPinnedPublicKey } f
 import { GATEWAY_ADAPTER_ID } from '../../../adapters/runner-gateway/src/index.ts'
 import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
 import { createRunnerCore, createRunnerDaemon, readRunnerDaemonConfig } from './server.ts'
-import { enrolledRunnerEnv, loadOrEnroll, readOutboundRunnerConfig, startOutboundRunner } from './outbound.ts'
+import { claimWorkRoot, enrolledRunnerEnv, loadOrEnroll, readOutboundRunnerConfig, startOutboundRunner } from './outbound.ts'
 
 const defaultWorkRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../.cmap-work')
 const stopping = new AbortController()
 
 if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
   const config = readOutboundRunnerConfig(process.env)
-  const workRoot = config.workRoot ?? defaultWorkRoot
+  const workRoot = config.workRoot
+  claimWorkRoot(workRoot, config.controlPlaneUrl)
   mkdirSync(dirname(config.signingKeyFile), { recursive: true, mode: 0o700 })
   const { privateKey } = loadOrCreatePermitKey(config.signingKeyFile)
   const enrolled = await loadOrEnroll({
@@ -41,6 +42,9 @@ if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
   const outbound = startOutboundRunner({
     core, controlPlaneUrl: config.controlPlaneUrl, signingKey: privateKey,
     controlPlanePublicKey: ed25519PublicKeyFromRaw(enrolled.control_plane_public_key), signal: stopping.signal,
+    // 额度快照（ADR-0009）随领取上报；缓存 2 分钟，留足领取间隔（至多 50 秒）与控制面 5 分钟过期阈值之间的余量，
+    // 探测最多等 1.5 秒，等不到先带旧值（没有就不带），不拖慢领取
+    quota: cachedQuotaProbe('codex', () => probeCodexQuota(), { ttlMs: 120_000, waitMs: 1_500 }),
   })
   process.on('SIGINT', () => stopping.abort())
   process.on('SIGTERM', () => stopping.abort())

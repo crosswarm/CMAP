@@ -19,7 +19,7 @@ export type Identifier = string
 export type LeaseId = string
 
 /**
- * POST /v1/gateway/claim. runner_id must equal x-cmap-runner-id. held_leases lists every lease the runner still executes (empty when idle); each is renewed.
+ * POST /v1/gateway/claim. runner_id must equal x-cmap-runner-id. held_leases lists every lease the runner still executes (empty when idle); each is renewed. quota (optional, ADR-0009) is the runner's latest account-level quota snapshot for its wrapped agent, read by a zero-quota probe on the runner host and sent with the claim like remote-runner.v1 health.quota; the control plane keeps the newest one per runner for routing. Omitted when nothing could be read (older runners too): the control plane then treats the quota as unknown. It is advisory for routing only.
  */
 export interface RunnerGatewayClaimV1 {
   schema: SchemaTag
@@ -30,6 +30,33 @@ export interface RunnerGatewayClaimV1 {
    * @maxItems 64
    */
   held_leases: LeaseId[]
+  quota?: QuotaSnapshotV1
+}
+/**
+ * ADR-0009 §1 account-level quota snapshot. Quota is counted per provider account on the provider side, so the same account seen from two runners is one pool. Read by a zero-quota probe on the runner host that holds the provider login (Codex app-server account/rateLimits/read, Claude stream-json control request get_usage); Kimi is unknown. account_ref is an irreversible sha256 digest of the provider account identity, never the raw id, email or token. status ok means the provider answered; unknown means nothing could be read (timeout, spawn failure, unparsable reply, unsupported provider); error means the provider answered with an explicit error. Unknown and error are never treated as sufficient. ordinary_usage_allowed is the provider's own flag (Codex ordinaryUsageAllowed); null means the provider did not say and must not be inferred.
+ */
+export interface QuotaSnapshotV1 {
+  schema: 'cmap/quota-snapshot/v1'
+  provider: 'codex' | 'claude' | 'kimi'
+  /**
+   * sha256 hex of a provider-scoped account identity; null when the account could not be identified.
+   */
+  account_ref: string | null
+  /**
+   * @maxItems 32
+   */
+  windows: {
+    /**
+     * Codex primary/secondary; Claude five_hour/seven_day.
+     */
+    kind: string
+    used_percent: number
+    window_minutes: number | null
+    resets_at: string | null
+  }[]
+  ordinary_usage_allowed: boolean | null
+  observed_at: string
+  status: 'ok' | 'unknown' | 'error'
 }
 /**
  * Reply to claim, sent when work or a cancel is available or wait_seconds elapsed. renewed: held leases still honored with their new expiry. expired: held leases the control plane already judged uncertain; the runner should stop them and must not report results for them. assignment: null, or one remote-runner.v1 dispatch with its new lease. cancels: remote-runner.v1 cancel messages for held leases.

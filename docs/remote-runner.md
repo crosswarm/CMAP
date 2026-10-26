@@ -129,14 +129,14 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
 
 ### launchd 模板
 
-`~/Library/LaunchAgents/com.cmap.runner.plist`（路径按 lap 实际情况替换；不放任何令牌）：
+`~/Library/LaunchAgents/com.cmap.runner.<name>.plist`（`<name>` 取这套服务端的简称，例如 `cmap-prod`；已部署的单服务端沿用 `com.cmap.runner` 即可，不必改名；路径按 lap 实际情况替换；不放任何令牌）：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.cmap.runner</string>
+  <key>Label</key><string>com.cmap.runner.<name></string>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/cross/.nvm/versions/node/v24.13.0/bin/node</string>
@@ -162,13 +162,26 @@ node -e "const c=require('node:crypto'),f=require('node:fs');process.stdout.writ
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/cross/.cmap/runner.out.log</string>
-  <key>StandardErrorPath</key><string>/Users/cross/.cmap/runner.err.log</string>
+  <key>StandardOutPath</key><string>/Users/cross/.cmap/runner.<name>.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/cross/.cmap/runner.<name>.err.log</string>
 </dict>
 </plist>
 ```
 
-`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmap.runner.plist` 加载；守护进程只打印一行就绪信息，不打印请求体。`TMPDIR=/private/tmp` 避开 macOS 卷别名导致的 Codex 可写根问题。Tailscale IP 变化时须更新 `CMAP_RUNNER_LISTEN_HOST`；Tailscale 未就绪时绑定失败，KeepAlive 会重试。
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmap.runner.<name>.plist` 加载；守护进程只打印一行就绪信息，不打印请求体。`TMPDIR=/private/tmp` 避开 macOS 卷别名导致的 Codex 可写根问题。Tailscale IP 变化时须更新 `CMAP_RUNNER_LISTEN_HOST`；Tailscale 未就绪时绑定失败，KeepAlive 会重试。
+
+### 一台主机加入多套服务端（出站模式）
+
+每套独立部署的 CMAP 服务端起一个独立的 runner 进程，一套一个 launchd 服务（`com.cmap.runner.<name>`，日志 `runner.<name>.*.log`），以下各项不得共用：
+
+| 项 | 每套服务端各自一份 |
+|---|---|
+| `CMAP_CONTROL_PLANE_URL` | 该服务端的地址 |
+| `CMAP_RUNNER_KEY_FILE`、`CMAP_RUNNER_ENROLLMENT_FILE` | 各自的密钥与登记记录（放在各自目录，例如 `~/.cmap/<name>/`） |
+| `CMAP_PERMIT_PUBLIC_KEY_FILE`、`CMAP_PERMIT_ISSUER` | 该服务端的许可公钥与签发方（服务端 Worker 设同名 `CMAP_PERMIT_ISSUER`，未设置沿用 `cmap:local-control-plane`） |
+| `CMAP_WORK_ROOT` | 独立工作目录。出站模式必填，未设置拒绝启动 |
+
+两道防线挡住配错：登记记录写入登记时服务端的 origin，启动时与当前 `CMAP_CONTROL_PLANE_URL` 的 origin 不一致即拒绝启动；工作目录里的 `.cmap-server-origin` 标记所属服务端，origin 不同同样拒绝启动。任务 ID 不含服务端身份，共用工作目录会让一套服务端的运行记录与结果被交给另一套，所以这两项只会拒绝、不会自动迁移。旧登记记录没有 origin 时，首次启动按当前 URL 补写，补写前须确认 URL 配的是登记时的那套服务端。
 
 ### Tailscale ACL 规则文本
 
@@ -302,7 +315,9 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 | runner | `CMAP_RUNNER_KEY_FILE` | 登记的 runner 私钥（首次启动生成 0600，私钥不离开本机） |
 | runner | `CMAP_RUNNER_ENROLLMENT_FILE` | 登记记录（runner-enrollment.v1 `enrolled`），默认与私钥同目录的 `enrollment.json` |
 | runner | `CMAP_RUNNER_ENROLL_TOKEN` | 仅首次启动（登记记录不存在时）需要的一次性注册令牌；用过即失效，登记后可从环境移除 |
-| runner | `CMAP_PERMIT_PUBLIC_KEY_FILE`、`CMAP_CODEX_MODEL`、`CMAP_PERMIT_ISSUER`、`CMAP_WORK_ROOT`、`CODEX_BIN` | 同监听模式 |
+| runner | `CMAP_PERMIT_PUBLIC_KEY_FILE`、`CMAP_CODEX_MODEL`、`CMAP_PERMIT_ISSUER`、`CODEX_BIN` | 同监听模式 |
+| runner | `CMAP_WORK_ROOT` | 出站模式必填（不再回落到仓库内 `.cmap-work`），并在其中写 `.cmap-server-origin` 标记所属服务端；多服务端见上「一台主机加入多套服务端」 |
+| Worker | `CMAP_PERMIT_ISSUER` | 派发许可签发方，须与 runner 一致；未设置为 `cmap:local-control-plane` |
 
 出站模式下 `RUNNER_ID` / `RUNNER_*` 准入变量被登记记录覆盖；禁止出现在 runner 上的变量与监听模式相同。守护进程重启后不恢复已持有的租约（只在内存），在途任务会在租约过期后判执行不确定。
 

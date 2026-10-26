@@ -26,6 +26,8 @@ import { mkdir, readFile, access } from 'node:fs/promises'
 import { isAbsolute, join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { runnerLabel } from './runner-label.mjs'
+
 process.env['NO_PROXY'] = process.env['no_proxy'] = 'localhost,127.0.0.1,::1'
 process.env['grpc_proxy'] = ''
 
@@ -55,15 +57,17 @@ const check = (cond, m) => { if (!cond) throw new Fail(m) }
 // ------------------------------------------------------------------ lap（经 ssh，只读或启停守护进程）
 
 const lap = (cmd) => execFileSync('ssh', ['-o', 'IdentityAgent=none', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', 'lap', cmd], { encoding: 'utf8' })
-const LABEL = 'gui/$(id -u)/com.cmap.runner'
+// 服务名默认 com.cmap.runner（生产 lap 在用）；lap 上有多套服务端的 runner 时用 CMAP_RUNNER_LABEL 指定要测的那个
+const RUNNER_LABEL = runnerLabel(process.env)
+const LABEL = `gui/$(id -u)/${RUNNER_LABEL}`
 const daemonPid = () => {
-  const line = lap('launchctl list | grep com.cmap.runner || true').trim()
+  const line = lap(`launchctl list | awk '$3=="${RUNNER_LABEL}"' || true`).trim()
   const pid = line.split(/\s+/)[0]
   return line ? (pid === '-' ? 'stopped' : Number(pid)) : 'unloaded'
 }
 const restoreLap = () => {
   const state = daemonPid()
-  if (state === 'unloaded') lap('launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.cmap.runner.plist')
+  if (state === 'unloaded') lap(`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/${RUNNER_LABEL}.plist`)
   else if (state === 'stopped') lap(`launchctl kickstart ${LABEL}`)
 }
 const stopLap = () => lap(`launchctl bootout ${LABEL}`)

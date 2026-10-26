@@ -1634,6 +1634,26 @@ export const runStoreContractTests = (implName: string, createStore: () => Promi
         assert.equal((await s.getGatewayRunner('r1'))!.last_seen_at, at(now), 'last_seen_at 只前进')
       })
 
+      test('runner 额度快照：每个 runner 只留最新一份（observed_at 不后退）；吊销与未登记的 runner 不计入', async () => {
+        const s = await createStore()
+        const quota = (observed_at: string, used: number): QuotaSnapshotV1 => ({
+          schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: 'a'.repeat(64), ordinary_usage_allowed: true, observed_at, status: 'ok',
+          windows: [{ kind: 'primary', used_percent: used, window_minutes: 10080, resets_at: null }],
+        })
+        await s.registerGatewayRunner(gwRunner('r1'))
+        await s.registerGatewayRunner(gwRunner('r2'))
+        assert.deepEqual(await s.listGatewayRunnerQuotas(), [])
+        await s.putGatewayRunnerQuota('r1', quota(at(now), 10))
+        await s.putGatewayRunnerQuota('r1', quota(at(now - 1000), 99))
+        await s.putGatewayRunnerQuota('ghost', quota(at(now), 50))
+        assert.deepEqual(await s.listGatewayRunnerQuotas(), [quota(at(now), 10)], '旧快照不覆盖新快照；未登记的 runner 忽略')
+        await s.putGatewayRunnerQuota('r1', quota(at(now + 1000), 20))
+        await s.putGatewayRunnerQuota('r2', quota(at(now), 30))
+        assert.deepEqual((await s.listGatewayRunnerQuotas()).map((q) => q.windows[0]!.used_percent).sort((a, b) => a - b), [20, 30])
+        await s.revokeGatewayRunner('r2', 'team-ycc', at(now))
+        assert.deepEqual((await s.listGatewayRunnerQuotas()).map((q) => q.windows[0]!.used_percent), [20], '已吊销 runner 的快照不再计入')
+      })
+
       test('入队幂等：同内容返回既有记录，不同内容冲突', async () => {
         const s = await createStore()
         const first = await s.enqueueGatewayLease(enqueue('l1'))

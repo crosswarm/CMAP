@@ -16,6 +16,7 @@
     "identifier": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s*]+$" },
     "allowlist": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/$defs/identifier" } },
     "risk": { "enum": ["read-meta", "read-sensitive", "controlled", "mutating"] },
+    "origin": { "type": "string", "maxLength": 256, "pattern": "^https?://[^/\\s]+$" },
     "token": {
       "description": "Opaque one-time secret: cmapenr1. followed by 32 random bytes in base64url.",
       "type": "string",
@@ -78,7 +79,7 @@
     },
     "enrolled": {
       "title": "RunnerEnrollmentAcceptedV1",
-      "description": "Reply to enroll. Identity and ceilings are copied from the token record. control_plane_public_key is pinned by the runner to verify runner-gateway.v1 replies.",
+      "description": "Reply to enroll. Identity and ceilings are copied from the token record. control_plane_public_key is pinned by the runner to verify runner-gateway.v1 replies. control_plane_origin is never sent by the control plane: the runner adds it to its local enrollment record on enrolling (or on first start with an older record) and refuses to start when it differs from its CMAP_CONTROL_PLANE_URL origin, so one runner process cannot be pointed at a different control plane than the one it enrolled with.",
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "kind", "runner_id", "tenant", "owner", "allowed_capabilities", "max_risk", "control_plane_public_key", "enrolled_at"],
@@ -91,7 +92,8 @@
         "allowed_capabilities": { "$ref": "#/$defs/allowlist" },
         "max_risk": { "$ref": "#/$defs/risk" },
         "control_plane_public_key": { "$ref": "#/$defs/ed25519PublicKey" },
-        "enrolled_at": { "type": "string", "format": "date-time" }
+        "enrolled_at": { "type": "string", "format": "date-time" },
+        "control_plane_origin": { "$ref": "#/$defs/origin" }
       }
     },
     "revoked": {
