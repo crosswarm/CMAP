@@ -174,7 +174,7 @@
       "主机、域名、DNS 就绪后执行",
       "TLS、登录、runner 注册吊销、越权测试在公网实测通过"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "id": "L01",

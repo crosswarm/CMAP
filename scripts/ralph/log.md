@@ -179,3 +179,8 @@
 ## L04（通过）
 
 - 先 `node scripts/backup-db.mjs` 备份，再在一个事务里删除 68 个测试 schema（66 个自动命名的 `cmap_dag_attempt_*` 与 2 个未被引用的 Q07 运行 schema）；保留文档引用或固定名字的 9 个。public 行数前后一致（missions 14、tasks 13、events 165、artifacts 11）。`temporal_visibility` 只是 Web UI 查询索引，不备份的理由已写在 infra/docker-compose/README.md。
+
+## M10（通过）
+
+- 主机外备份：`078e2aa`/`e214329` 新增 CrossMini launchd 定时任务 `com.cmap.backup`（03:40，账本与 Temporal 库 + 拉回 qcl Keycloak 备份）与 `com.cmap.backup-mirror`（04:10，`/usr/bin/rsync -a --delete` 镜像到 iCloud Drive `CMAP-backups`）。镜像单独以 rsync 为 launchd 程序，TCC 只需给 `/usr/bin/rsync` 完全磁盘访问权限（Cross 2026-10-26 授权），不放开 `/bin/sh`。
+- 实测：授权前 launchd 运行报 `Operation not permitted`；授权后 kickstart 退出码 0，`diff -r` 本地与 iCloud 副本一致（20 个文件），iCloud 中最新账本 dump 与 Keycloak dump 经 `pg_restore -l` 分别列出 93、100 个表数据项。
