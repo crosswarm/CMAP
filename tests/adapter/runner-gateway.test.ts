@@ -279,7 +279,7 @@ test('M05 首次启动：runner 用一次性令牌持钥登记、写下登记记
     assert.equal(enrolled.owner, 'crosswarm')
     assert.equal(enrolled.control_plane_public_key, rawEd25519PublicKey(controlPlaneKey.publicKey))
     assert.equal((await stat(file)).mode & 0o777, 0o600)
-    assert.deepEqual(await loadOrEnroll({ controlPlaneUrl: 'http://127.0.0.1:1', enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host' }), enrolled, '已登记就不再联网')
+    assert.deepEqual(await loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host' }), enrolled, '已登记就不再联网')
     await assert.rejects(loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: join(f.root, 'again.json'), privateKey: generateKeyPairSync('ed25519').privateKey, host: 'x', token }), /ENROLLMENT_DENIED/, '令牌只能用一次')
     await assert.rejects(loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: join(f.root, 'none.json'), privateKey: key.privateKey, host: 'x' }), /CMAP_RUNNER_ENROLL_TOKEN/)
 
@@ -291,6 +291,56 @@ test('M05 首次启动：runner 用一次性令牌持钥登记、写下登记记
     assert.equal((await f.store.getTask('tsk-gw-enrolled'))!.binding!.runner_id, enrolled.runner_id)
     const collected = await f.acts.collectTaskResult('tsk-gw-enrolled')
     assert.ok('passed' in collected && collected.passed)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('登记记录绑定服务端 origin：登记时写入；换了 CMAP_CONTROL_PLANE_URL 即拒绝启动（指明两个 origin 与登记文件）；旧记录按当前 URL 补写', async () => {
+  const { loadOrEnroll } = await import('../../apps/runner/src/outbound.ts')
+  const { generateKeyPairSync } = await import('node:crypto')
+  const f = await startGatewayFixture()
+  try {
+    const issued = await fetch(`${f.apiUrl}/v1/runner-enrollments`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema: 'cmap/runner-enrollment/v1', kind: 'issue', owner: 'crosswarm', allowed_capabilities: ['code.analyze'], max_risk: 'read-meta', ttl_seconds: 600 }) })
+    const { token } = await issued.json() as { token: string }
+    const key = generateKeyPairSync('ed25519')
+    const file = join(f.root, 'enrollment.json')
+    const origin = new URL(f.apiUrl).origin
+    const enrolled = await loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host', token })
+    assert.equal(enrolled.control_plane_origin, origin)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).control_plane_origin, origin)
+
+    const other = 'https://other.example.test'
+    await assert.rejects(
+      loadOrEnroll({ controlPlaneUrl: `${other}/`, enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host' }),
+      (error: Error) => error.message.includes(origin) && error.message.includes(other) && error.message.includes(file) && /登记/.test(error.message),
+    )
+
+    // 旧记录（无该字段）：按当前 URL 补写，之后再换服务端同样拒绝
+    const { control_plane_origin: _drop, ...legacy } = enrolled
+    await writeFile(file, JSON.stringify(legacy), { mode: 0o600 })
+    assert.equal((await loadOrEnroll({ controlPlaneUrl: f.apiUrl, enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host' })).control_plane_origin, origin)
+    assert.equal(JSON.parse(await readFile(file, 'utf8')).control_plane_origin, origin)
+    assert.equal((await stat(file)).mode & 0o777, 0o600)
+    await assert.rejects(loadOrEnroll({ controlPlaneUrl: other, enrollmentFile: file, privateKey: key.privateKey, host: 'lap-host' }), /登记/)
+  } finally {
+    await f.cleanup()
+  }
+})
+
+test('领取循环遇到 401 不再静默：打印明确的鉴权失败，同类错误只在首次与间隔后打印', async () => {
+  const f = await startGatewayFixture()
+  try {
+    const logs: string[] = []
+    // 未在控制面登记的 runner：每次领取都是同一个无签名 401
+    const lap = await f.startRunner('lap-unknown', { register: false, log: (line) => logs.push(line), logIntervalMs: 3_600_000 })
+    await until(async () => logs.length > 0, '打印鉴权失败')
+    await new Promise((r) => setTimeout(r, 400))
+    assert.equal(logs.length, 1, `retryMs=50 下 400ms 内应只打印一次，实际：${JSON.stringify(logs)}`)
+    assert.match(logs[0]!, /401/)
+    assert.match(logs[0]!, /CMAP_CONTROL_PLANE_URL/)
+    lap.stop()
   } finally {
     await f.cleanup()
   }

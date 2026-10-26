@@ -38,6 +38,15 @@ describe('runner-enrollment schema', () => {
     for (const [name, value] of Object.entries(valid)) assert.equal(validate(value), true, `${name}: ${JSON.stringify(validate.errors)}`)
   })
 
+  test('登记记录可带本地写入的 control_plane_origin，且只能是 http(s) origin（不带路径）', () => {
+    for (const origin of ['https://cmap.example.test', 'http://127.0.0.1:8787']) {
+      assert.equal(validate({ ...valid.enrolled, control_plane_origin: origin }), true, origin)
+    }
+    for (const origin of ['https://cmap.example.test/v1', 'cmap.example.test', 'ftp://x', '']) {
+      assert.equal(validate({ ...valid.enrolled, control_plane_origin: origin }), false, origin)
+    }
+  })
+
   test('令牌只能一次性、不超过 1 小时；租户不取自请求；公钥只是 Ed25519 公钥', () => {
     for (const [name, value] of [
       patch('issue', (v) => { v.ttl_seconds = 3601 }),
