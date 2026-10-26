@@ -249,7 +249,7 @@ test('M09 上传字节与声明的 sha256 不符：API 422 EVIDENCE_HASH_MISMATC
 
 test('出站模式配置：公网只认 https（http 限回环）；控制面秘密出现在 runner 主机即拒绝启动；准入只取自登记记录', async () => {
   const { readOutboundRunnerConfig, enrolledRunnerEnv } = await import('../../apps/runner/src/outbound.ts')
-  const base = { CMAP_RUNNER_KEY_FILE: '/x/runner.key', CMAP_PERMIT_PUBLIC_KEY_FILE: '/x/permit.pub', CMAP_CODEX_MODEL: 'm' }
+  const base = { CMAP_RUNNER_KEY_FILE: '/x/runner.key', CMAP_PERMIT_PUBLIC_KEY_FILE: '/x/permit.pub', CMAP_CODEX_MODEL: 'm', CMAP_WORK_ROOT: '/x/work' }
   assert.equal(readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'https://cmap.spux.cn/' }).controlPlaneUrl, 'https://cmap.spux.cn')
   assert.equal(readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'http://127.0.0.1:8787' }).enrollmentFile, '/x/enrollment.json')
   assert.throws(() => readOutboundRunnerConfig({ ...base, CMAP_CONTROL_PLANE_URL: 'http://cmap.spux.cn' }), /https/)
@@ -343,5 +343,27 @@ test('领取循环遇到 401 不再静默：打印明确的鉴权失败，同类
     lap.stop()
   } finally {
     await f.cleanup()
+  }
+})
+
+test('出站模式必须显式设置 CMAP_WORK_ROOT；工作目录标记所属服务端 origin，换服务端共用同一目录即拒绝启动', async () => {
+  const { readOutboundRunnerConfig, claimWorkRoot } = await import('../../apps/runner/src/outbound.ts')
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const base = { CMAP_CONTROL_PLANE_URL: 'https://a.example.test', CMAP_RUNNER_KEY_FILE: '/x/runner.key', CMAP_PERMIT_PUBLIC_KEY_FILE: '/x/permit.pub', CMAP_CODEX_MODEL: 'm' }
+  assert.throws(() => readOutboundRunnerConfig(base), /CMAP_WORK_ROOT/)
+  assert.throws(() => readOutboundRunnerConfig({ ...base, CMAP_WORK_ROOT: '  ' }), /CMAP_WORK_ROOT/)
+  assert.equal(readOutboundRunnerConfig({ ...base, CMAP_WORK_ROOT: '/x/work' }).workRoot, '/x/work')
+
+  const root = await mkdtemp(join(tmpdir(), 'cmap-workroot-'))
+  try {
+    const work = join(root, 'new', 'work')
+    claimWorkRoot(work, 'https://a.example.test')
+    assert.equal((await readFile(join(work, '.cmap-server-origin'), 'utf8')).trim(), 'https://a.example.test')
+    claimWorkRoot(work, 'https://a.example.test')
+    assert.throws(() => claimWorkRoot(work, 'https://b.example.test'),
+      (error: Error) => error.message.includes('https://a.example.test') && error.message.includes('https://b.example.test') && error.message.includes(work))
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })

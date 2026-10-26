@@ -6,7 +6,7 @@
  * 控制面判过期的租约：停掉本机执行、不再回报。领取期间断网只会让租约过期，由控制面判执行不确定，绝不在这里重跑。
  */
 import { createPublicKey, type KeyObject } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { dirname, join } from 'node:path'
@@ -55,7 +55,25 @@ export const readOutboundRunnerConfig = (env: NodeJS.ProcessEnv) => {
     enrollmentFile: env['CMAP_RUNNER_ENROLLMENT_FILE']?.trim() || join(dirname(signingKeyFile), 'enrollment.json'),
     issuer: env['CMAP_PERMIT_ISSUER']?.trim() || 'cmap:local-control-plane',
     codexModel: required('CMAP_CODEX_MODEL'),
-    workRoot: env['CMAP_WORK_ROOT']?.trim() || undefined,
+    /** 出站模式必须显式指定：一台主机可同时加入多套服务端，默认的仓库内目录会让它们共用运行记录。 */
+    workRoot: required('CMAP_WORK_ROOT'),
+  }
+}
+
+/** 工作目录里记录所属服务端的标记文件。 */
+const WORK_ROOT_MARKER = '.cmap-server-origin'
+
+/**
+ * 认领工作目录：首次启动写下所属服务端 origin；之后启动发现 origin 不同就拒绝，防止两套服务端的 runner 共用一个目录。
+ * 任务 ID 不含服务端身份，共用目录会让 A 服务端的运行记录与结果被交给 B（数据泄漏）。
+ */
+export const claimWorkRoot = (workRoot: string, origin: string): void => {
+  mkdirSync(workRoot, { recursive: true, mode: 0o700 })
+  const marker = join(workRoot, WORK_ROOT_MARKER)
+  if (!existsSync(marker)) return writeFileSync(marker, `${origin}\n`, { mode: 0o600 })
+  const owner = readFileSync(marker, 'utf8').trim()
+  if (owner !== origin) {
+    throw new RangeError(`工作目录 ${workRoot} 属于 ${owner}，但当前 CMAP_CONTROL_PLANE_URL 是 ${origin}；每套服务端须用各自独立的 CMAP_WORK_ROOT`)
   }
 }
 

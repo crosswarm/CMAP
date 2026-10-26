@@ -17,14 +17,15 @@ import { ed25519PublicKeyFromRaw, loadOrCreatePermitKey, loadPinnedPublicKey } f
 import { GATEWAY_ADAPTER_ID } from '../../../adapters/runner-gateway/src/index.ts'
 import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
 import { createRunnerCore, createRunnerDaemon, readRunnerDaemonConfig } from './server.ts'
-import { enrolledRunnerEnv, loadOrEnroll, readOutboundRunnerConfig, startOutboundRunner } from './outbound.ts'
+import { claimWorkRoot, enrolledRunnerEnv, loadOrEnroll, readOutboundRunnerConfig, startOutboundRunner } from './outbound.ts'
 
 const defaultWorkRoot = join(dirname(fileURLToPath(import.meta.url)), '../../../.cmap-work')
 const stopping = new AbortController()
 
 if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
   const config = readOutboundRunnerConfig(process.env)
-  const workRoot = config.workRoot ?? defaultWorkRoot
+  const workRoot = config.workRoot
+  claimWorkRoot(workRoot, config.controlPlaneUrl)
   mkdirSync(dirname(config.signingKeyFile), { recursive: true, mode: 0o700 })
   const { privateKey } = loadOrCreatePermitKey(config.signingKeyFile)
   const enrolled = await loadOrEnroll({
