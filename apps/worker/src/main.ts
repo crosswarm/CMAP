@@ -33,7 +33,7 @@ import { KimiAdapter } from '../../../adapters/kimi-adapter/src/index.ts'
 import { YonWorkAdapter } from '../../../adapters/yonwork-adapter/src/index.ts'
 import { cachedQuotaProbe, probeCodexQuota } from '../../../packages/adapter-sdk/src/quota-probe.ts'
 import { parseAdapterNames } from './adapter-config.ts'
-import { buildRunnerDescriptor } from './runner-config.ts'
+import { buildRunnerDescriptor, readPermitIssuer } from './runner-config.ts'
 import { createActivities } from '../../../workflows/activities.ts'
 import { createDagActivities } from '../../../workflows/dag-activities.ts'
 import { dispatchersFromEnv } from '../../../workflows/dispatchers.ts'
@@ -63,7 +63,7 @@ const memory = memoryUrl && memoryToken ? { url: memoryUrl, token: memoryToken }
 // lap 固定其公钥验签（ADR-0006）。私钥只在本进程内，不进日志、账本或子进程环境。
 const permitKeyFile = process.env['CMAP_PERMIT_KEY_FILE']?.trim()
 const {privateKey,publicKey}=permitKeyFile ? loadOrCreatePermitKey(permitKeyFile) : generateKeyPairSync('ed25519')
-const issuer='cmap:local-control-plane'
+const issuer=readPermitIssuer(process.env)
 const signDispatchPermit:DispatchPermitSigner=(envelope,{runnerId:audienceRunner,adapterId})=>
   issueDispatchPermit({privateKey,issuer,runnerId:audienceRunner,adapterId,envelope})
 const authorization:AdapterAuthorization={mode:'managed',verifier:(token,envelope,adapterId,contextRunner)=>{

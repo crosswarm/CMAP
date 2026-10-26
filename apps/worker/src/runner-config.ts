@@ -33,6 +33,9 @@ const readList = (env: NodeJS.ProcessEnv, key: string): string[] => {
   return values
 }
 
+/** 派发许可签发方；runner 侧同名变量须与之一致。未设置保持历史默认值，多套服务端各配各的以免许可互通。 */
+export const readPermitIssuer = (env: NodeJS.ProcessEnv): string => env.CMAP_PERMIT_ISSUER?.trim() || 'cmap:local-control-plane'
+
 const readHost = (env: NodeJS.ProcessEnv, fallback: string): string => {
   if (!hasEnv(env, 'RUNNER_HOST')) return fallback
   const host = env.RUNNER_HOST!.trim()
