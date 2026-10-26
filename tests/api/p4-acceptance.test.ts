@@ -31,7 +31,7 @@ import { assertCurrentTaskApproval } from '../../workflows/runner-admission.ts'
 import { createActivities } from '../../workflows/activities.ts'
 import { FileFakeAdapter, syntheticActivityDeps, syntheticRunner } from '../workflow/fake-adapter.ts'
 import { scanZeroHit } from '../../scripts/p4-zero-hit.ts'
-import { buildCodexArgs, homeReadDenials, homeToolchainRoots } from '../../adapters/codex-adapter/src/index.ts'
+import { buildCodexArgs, codexBinRoot, homeReadDenials, homeToolchainRoots } from '../../adapters/codex-adapter/src/index.ts'
 import { GIT_HOOKS_DIR, pushGuardEnv } from '../../packages/adapter-sdk/src/push-guard.ts'
 import { buildKimiSandbox } from '../../adapters/kimi-adapter/src/runtime.ts'
 
@@ -365,16 +365,16 @@ describe('P4 安全验收清单：12 项拒绝用例', () => {
       assert.equal(args.includes('-s'), false)
       assert.ok(args.some((a) => a.startsWith(`permissions.cmap.filesystem={${JSON.stringify(join(home, '.ssh'))}="deny"`)), JSON.stringify(args))
     }
-    if (process.platform !== 'darwin') return t.diagnostic('非 macOS：只做参数级断言')
-
-    // Kimi：真实 sandbox-exec 跑 buildKimiSandbox 生成的 profile（不调用 Kimi）
-    const cred = join(runtime, 'cred')
-    const oauth = join(runtime, 'oauth')
-    await mkdir(cred)
-    await mkdir(oauth)
-    const profile = buildKimiSandbox({ workDir: work, runtimeDir: runtime, credentialDir: cred, oauthDir: oauth, userHome: home, bin: '/bin/sh' }, [])
-    const kimi = await execFileP('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', probe], { cwd: work })
-    assert.deepEqual(lines(kimi.stdout), expected, 'Kimi')
+    // Kimi：真实 sandbox-exec 跑 buildKimiSandbox 生成的 profile（不调用 Kimi）；seatbelt 仅 macOS，Kimi 在其他平台拒绝运行
+    if (process.platform === 'darwin') {
+      const cred = join(runtime, 'cred')
+      const oauth = join(runtime, 'oauth')
+      await mkdir(cred)
+      await mkdir(oauth)
+      const profile = buildKimiSandbox({ workDir: work, runtimeDir: runtime, credentialDir: cred, oauthDir: oauth, userHome: home, bin: '/bin/sh' }, [])
+      const kimi = await execFileP('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', probe], { cwd: work })
+      assert.deepEqual(lines(kimi.stdout), expected, 'Kimi')
+    } else t.diagnostic('非 macOS：跳过 Kimi seatbelt')
 
     // Codex：真实 `codex sandbox` 套用 buildCodexArgs 给出的同一权限档（不调用模型）；本机无 codex 则跳过
     try { await execFileP('codex', ['--version']) } catch { return t.diagnostic('无 codex CLI：Codex 只做参数级断言') }
@@ -403,7 +403,7 @@ describe('P4 安全验收清单：12 项拒绝用例', () => {
       await git(join(ws, 'repo'), 'remote', 'add', 'origin', join(ws, 'remote.git'))
     }
     const probe = `cd repo; for r in main release/1.0 feat/x; do git push -q origin HEAD:$r 2>&1 | grep -q 'cmap: 拒绝推送' && echo "REJECTED $r" || echo "PUSHED $r"; done; ` +
-      `: > '${probeFile}' 2>/dev/null && echo HOOK_DIR_WRITABLE || echo HOOK_DIR_READONLY`
+      `(: > '${probeFile}') 2>/dev/null && echo HOOK_DIR_WRITABLE || echo HOOK_DIR_READONLY`
     const lines = (out: string) => out.split('\n').filter((l) => /^(REJECTED|PUSHED|HOOK_DIR)/.test(l))
     const envFor = (repository: Record<string, unknown>) => ({ ...task('t-06', 'mis-06').envelope, permissions: { forbidden: [], repository } }) as TaskEnvelopeV1
     const guard = pushGuardEnv(envFor({ allow_push_branches: ['feat/*'] }))
@@ -414,22 +414,23 @@ describe('P4 安全验收清单：12 项拒绝用例', () => {
       ['REJECTED main', 'REJECTED release/1.0', 'REJECTED feat/x'])
     await rm(probeFile, { force: true })
     const sandboxed = ['REJECTED main', 'REJECTED release/1.0', 'PUSHED feat/x', 'HOOK_DIR_READONLY']
-    if (process.platform !== 'darwin') return t.diagnostic('非 macOS：只验证 hook 本身')
-
-    // Kimi：真实 sandbox-exec 跑 buildKimiSandbox 生成的 profile（hook 目录只读放行）
-    await setup()
-    const rt = join(ws, 'rt')
-    await mkdir(rt)
-    const profile = buildKimiSandbox({ workDir: ws, runtimeDir: rt, credentialDir: rt, oauthDir: rt, userHome: await realpath(homedir()), bin: '/bin/sh' }, [], [GIT_HOOKS_DIR])
-    const kimi = await execFileP('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', probe], { cwd: ws, env: { ...gitEnv, ...guard, PATH: '/usr/bin:/bin' } })
-    assert.deepEqual(lines(kimi.stdout), sandboxed, 'Kimi')
+    // Kimi：真实 sandbox-exec 跑 buildKimiSandbox 生成的 profile（hook 目录只读放行）；仅 macOS
+    if (process.platform === 'darwin') {
+      await setup()
+      const rt = join(ws, 'rt')
+      await mkdir(rt)
+      const profile = buildKimiSandbox({ workDir: ws, runtimeDir: rt, credentialDir: rt, oauthDir: rt, userHome: await realpath(homedir()), bin: '/bin/sh' }, [], [GIT_HOOKS_DIR])
+      const kimi = await execFileP('/usr/bin/sandbox-exec', ['-p', profile, '/bin/sh', '-c', probe], { cwd: ws, env: { ...gitEnv, ...guard, PATH: '/usr/bin:/bin' } })
+      assert.deepEqual(lines(kimi.stdout), sandboxed, 'Kimi')
+    } else t.diagnostic('非 macOS：跳过 Kimi seatbelt')
 
     // Codex：真实 `codex sandbox` 套用 Adapter 的权限档与 shell 环境（hook 规则只经参数注入，不靠进程环境）；本机无 codex 则跳过
     try { await execFileP('codex', ['--version']) } catch { return t.diagnostic('无 codex CLI：跳过 Codex 沙箱') }
     await setup()
     const home = await realpath(homedir())
     const args = buildCodexArgs(envFor({ allow_push_branches: ['feat/*'] }), { workDir: ws, resultFile: '/r', outputSchemaPath: '/s', prompt: 'p',
-      homeDenials: await homeReadDenials(home, [ws, base, GIT_HOOKS_DIR, ...(await homeToolchainRoots(home, process.env['PATH']))]) })
+      homeDenials: await homeReadDenials(home, [ws, base, GIT_HOOKS_DIR, ...(await homeToolchainRoots(home, process.env['PATH'])),
+        ...[await codexBinRoot(home, 'codex', process.env['PATH'])].filter((r): r is string => r !== null)]) })
     const perms = args.filter((a, i) => args[i - 1] === '-c' && /^(permissions\.cmap\.|shell_environment_policy\.)/.test(a)).flatMap((a) => ['-c', a])
     const codex = await execFileP('codex', ['sandbox', ...perms, '-P', 'cmap', '-C', ws, '--', '/bin/sh', '-c', probe],
       { cwd: ws, env: { ...process.env, TMPDIR: base } })

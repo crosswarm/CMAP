@@ -33,8 +33,11 @@ if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
   })
   const core = await createRunnerCore({
     env: enrolledRunnerEnv(process.env, enrolled), publicKey: loadPinnedPublicKey(config.publicKeyFile),
-    issuer: config.issuer, workRoot, permitAdapterId: GATEWAY_ADAPTER_ID,
+    issuer: config.issuer, workRoot, permitAdapterId: GATEWAY_ADAPTER_ID, sandboxSelfCheck: true,
   })
+  // 出站模式没有控制面来问 health：沙箱自检不过就不领任务（P4-05b，Linux/macOS 同一检查）
+  const health = await core.adapter.health()
+  if (health.state !== 'healthy') throw new Error(`Codex 不可用，拒绝启动：${health.detail ?? health.state}`)
   const outbound = startOutboundRunner({
     core, controlPlaneUrl: config.controlPlaneUrl, signingKey: privateKey,
     controlPlanePublicKey: ed25519PublicKeyFromRaw(enrolled.control_plane_public_key), signal: stopping.signal,
@@ -55,6 +58,7 @@ if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
     workRoot,
     // 额度快照（ADR-0009）：5 分钟缓存；health 最多等 1.5 秒，留在控制面 3 秒健康超时之内，等不到先报旧值或 unknown
     quota: cachedQuotaProbe('codex', () => probeCodexQuota(), { waitMs: 1_500 }),
+    sandboxSelfCheck: true,
   })
   const stop = (): void => {
     server.close()

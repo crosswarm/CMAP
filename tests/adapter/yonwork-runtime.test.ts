@@ -9,6 +9,9 @@ import {
   YonWorkRuntimeError,
 } from '../../adapters/yonwork-adapter/src/runtime.ts'
 
+// YonWork 桌面端的运行时关联只按 macOS 布局（~/Library/Application Support）查找；Linux 未支持，见 ADR-0010
+const darwinOnly = { skip: process.platform !== 'darwin' && 'YonWork 运行时关联仅 macOS' }
+
 const logFile = (dir: string): string => join(dir, 'calls.jsonl')
 
 const createRuntimeAssociation = async (dir: string): Promise<string> => {
@@ -107,7 +110,7 @@ const logLines = async (file: string): Promise<Array<{
 const sameArgs = (a: readonly string[], b: readonly string[]): boolean =>
   JSON.stringify(a) === JSON.stringify(b)
 
-test('default OpenClaw binary resolves to yonworkctl sibling and never falls back to PATH', async (t) => {
+test('default OpenClaw binary resolves to yonworkctl sibling and never falls back to PATH', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-sibling-openclaw-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -141,7 +144,7 @@ test('default OpenClaw binary resolves to yonworkctl sibling and never falls bac
   assert.deepEqual(gatewayCall?.argv, ['gateway', 'call', 'tools.effective', '--json', '--params', JSON.stringify({ agentId, sessionKey }), '--timeout', '5000'])
 })
 
-test('default OpenClaw binary fails closed when yonworkctl sibling is absent', async (t) => {
+test('default OpenClaw binary fails closed when yonworkctl sibling is absent', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-missing-sibling-openclaw-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -172,7 +175,7 @@ test('default OpenClaw binary fails closed when yonworkctl sibling is absent', a
   )
 })
 
-test('reads explicit cmap agent metadata and observes exact empty effective policy via gateway call', async (t) => {
+test('reads explicit cmap agent metadata and observes exact empty effective policy via gateway call', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-runtime-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -224,7 +227,7 @@ test('reads explicit cmap agent metadata and observes exact empty effective poli
   assert.equal(gatewayCall?.env.OPENCLAW_GATEWAY_TOKEN, null)
 })
 
-test('policy hash ignores the per-attempt session key', async (t) => {
+test('policy hash ignores the per-attempt session key', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-policy-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -253,7 +256,7 @@ test('policy hash ignores the per-attempt session key', async (t) => {
   assert.equal(a.policySha256, b.policySha256)
 })
 
-test('prepares empty session, streams chat, exposes event readiness, and aborts fixed own scope', async (t) => {
+test('prepares empty session, streams chat, exposes event readiness, and aborts fixed own scope', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-chat-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -363,7 +366,7 @@ test('fails closed when current Host runtime association is missing', async (t) 
   )
 })
 
-test('fails closed when Host agent metadata points outside the active runtime', async (t) => {
+test('fails closed when Host agent metadata points outside the active runtime', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-agentdir-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -389,7 +392,7 @@ test('fails closed when Host agent metadata points outside the active runtime', 
   )
 })
 
-test('fails closed when OpenClaw gateway association is missing', async (t) => {
+test('fails closed when OpenClaw gateway association is missing', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-no-gateway-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   await createRuntimeAssociation(dir)
@@ -409,7 +412,7 @@ test('fails closed when OpenClaw gateway association is missing', async (t) => {
   )
 })
 
-test('fails closed when same-profile OpenClaw config targets a remote gateway', async (t) => {
+test('fails closed when same-profile OpenClaw config targets a remote gateway', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-remote-gateway-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -434,7 +437,7 @@ test('fails closed when same-profile OpenClaw config targets a remote gateway', 
   )
 })
 
-test('bounds subprocess timeout and stdout size while preserving split UTF-8', async (t) => {
+test('bounds subprocess timeout and stdout size while preserving split UTF-8', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-bounds-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)
@@ -475,7 +478,7 @@ test('bounds subprocess timeout and stdout size while preserving split UTF-8', a
   assert.equal(metadata.cliVersion, '1.0.0')
 })
 
-test('stream readiness waits for real handshake and onChunk exceptions are sanitized', async (t) => {
+test('stream readiness waits for real handshake and onChunk exceptions are sanitized', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-stream-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   await createRuntimeAssociation(dir)
@@ -526,7 +529,7 @@ test('stream readiness waits for real handshake and onChunk exceptions are sanit
   )
 })
 
-test('fails closed on malformed, non-empty, or noticed effective policy', async (t) => {
+test('fails closed on malformed, non-empty, or noticed effective policy', darwinOnly, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'cmap-yonwork-drift-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   const runtimeDir = await createRuntimeAssociation(dir)

@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
-import { buildCodexArgs, homeReadDenials, homeToolchainRoots, InvalidEffortError } from '../../adapters/codex-adapter/src/index.ts'
+import { buildCodexArgs, codexBinRoot, homeReadDenials, homeToolchainRoots, InvalidEffortError } from '../../adapters/codex-adapter/src/index.ts'
 import { GIT_HOOKS_DIR } from '../../packages/adapter-sdk/src/push-guard.ts'
 
 const SHA40 = 'e35a48a1b2c3d4e5f60718293a4b5c6d7e8f9012'
@@ -209,6 +209,21 @@ describe('homeReadDenials：只放行 keep 及其祖先目录', () => {
   })
 })
 
+describe('codexBinRoot：Linux codex 在沙箱内重新执行自身二进制', () => {
+  test('PATH 中的 codex 链到 HOME 下的解包目录时放行该目录；HOME 外或找不到时为 null', async (t) => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'cmap-bin-')))
+    t.after(() => rm(home, { recursive: true, force: true }))
+    for (const d of ['.local/bin', '.local/codex/vendor/bin']) await mkdir(join(home, d), { recursive: true })
+    await writeFile(join(home, '.local/codex/vendor/bin/codex'), '')
+    await symlink(join(home, '.local/codex/vendor/bin/codex'), join(home, '.local/bin/codex'))
+    const path = ['/nonexistent', join(home, '.local/bin')].join(delimiter)
+    assert.equal(await codexBinRoot(home, 'codex', path), join(home, '.local/codex/vendor/bin'))
+    assert.equal(await codexBinRoot(home, join(home, '.local/bin/codex')), join(home, '.local/codex/vendor/bin'))
+    assert.equal(await codexBinRoot(home, 'codex', '/usr/bin'), null)
+    assert.equal(await codexBinRoot(home, 'missing-codex', path), null)
+  })
+})
+
 describe('homeToolchainRoots：PATH 中 HOME 下的目录', () => {
   test('Homebrew 前缀整体放行，其他 bin 目录只放行自身，HOME 外与不存在的目录忽略', async (t) => {
     const home = await realpath(await mkdtemp(join(tmpdir(), 'cmap-path-')))
@@ -216,5 +231,15 @@ describe('homeToolchainRoots：PATH 中 HOME 下的目录', () => {
     for (const d of ['.homebrew/bin', '.homebrew/Cellar', '.codex/bin', 'bin']) await mkdir(join(home, d), { recursive: true })
     const path = [join(home, '.homebrew/bin'), join(home, '.codex/bin'), join(home, 'bin'), '/usr/bin', join(home, 'missing')].join(delimiter)
     assert.deepEqual(await homeToolchainRoots(home, path), [join(home, '.homebrew'), join(home, '.codex/bin'), join(home, 'bin')])
+  })
+
+  test('npm 全局前缀整体放行；普通 bin 目录只放行自身，不放行其中链接的目标', async (t) => {
+    const home = await realpath(await mkdtemp(join(tmpdir(), 'cmap-path-')))
+    t.after(() => rm(home, { recursive: true, force: true }))
+    for (const d of ['.npm-global/bin', '.npm-global/lib/node_modules', '.local/bin', 'project/scripts']) await mkdir(join(home, d), { recursive: true })
+    await writeFile(join(home, 'project/scripts/tool'), '')
+    await symlink(join(home, 'project/scripts/tool'), join(home, '.local/bin/tool'))
+    const path = [join(home, '.npm-global/bin'), join(home, '.local/bin')].join(delimiter)
+    assert.deepEqual(await homeToolchainRoots(home, path), [join(home, '.npm-global'), join(home, '.local/bin')])
   })
 })

@@ -101,6 +101,7 @@ const localCodex = (): AgentAdapter => {
     outputSchemaPath: join(repoRoot, 'schemas/codex-output.v1.schema.json'),
     // 运行记录：Worker 重启后据此恢复对 Codex 子进程的观察，且绝不重跑（S1）。
     runsDir: join(workRoot, '.runs'),
+    sandboxSelfCheck: true,
     // 额度快照（ADR-0009）：零额度探针 + 5 分钟缓存，随 health 进入路由
     quota: cachedQuotaProbe('codex', () => probeCodexQuota()),
   })

@@ -170,6 +170,8 @@ export interface RunnerCoreOptions {
   readonly nowMs?: () => number
   /** 本机 Codex 账号的额度快照来源（ADR-0009，带缓存的零额度探针）；设置后随 health 应答上报。 */
   readonly quota?: () => Promise<QuotaSnapshotV1>
+  /** 生产入口开启：health 先实测 codex 权限档在本平台生效（见 CodexAdapterOptions.sandboxSelfCheck）。 */
+  readonly sandboxSelfCheck?: boolean
 }
 
 /**
@@ -200,6 +202,7 @@ export const createRunnerCore = async (opts: RunnerCoreOptions) => {
     runsDir: join(opts.workRoot, '.runs'),
     defaultModel: codexModel,
     ...(opts.quota ? { quota: opts.quota } : {}),
+    ...(opts.sandboxSelfCheck ? { sandboxSelfCheck: true } : {}),
   })
   const runner = buildRunnerDescriptor(opts.env, [await adapter.discover()])
   const bindings = new Map<string, RemoteTaskBinding>()

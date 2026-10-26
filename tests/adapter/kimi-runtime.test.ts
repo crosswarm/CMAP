@@ -12,6 +12,8 @@ import { execFile } from 'node:child_process'
 import { createServer, type Server } from 'node:net'
 import { once } from 'node:events'
 import { promisify } from 'node:util'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   buildKimiSandbox,
   assertNoProjectMcp,
@@ -33,7 +35,7 @@ test(
     const [denied, deniedPort] = await listen()
     const [allowed, allowedPort] = await listen()
     t.after(() => { denied.close(); allowed.close() })
-    const root = await mkdtemp('/private/tmp/cmap-kimi-net-')
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'cmap-kimi-net-'))
     t.after(() => rm(root, { recursive: true, force: true }))
     const profile = buildKimiSandbox({
       workDir: root, runtimeDir: root, credentialDir: root, oauthDir: root,
@@ -57,7 +59,7 @@ test(
   'Kimi 外层沙箱保护目录并禁止创建 MCP 配置',
   { skip: process.platform !== 'darwin' },
   async (t) => {
-    const root = await mkdtemp('/private/tmp/cmap-kimi-boundary-')
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'cmap-kimi-boundary-'))
     t.after(() => rm(root, { recursive: true, force: true }))
     const paths = {
       workDir: root + '/work',
@@ -95,7 +97,7 @@ test(
 
 for (const linked of [false, true])
   test('拒绝已有 MCP 配置（含符号链接），linked=' + linked, async (t) => {
-    const root = await mkdtemp('/private/tmp/cmap-kimi-mcp-')
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'cmap-kimi-mcp-'))
     t.after(() => rm(root, { recursive: true, force: true }))
     if (linked) {
       await writeFile(root + '/payload.json', '{}')
@@ -105,7 +107,7 @@ for (const linked of [false, true])
   })
 
 test('拒绝继承 Git 根目录的 MCP 配置', async (t) => {
-  const root = await mkdtemp('/private/tmp/cmap-kimi-parent-mcp-')
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'cmap-kimi-parent-mcp-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(root + '/.git')
   await mkdir(root + '/tasks/current', { recursive: true })

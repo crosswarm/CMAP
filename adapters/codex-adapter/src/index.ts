@@ -107,7 +107,7 @@ const permissionArgs = (sandbox: CodexSandbox, homeDenials: readonly string[]): 
  *
  * 不直接拒绝整个 ~：实测工作区在 HOME 下（生产 CMAP_WORK_ROOT 即是）时，祖先目录元数据不可读会让
  * `sh` 的 cd 与 node 的 realpathSync 失败。所以只放行祖先目录本身（可列出名字），拒绝其余兄弟条目。
- * 符号链接跳过：seatbelt 按解析后的路径判定，指回 HOME 的链接由目标的真实位置覆盖。
+ * 符号链接跳过：seatbelt 与 Linux 的 bwrap 都按解析后的路径判定（Linux 2026-10-26 实测），指回 HOME 的链接由目标的真实位置覆盖。
  * keep 须是物理路径。shortcut: 启动后新建的 HOME 条目不在拒绝清单内，需要时改为 seatbelt 外层包装。
  */
 export const homeReadDenials = async (home: string, keep: readonly string[]): Promise<string[]> => {
@@ -126,17 +126,32 @@ export const homeReadDenials = async (home: string, keep: readonly string[]): Pr
   return denied
 }
 
-/** PATH 中位于 HOME 下的目录；Homebrew 前缀（<prefix>/bin 旁有 Cellar）整体放行，否则 bin 里的链接解析不了。 */
+/** PATH 中位于 HOME 下的目录；Homebrew 前缀（<prefix>/bin 旁有 Cellar）与 npm 全局前缀（旁有 lib/node_modules）整体放行，否则 bin 里的链接解析不了。 */
 export const homeToolchainRoots = async (home: string, path = ''): Promise<string[]> => {
   const roots = new Set<string>()
+  const isDir = async (p: string) => (await stat(p).catch(() => null))?.isDirectory() === true
   for (const entry of path.split(delimiter)) {
     const real = await realpath(entry).catch(() => null)
     if (!real || !real.startsWith(home + sep)) continue
     const prefix = dirname(real)
-    const brew = prefix !== home && (await stat(join(prefix, 'Cellar')).catch(() => null))?.isDirectory()
-    roots.add(brew ? prefix : real)
+    const isPrefix = prefix !== home && ((await isDir(join(prefix, 'Cellar'))) || (await isDir(join(prefix, 'lib', 'node_modules'))))
+    roots.add(isPrefix ? prefix : real)
   }
   return [...roots]
+}
+
+/**
+ * codex 可执行文件解析后的所在目录（在 HOME 下时）。Linux 上 codex 在沙箱内重新执行自身二进制，
+ * 二进制被拒读时整个任务失败（2026-10-26 OrbStack 实测，`~/.local/bin/codex` 链到解包目录）。
+ * 只放行这一个目录：放行 PATH 里所有链接的目标会把无关项目目录暴露给 Agent，且拒绝清单过长时 seatbelt 编译失败。
+ */
+export const codexBinRoot = async (home: string, bin: string, path = ''): Promise<string | null> => {
+  const candidates = bin.includes(sep) ? [bin] : path.split(delimiter).filter(Boolean).map((d) => join(d, bin))
+  for (const candidate of candidates) {
+    const real = await realpath(candidate).catch(() => null)
+    if (real) return real.startsWith(home + sep) ? dirname(real) : null
+  }
+  return null
 }
 
 /** 契约允许的四档。codex 恰好原生支持全部，无需降级映射。 */
@@ -308,6 +323,11 @@ export interface CodexAdapterOptions {
   readonly defaultModel?: string
   /** 额度快照来源（ADR-0009，通常是带缓存的零额度探针）；设置后 health 附带快照。 */
   readonly quota?: () => Promise<QuotaSnapshotV1>
+  /**
+   * health 前先用 `codex sandbox` 实测权限档的拒绝条目在本平台生效（P4-05b），不生效即 unavailable、不接任务。
+   * 生产 runner 与 Worker 开启；测试里的假 codex 不支持 sandbox 子命令，默认关闭。
+   */
+  readonly sandboxSelfCheck?: boolean
 }
 
 export class CodexAdapter implements AgentAdapter {
@@ -325,6 +345,9 @@ export class CodexAdapter implements AgentAdapter {
   readonly #runsDir: string | undefined
   readonly #defaultModel: string | undefined
   readonly #quota: (() => Promise<QuotaSnapshotV1>) | undefined
+  readonly #sandboxSelfCheck: boolean
+  /** 自检通过后进程内复用；失败不缓存，下次 health 重测。 */
+  #sandboxVerified = false
   readonly #pending = new Map<string, Promise<RemoteTaskBinding>>()
 
   constructor(opts: CodexAdapterOptions) {
@@ -337,6 +360,7 @@ export class CodexAdapter implements AgentAdapter {
     this.restartSafe = opts.runsDir !== undefined
     this.#defaultModel = opts.defaultModel
     this.#quota = opts.quota
+    this.#sandboxSelfCheck = opts.sandboxSelfCheck ?? false
   }
 
   async discover(): Promise<AdapterDescriptor> {
@@ -405,8 +429,9 @@ export class CodexAdapter implements AgentAdapter {
     // workspace-write 通常放行 TMPDIR，放那里 Agent 能抢先替换结果文件，所以放 HOME 下 CMAP 自有目录。
     const physicalTmpDir = await realpath(tmpdir())
     const home = await realpath(homedir())
+    const binRoot = await codexBinRoot(home, this.#bin, process.env['PATH'])
     const homeDenials = await homeReadDenials(home, [
-      physicalWorkDir, physicalTmpDir, GIT_HOOKS_DIR, ...(await homeToolchainRoots(home, process.env['PATH'])),
+      physicalWorkDir, physicalTmpDir, GIT_HOOKS_DIR, ...(await homeToolchainRoots(home, process.env['PATH'])), ...(binRoot ? [binRoot] : []),
     ])
     const resultDir = this.#runsDir ?? (await makeStandaloneResultDir())
     const resultFile = join(resultDir, `.cmap-result-${envelope.identity.task_id}.json`)
@@ -759,8 +784,39 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async health(): Promise<AdapterHealth> {
-    const [health, quota] = await Promise.all([this.#versionHealth(), this.#quota?.()])
+    const [version, quota] = await Promise.all([this.#versionHealth(), this.#quota?.()])
+    const sandboxFailure = version.state === 'healthy' ? await this.#sandboxFailure() : null
+    const health: AdapterHealth = sandboxFailure ? { state: 'unavailable', checked_at: version.checked_at, detail: sandboxFailure } : version
     return quota ? { ...health, quota } : health
+  }
+
+  /** 在临时目录里放一个被拒绝的探针文件：工作区可读而探针不可读才算沙箱生效。返回失败原因，通过返回 null。 */
+  async #sandboxFailure(): Promise<string | null> {
+    if (!this.#sandboxSelfCheck || this.#sandboxVerified) return null
+    const dir = await mkdtemp(join(await realpath(tmpdir()), 'cmap-codex-selfcheck-'))
+    try {
+      const ws = join(dir, 'ws')
+      await mkdir(ws)
+      await writeFile(join(ws, 'in.txt'), 'ok')
+      await writeFile(join(dir, 'canary'), 'secret')
+      const probe = 'cat in.txt >/dev/null && echo WORKSPACE_OK; cat ../canary >/dev/null 2>&1 && echo DENY_BROKEN || echo DENY_OK'
+      const args = ['sandbox', ...permissionArgs('workspace-write', [join(dir, 'canary')]), '-P', 'cmap', '-C', ws, '--', '/bin/sh', '-c', probe]
+      const { code, out } = await new Promise<{ code: number | null; out: string }>((resolve) => {
+        const child = spawn(this.#bin, args, { cwd: ws, env: codexProviderEnv(), stdio: ['ignore', 'pipe', 'pipe'] })
+        let out = ''
+        child.stdout?.on('data', (c: Buffer) => { out += c.toString('utf8') })
+        child.on('close', (code) => resolve({ code, out }))
+        child.on('error', (err) => resolve({ code: null, out: String(err) }))
+      })
+      const lines = out.split('\n').map((l) => l.trim())
+      if (code === 0 && lines.includes('WORKSPACE_OK') && lines.includes('DENY_OK')) {
+        this.#sandboxVerified = true
+        return null
+      }
+      return `codex 沙箱自检未通过（退出码 ${code}）：${out.trim().slice(0, 200) || '无输出'}`
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   }
 
   async #versionHealth(): Promise<AdapterHealth> {
