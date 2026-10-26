@@ -371,6 +371,10 @@ export interface Store {
   listGatewayRunners(tenant: string): Promise<readonly GatewayRunner[]>
   /** 记下最近一次通过认证的请求时间；只前进不后退。 */
   touchGatewayRunner(runnerId: string, at: string): Promise<void>
+  /** 记下 runner 随领取上报的最新额度快照；observed_at 不早于已存的才覆盖，未登记的 runner 忽略。 */
+  putGatewayRunnerQuota(runnerId: string, quota: QuotaSnapshotV1): Promise<void>
+  /** 全部未吊销 runner 各自最新的额度快照（跨租户；快照只含账号摘要与用量）。 */
+  listGatewayRunnerQuotas(): Promise<readonly QuotaSnapshotV1[]>
   /** 入队一次派发。同 lease_id 同内容幂等返回既有记录，内容不同抛 GatewayLeaseConflictError。 */
   enqueueGatewayLease(input: EnqueueGatewayLeaseInput): Promise<GatewayLease>
   /**

@@ -224,7 +224,11 @@ export class GatewayRunnerAdapter implements AgentAdapter {
 
   async health(): Promise<AdapterHealth> {
     const checked = await this.#store.healthCheck()
-    return { state: checked.ok ? 'healthy' : 'unavailable', checked_at: new Date(this.#now()).toISOString() }
+    // 出站 runner 随领取上报的额度（ADR-0009）：取读到了的（ok）里最新的一份，没有就不带，路由按未知处理。
+    // 池里多个 runner 共用一个 Agent 路由，这里不区分账号；同一账号的多 runner 本就是一个额度池。
+    const quotas = await this.#store.listGatewayRunnerQuotas()
+    const quota = [...quotas].sort((a, b) => Number(b.status === 'ok') - Number(a.status === 'ok') || Date.parse(b.observed_at) - Date.parse(a.observed_at))[0]
+    return { state: checked.ok ? 'healthy' : 'unavailable', checked_at: new Date(this.#now()).toISOString(), ...(quota ? { quota } : {}) }
   }
 
   #cancelMessage(binding: RemoteTaskBinding, reason: string) {

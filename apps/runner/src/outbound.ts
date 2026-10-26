@@ -14,7 +14,7 @@ import { Readable } from 'node:stream'
 
 import {
   rawEd25519PublicKey, signEnrollmentProof, validateEnrollmentMessage, validateGatewayMessage,
-  type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1,
+  type QuotaSnapshotV1, type RunnerEnrollmentMessageV1, type RunnerGatewayMessageV1,
 } from '#domain-model'
 import { AdapterError } from '#adapter-sdk'
 import { signRunnerRequest, verifyRunnerResponse } from '../../../packages/domain-model/src/dispatch-permit.ts'
@@ -153,6 +153,8 @@ export interface OutboundRunnerOptions {
   readonly log?: (line: string) => void
   /** 同类领取失败的重复提示间隔，默认 5 分钟（首次立即提示）。 */
   readonly logIntervalMs?: number
+  /** 额度探针（ADR-0009，含缓存）：每次领取附带最新快照；读不到或抛错就不带，控制面按未知处理。 */
+  readonly quota?: () => Promise<QuotaSnapshotV1>
   readonly signal?: AbortSignal
 }
 
@@ -350,8 +352,10 @@ export const startOutboundRunner = (opts: OutboundRunnerOptions) => {
     while (!signal?.aborted) {
       let reply: ClaimResult
       try {
+        const quota = await opts.quota?.().catch(() => undefined)
         const { message } = await gatewayCall(client, '/v1/gateway/claim', {
           schema: SCHEMA, kind: 'claim', runner_id: runnerId, wait_seconds: waitSeconds, held_leases: [...held.keys()],
+          ...(quota ? { quota } : {}),
         }, (waitSeconds + 15) * 1000, signal)
         if (message.kind !== 'claim_result' || message.runner_id !== runnerId) throw new GatewayRejectedError('PROTOCOL_INVALID')
         reply = message

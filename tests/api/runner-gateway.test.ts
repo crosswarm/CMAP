@@ -197,3 +197,19 @@ test('runner_id 与签名身份不一致、或消息不合契约：签名的 400
   assert.equal(tooLong.status, 400)
   assert.equal((await g.store.getGatewayLease('lse-1'))!.state, 'queued')
 })
+
+test('领取附带的额度快照由网关按 runner 保存（只留最新）；不带或被篡改的快照不影响领取', async (t) => {
+  const g = await setup(t)
+  const quota = (observed_at: string, used: number) => ({
+    schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: 'a'.repeat(64), ordinary_usage_allowed: true, observed_at, status: 'ok',
+    windows: [{ kind: 'primary', used_percent: used, window_minutes: 10080, resets_at: null }],
+  })
+  const claimWith = (q?: unknown) => g.call('/v1/gateway/claim', { schema: S, kind: 'claim', runner_id: 'lap', wait_seconds: 1, held_leases: [], ...(q ? { quota: q } : {}) })
+  assert.equal((await claimWith()).status, 200)
+  assert.deepEqual(await g.store.listGatewayRunnerQuotas(), [])
+  assert.equal((await claimWith(quota('2026-10-26T00:00:10.000Z', 40))).status, 200)
+  assert.equal((await claimWith(quota('2026-10-26T00:00:00.000Z', 90))).status, 200)
+  assert.deepEqual(await g.store.listGatewayRunnerQuotas(), [quota('2026-10-26T00:00:10.000Z', 40)])
+  assert.equal((await claimWith({ ...quota('2026-10-26T00:00:20.000Z', 1), account_ref: 'raw-account-id' })).status, 400, '账号不是哈希摘要即不合契约')
+  assert.equal((await g.store.listGatewayRunnerQuotas()).length, 1)
+})

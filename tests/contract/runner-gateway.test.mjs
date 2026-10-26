@@ -47,7 +47,19 @@ const patch = (name, fn) => {
   return [name, value]
 }
 
+const quota = {
+  schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: H, ordinary_usage_allowed: true, observed_at: '2026-10-26T00:00:00.000Z', status: 'ok',
+  windows: [{ kind: 'primary', used_percent: 84, window_minutes: 10080, resets_at: '2026-10-29T00:00:00.000Z' }],
+}
+
 describe('runner-gateway schema', () => {
+  test('领取可附带账号级额度快照（可选）；账号只能是哈希摘要，快照不得带多余字段', () => {
+    assert.equal(validate({ ...valid.claim, quota }), true, JSON.stringify(validate.errors))
+    for (const bad of [{ ...quota, account_ref: 'raw-account-id' }, { ...quota, email: 'a@b.c' }, { ...quota, status: 'maybe' }]) {
+      assert.equal(validate({ ...valid.claim, quota: bad }), false, JSON.stringify(bad))
+    }
+  })
+
   test('接受出站领取、回报、续租与错误的每种消息', () => {
     for (const [name, value] of Object.entries(valid)) assert.equal(validate(value), true, `${name}: ${JSON.stringify(validate.errors)}`)
   })

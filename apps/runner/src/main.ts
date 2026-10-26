@@ -39,6 +39,9 @@ if (process.env['CMAP_CONTROL_PLANE_URL']?.trim()) {
   const outbound = startOutboundRunner({
     core, controlPlaneUrl: config.controlPlaneUrl, signingKey: privateKey,
     controlPlanePublicKey: ed25519PublicKeyFromRaw(enrolled.control_plane_public_key), signal: stopping.signal,
+    // 额度快照（ADR-0009）随领取上报；缓存 2 分钟，留足领取间隔（至多 50 秒）与控制面 5 分钟过期阈值之间的余量，
+    // 探测最多等 1.5 秒，等不到先带旧值（没有就不带），不拖慢领取
+    quota: cachedQuotaProbe('codex', () => probeCodexQuota(), { ttlMs: 120_000, waitMs: 1_500 }),
   })
   process.on('SIGINT', () => stopping.abort())
   process.on('SIGTERM', () => stopping.abort())

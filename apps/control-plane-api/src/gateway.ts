@@ -126,6 +126,7 @@ export const createRunnerGateway = (opts: RunnerGatewayOptions & {
 
   const claim = async (msg: Claim, signal: AbortSignal) => {
     const at = now()
+    if (msg.quota) await store.putGatewayRunnerQuota(msg.runner_id, msg.quota)
     const expiresAt = new Date(at + ttl).toISOString()
     const { renewed, expired } = await store.renewGatewayLeases(msg.runner_id, msg.held_leases, new Date(at).toISOString(), expiresAt)
     const held = renewed.map((lease) => lease.lease_id)

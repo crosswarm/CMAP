@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { MemoryStore, rawEd25519PublicKey, type GatewayRunner, type Mission, type Store, type TaskEnvelopeV1 } from '#domain-model'
+import { MemoryStore, rawEd25519PublicKey, type GatewayRunner, type Mission, type QuotaSnapshotV1, type Store, type TaskEnvelopeV1 } from '#domain-model'
 import { DispatchPermitError, verifyDispatchPermit } from '#domain-model'
 import type { AdapterAuthorization } from '#adapter-sdk'
 import { createControlPlane } from '../../apps/control-plane-api/src/server.ts'
@@ -78,7 +78,7 @@ export const startGatewayFixture = async (opts: GatewayFixtureOptions = {}) => {
   const stops: AbortController[] = []
 
   /** 登记一个 runner 并以出站模式启动；stop() 模拟断网/进程退出（不再续租、不再回报）。 */
-  const startRunner = async (runnerId: string, o: { owner?: string; key?: { privateKey: KeyObject; publicKey: KeyObject }; register?: boolean; overrides?: Partial<GatewayRunner>; log?: (line: string) => void; logIntervalMs?: number } = {}) => {
+  const startRunner = async (runnerId: string, o: { owner?: string; key?: { privateKey: KeyObject; publicKey: KeyObject }; register?: boolean; overrides?: Partial<GatewayRunner>; log?: (line: string) => void; logIntervalMs?: number; quota?: () => Promise<QuotaSnapshotV1> } = {}) => {
     const key = o.key ?? generateKeyPairSync('ed25519')
     const record = gatewayRunnerRecord(runnerId, key.publicKey, { ...(o.owner ? { owner: o.owner } : {}), ...o.overrides })
     if (o.register !== false) await store.registerGatewayRunner(record)
@@ -91,7 +91,7 @@ export const startGatewayFixture = async (opts: GatewayFixtureOptions = {}) => {
     const loop = startOutboundRunner({
       core, controlPlaneUrl: apiUrl, signingKey: key.privateKey, controlPlanePublicKey: controlPlaneKey.publicKey,
       waitSeconds: 1, statusIntervalMs: 20, retryMs: 50, signal: stop.signal,
-      ...(o.log ? { log: o.log } : {}), ...(o.logIntervalMs ? { logIntervalMs: o.logIntervalMs } : {}),
+      ...(o.log ? { log: o.log } : {}), ...(o.quota ? { quota: o.quota } : {}), ...(o.logIntervalMs ? { logIntervalMs: o.logIntervalMs } : {}),
     })
     return { record, key, core, loop, stop: () => stop.abort() }
   }

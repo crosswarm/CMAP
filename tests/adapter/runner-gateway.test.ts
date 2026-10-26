@@ -8,10 +8,10 @@ import { access, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { Readable } from 'node:stream'
 import { join } from 'node:path'
 
-import { issueDispatchPermit, verifyDispatchPermit, type RemoteRunnerDispatchV1, type TaskEnvelopeV1 } from '#domain-model'
+import { issueDispatchPermit, verifyDispatchPermit, type QuotaSnapshotV1, type RemoteRunnerDispatchV1, type TaskEnvelopeV1 } from '#domain-model'
 import { gatewayCall, gatewayUpload } from '../../apps/runner/src/outbound.ts'
 import { GATEWAY_ADAPTER_ID, gatewayLeaseId } from '../../adapters/runner-gateway/src/index.ts'
-import { controlPlaneKey, startGatewayFixture } from './runner-gateway-fixture.ts'
+import { controlPlaneKey, gatewayRunnerRecord, startGatewayFixture } from './runner-gateway-fixture.ts'
 import { ISSUER, bigArtifact, lines, sha256, trust } from './remote-runner-fixture.ts'
 
 const issuePermitFor = (runnerId: string, envelope: TaskEnvelopeV1): string =>
@@ -365,5 +365,37 @@ test('出站模式必须显式设置 CMAP_WORK_ROOT；工作目录标记所属�
       (error: Error) => error.message.includes('https://a.example.test') && error.message.includes('https://b.example.test') && error.message.includes(work))
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('出站 runner 随领取上报额度：GatewayRunnerAdapter.health 返回在线 runner 的最新快照；读不到就是未知，不报错', async () => {
+  const { generateKeyPairSync } = await import('node:crypto')
+  const f = await startGatewayFixture()
+  try {
+    assert.equal((await f.gateway.health()).quota, undefined, '没有 runner 上报过：未知')
+    const snapshot: QuotaSnapshotV1 = {
+      schema: 'cmap/quota-snapshot/v1', provider: 'codex', account_ref: 'b'.repeat(64), ordinary_usage_allowed: true,
+      observed_at: new Date().toISOString(), status: 'ok',
+      windows: [{ kind: 'primary', used_percent: 12, window_minutes: 10080, resets_at: null }],
+    }
+    // 探针失败的 runner 照常领取，只是不上报
+    const quiet = await f.startRunner('quiet-gw', { quota: () => Promise.reject(new Error('probe failed')) })
+    await until(async () => (await f.store.getGatewayRunner('quiet-gw'))!.last_seen_at !== null, 'quiet 上线')
+    assert.equal((await f.gateway.health()).quota, undefined)
+    quiet.stop()
+
+    await f.startRunner('lap-gw', { quota: async () => snapshot })
+    await until(async () => (await f.gateway.health()).quota !== undefined, 'health 看到 runner 上报的额度')
+    const health = await f.gateway.health()
+    assert.deepEqual(health.quota, snapshot)
+    assert.equal(health.state, 'healthy')
+
+    // 同时有多份：优先取读到了的（ok）快照，未知的快照不遮住它
+    const unknown: QuotaSnapshotV1 = { ...snapshot, account_ref: null, windows: [], ordinary_usage_allowed: null, status: 'unknown', observed_at: new Date(Date.now() + 5_000).toISOString() }
+    await f.store.registerGatewayRunner(gatewayRunnerRecord('other-gw', generateKeyPairSync('ed25519').publicKey))
+    await f.store.putGatewayRunnerQuota('other-gw', unknown)
+    assert.deepEqual((await f.gateway.health()).quota, snapshot)
+  } finally {
+    await f.cleanup()
   }
 })

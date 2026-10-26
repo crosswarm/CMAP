@@ -51,7 +51,7 @@
     },
     "claim": {
       "title": "RunnerGatewayClaimV1",
-      "description": "POST /v1/gateway/claim. runner_id must equal x-cmap-runner-id. held_leases lists every lease the runner still executes (empty when idle); each is renewed.",
+      "description": "POST /v1/gateway/claim. runner_id must equal x-cmap-runner-id. held_leases lists every lease the runner still executes (empty when idle); each is renewed. quota (optional, ADR-0009) is the runner's latest account-level quota snapshot for its wrapped agent, read by a zero-quota probe on the runner host and sent with the claim like remote-runner.v1 health.quota; the control plane keeps the newest one per runner for routing. Omitted when nothing could be read (older runners too): the control plane then treats the quota as unknown. It is advisory for routing only.",
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "kind", "runner_id", "wait_seconds", "held_leases"],
@@ -60,7 +60,8 @@
         "kind": { "type": "string", "const": "claim" },
         "runner_id": { "$ref": "#/$defs/identifier" },
         "wait_seconds": { "type": "integer", "minimum": 1, "maximum": 50 },
-        "held_leases": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/leaseId" } }
+        "held_leases": { "type": "array", "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/$defs/leaseId" } },
+        "quota": { "$ref": "quota-snapshot.v1.schema.json" }
       }
     },
     "claimResult": {

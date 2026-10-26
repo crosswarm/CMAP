@@ -89,6 +89,7 @@ export class MemoryStore implements Store {
   readonly #locks = new Map<string, ResourceLock>()
   readonly #quota: QuotaSnapshotV1[] = []
   readonly #gatewayRunners = new Map<string, GatewayRunner>()
+  readonly #gatewayRunnerQuotas = new Map<string, QuotaSnapshotV1>()
   readonly #enrollmentTokens = new Map<string, EnrollmentToken>()
   readonly #gatewayLeases = new Map<string, GatewayLease>()
   /** idempotencyKey → 已产生的 event_id，用于重复投递去重 */
@@ -604,6 +605,16 @@ export class MemoryStore implements Store {
     const runner = this.#gatewayRunners.get(runnerId)
     if (!runner || (runner.last_seen_at !== null && Date.parse(runner.last_seen_at) >= Date.parse(at))) return
     this.#gatewayRunners.set(runnerId, { ...runner, last_seen_at: at })
+  }
+
+  async putGatewayRunnerQuota(runnerId: string, quota: QuotaSnapshotV1): Promise<void> {
+    const prior = this.#gatewayRunnerQuotas.get(runnerId)
+    if (!this.#gatewayRunners.has(runnerId) || (prior && Date.parse(prior.observed_at) > Date.parse(quota.observed_at))) return
+    this.#gatewayRunnerQuotas.set(runnerId, structuredClone(quota))
+  }
+
+  async listGatewayRunnerQuotas(): Promise<readonly QuotaSnapshotV1[]> {
+    return [...this.#gatewayRunnerQuotas].filter(([id]) => this.#gatewayRunners.get(id)?.revoked_at === null).map(([, q]) => structuredClone(q))
   }
 
   async enqueueGatewayLease(input: EnqueueGatewayLeaseInput): Promise<GatewayLease> {
