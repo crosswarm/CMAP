@@ -63,6 +63,8 @@ export const makeFakeCodex = async (dir: string, opts: { artifactBytes?: number 
 const fs = require('node:fs')
 const path = require('node:path')
 if (process.argv.includes('--version')) { console.log('fake-codex 0.0.0'); process.exit(0) }
+// 沙箱自检（出站 runner 启动时）：假 codex 本无隔离，只回应自检协议；真实隔离由 codex-sandbox-selfcheck 与 P4 测试覆盖
+if (process.argv[2] === 'sandbox') { console.log('WORKSPACE_OK'); console.log('DENY_OK'); process.exit(0) }
 if (!process.env.CMAP_TASK_ID) process.exit(0)
 const args = process.argv.slice(2)
 fs.appendFileSync(${JSON.stringify(launches)}, String(process.pid) + '\\n')

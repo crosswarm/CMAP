@@ -184,3 +184,10 @@
 
 - 主机外备份：`078e2aa`/`e214329` 新增 CrossMini launchd 定时任务 `com.cmap.backup`（03:40，账本与 Temporal 库 + 拉回 qcl Keycloak 备份）与 `com.cmap.backup-mirror`（04:10，`/usr/bin/rsync -a --delete` 镜像到 iCloud Drive `CMAP-backups`）。镜像单独以 rsync 为 launchd 程序，TCC 只需给 `/usr/bin/rsync` 完全磁盘访问权限（Cross 2026-10-26 授权），不放开 `/bin/sh`。
 - 实测：授权前 launchd 运行报 `Operation not permitted`；授权后 kickstart 退出码 0，`diff -r` 本地与 iCloud 副本一致（20 个文件），iCloud 中最新账本 dump 与 Keycloak dump 经 `pg_restore -l` 分别列出 93、100 个表数据项。
+
+## ADR-0010 多服务端加入与 Linux runner（2026-10-26）
+
+- 多服务端（`861a36e`..`6404900`）：登记记录绑定服务端 origin、不一致拒绝启动，领取 401 明确打印；出站模式强制 `CMAP_WORK_ROOT` 并写所属服务端标记；Worker `CMAP_PERMIT_ISSUER` 可配置（默认不变）；出站 runner 随领取上报额度，`GatewayRunnerAdapter.health` 可见；runner 服务名可参数化（默认 `com.cmap.runner`）。
+- Linux（`da2b27d`）：OrbStack Ubuntu 26.04 aarch64 实测 Codex 权限档经 bubblewrap 生效（HOME 下工作区外拒读含符号链接、`:read-only` 只读、回环与外网不可达、hook 目录只读）。发现并修复：Linux 上 codex 在沙箱内重新执行自身二进制，二进制在 HOME 下被拒读即失败 → 放行 `codexBinRoot` 与 npm 全局前缀。Codex health 加沙箱自检，出站 runner 自检不过拒绝启动。P4-05b/P4-06 的 Codex 部分跨平台真实执行。
+- 验证：macOS `npm run check` 全过（564、145、105、353）；Linux `npm test` 551 通过 13 跳过（Kimi seatbelt、YonWork 运行时仅 macOS）、`test:api` 145/145、`e2e-runner-gateway --simulate`（真实 runner 出站进程）通过。systemd 用户模板单元在 VM 中加载并运行到登记步骤。
+- 未做：真实 Linux 主机上的出站真任务；未部署（Worker 的沙箱自检随下次发布生效）；跨服务端额度协调；加入他人服务端的系统用户隔离只写成部署要求。
