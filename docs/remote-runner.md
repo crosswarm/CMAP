@@ -310,6 +310,53 @@ runner 不监听端口，主动以 HTTPS 长轮询控制面 API（`POST /v1/gate
 - **同一 owner 多台 runner**：路由在满足上述条件的 runner 里取 `last_seen_at` 最新的一台（即最近一次领取的），任务不能指定某一台。要固定到某台机器，只让那一台在线。
 - **Node 版本**：已验证 Node v25.2.1 / v25.6.0（undici 7）与 v26.4.0（undici 8）。网关客户端用 `node:http`/`node:https`（HTTP/1.1）而不是 `fetch`：Node 26 的 `fetch` 对 https 默认协商 HTTP/2，长轮询领取在途时，同一连接上的回报会排到领取返回之后才发出，签名超出 ±2 秒窗口被 401（2026-10-23 生产实测，受理迟到导致 `DISPATCH_UNCERTAIN`）。回归测试见 `tests/adapter/runner-outbound-transport.test.ts`。
 
+## Linux runner（systemd，ADR-0010）
+
+状态：🟡 OrbStack Ubuntu 26.04（aarch64，内核 7.2.9）实测 Codex 隔离通过（2026-10-26），未在真实 Linux 主机上跑过出站任务。
+
+- **前提**：Node ≥ 24；codex 官方 Linux 构建（自带 bwrap）。Codex 在 Linux 上用 bubblewrap 套权限档，实测与 macOS 一致：HOME 下工作区外拒读（含经符号链接）、工作区可写、`:read-only` 档只读、本机回环端口与外网不可达、hook 目录只读。发行版若限制非特权 user namespace，沙箱可能起不来——runner 启动时的沙箱自检（`CodexAdapterOptions.sandboxSelfCheck`）会因此拒绝启动，不会带着失效的隔离接任务。
+- **codex 装在 HOME 下**（例如 `~/.local/bin/codex` 链到解包目录）没问题：Linux 上 codex 会在沙箱内重新执行自身二进制，Adapter 放行 codex 解析后的所在目录（`codexBinRoot`）与 npm 全局前缀（`homeToolchainRoots`）；不放行 PATH 里其他链接的目标。
+- **工作目录必须在 HOME 下**：拒读清单只覆盖 HOME（ADR-0008 残余风险），`CMAP_WORK_ROOT` 放到 `/srv`、`/var/lib` 等处时其他任务的工作区与 `.runs` 不在拒绝范围内。
+- **Kimi、YonWork 不支持 Linux**：两者在 Worker 侧（CrossMini），Kimi 依赖 seatbelt、在非 macOS 上拒绝运行；YonWork 运行时关联只按 macOS 布局查找。
+
+每套服务端一个实例（多服务端见 ADR-0010）：模板单元 `~/.config/systemd/user/cmap-runner@.service`，实例名即服务端名：
+
+```ini
+[Unit]
+Description=CMAP runner (%i)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/CMAP
+EnvironmentFile=%h/.cmap/runner/%i/runner.env
+ExecStart=%h/.local/node/bin/node apps/runner/src/main.ts
+Restart=always
+RestartSec=10
+UMask=0077
+
+[Install]
+WantedBy=default.target
+```
+
+`~/.cmap/runner/<name>/runner.env`（0600；EnvironmentFile 不展开 `%h`，路径写绝对路径；不放令牌以外的秘密，令牌登记后删除）：
+
+```sh
+PATH=/home/<user>/.local/bin:/home/<user>/.local/node/bin:/usr/bin:/bin
+CMAP_CONTROL_PLANE_URL=https://cmap.example.com
+CMAP_RUNNER_KEY_FILE=/home/<user>/.cmap/runner/<name>/runner.key
+CMAP_PERMIT_PUBLIC_KEY_FILE=/home/<user>/.cmap/runner/<name>/permit.pub
+CMAP_PERMIT_ISSUER=<该服务端的签发方>
+CMAP_WORK_ROOT=/home/<user>/.cmap/runner/<name>/work
+CMAP_CODEX_MODEL=<模型>
+CMAP_RUNNER_ENROLL_TOKEN=<仅首次>
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user enable --now cmap-runner@<name>
+```
+
+`loginctl enable-linger <user>` 让用户单元在未登录时也运行；日志 `journalctl --user -u cmap-runner@<name>`。TMPDIR 用系统默认（`/tmp`），不需要 macOS 那样改到物理路径。
+
 ## 已知边界
 
 - 所有端点已有应用层请求认证与应答签名；按 ADR-0006 修订 1 **不配置 Tailscale ACL**。残余风险已接受：认证只防伪造、篡改与重放，不防同 tailnet 节点对 lap 端口的连接尝试与拒绝服务（未签名请求读完头就 401，但仍占连接）。控制面 5433/7233 只监听 127.0.0.1。
